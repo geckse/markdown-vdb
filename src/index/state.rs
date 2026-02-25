@@ -8,7 +8,6 @@ use usearch::Index as HnswIndex;
 use tracing::debug;
 
 use crate::chunker::Chunk;
-use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index::storage;
 use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
@@ -60,14 +59,14 @@ impl Index {
     }
 
     /// Create a new, empty index file at the given path.
-    pub fn create(path: &Path, config: &Config) -> Result<Self> {
+    pub fn create(path: &Path, config: &EmbeddingConfig) -> Result<Self> {
         let metadata = IndexMetadata {
             chunks: HashMap::new(),
             files: HashMap::new(),
             embedding_config: EmbeddingConfig {
-                provider: format!("{:?}", config.embedding_provider),
-                model: config.embedding_model.clone(),
-                dimensions: config.embedding_dimensions,
+                provider: config.provider.clone(),
+                model: config.model.clone(),
+                dimensions: config.dimensions,
             },
             last_updated: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -75,7 +74,7 @@ impl Index {
                 .unwrap_or(0),
         };
 
-        let hnsw = storage::create_hnsw(config.embedding_dimensions)?;
+        let hnsw = storage::create_hnsw(config.dimensions)?;
         hnsw.reserve(10)
             .map_err(|e| Error::Serialization(format!("usearch reserve: {e}")))?;
 
@@ -94,7 +93,7 @@ impl Index {
     }
 
     /// Open an existing index or create a new one if it doesn't exist.
-    pub fn open_or_create(path: &Path, config: &Config) -> Result<Self> {
+    pub fn open_or_create(path: &Path, config: &EmbeddingConfig) -> Result<Self> {
         match Self::open(path) {
             Ok(index) => Ok(index),
             Err(Error::IndexNotFound { .. }) => Self::create(path, config),
@@ -291,27 +290,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn test_config() -> Config {
-        // Build a minimal config for testing. We bypass Config::load to avoid env var issues.
-        Config {
-            embedding_provider: crate::config::EmbeddingProviderType::OpenAI,
-            embedding_model: "test-model".to_string(),
-            embedding_dimensions: 128,
-            embedding_batch_size: 100,
-            openai_api_key: None,
-            ollama_host: "http://localhost:11434".to_string(),
-            embedding_endpoint: None,
-            source_dirs: vec![PathBuf::from(".")],
-            index_file: PathBuf::from(".markdownvdb.index"),
-            ignore_patterns: vec![],
-            watch_enabled: false,
-            watch_debounce_ms: 300,
-            chunk_max_tokens: 512,
-            chunk_overlap_tokens: 50,
-            clustering_enabled: false,
-            clustering_rebalance_threshold: 50,
-            search_default_limit: 10,
-            search_min_score: 0.0,
+    fn test_config() -> EmbeddingConfig {
+        EmbeddingConfig {
+            provider: "OpenAI".to_string(),
+            model: "test-model".to_string(),
+            dimensions: 128,
         }
     }
 

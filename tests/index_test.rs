@@ -4,10 +4,8 @@ use std::sync::Arc;
 use std::thread;
 
 use mdvdb::chunker::Chunk;
-use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::error::Error;
-use mdvdb::index::state::Index;
-use mdvdb::index::EmbeddingConfig;
+use mdvdb::index::{EmbeddingConfig, Index};
 use mdvdb::parser::MarkdownFile;
 use tempfile::TempDir;
 
@@ -15,35 +13,16 @@ use tempfile::TempDir;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn test_config() -> Config {
-    Config {
-        embedding_provider: EmbeddingProviderType::OpenAI,
-        embedding_model: "test-model".to_string(),
-        embedding_dimensions: 8,
-        embedding_batch_size: 100,
-        openai_api_key: None,
-        ollama_host: "http://localhost:11434".to_string(),
-        embedding_endpoint: None,
-        source_dirs: vec![PathBuf::from(".")],
-        index_file: PathBuf::from(".markdownvdb.index"),
-        ignore_patterns: vec![],
-        watch_enabled: false,
-        watch_debounce_ms: 300,
-        chunk_max_tokens: 512,
-        chunk_overlap_tokens: 50,
-        clustering_enabled: false,
-        clustering_rebalance_threshold: 50,
-        search_default_limit: 10,
-        search_min_score: 0.0,
-    }
-}
-
-fn test_embedding_config() -> EmbeddingConfig {
+fn test_config() -> EmbeddingConfig {
     EmbeddingConfig {
         provider: "OpenAI".to_string(),
         model: "test-model".to_string(),
         dimensions: 8,
     }
+}
+
+fn test_embedding_config() -> EmbeddingConfig {
+    test_config()
 }
 
 fn fake_markdown_file(path: &str, hash: &str) -> MarkdownFile {
