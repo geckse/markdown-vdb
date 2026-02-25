@@ -1,0 +1,11 @@
+# Auto Claude data directory
+.auto-claude/
+
+# Rust build artifacts
+/target
+
+# Project artifacts
+.markdownvdb.index
+
+# OS
+.DS_Store
