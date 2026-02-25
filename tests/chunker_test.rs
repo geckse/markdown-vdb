@@ -25,23 +25,39 @@ fn parse_then_chunk_simple() {
     for (i, chunk) in chunks.iter().enumerate() {
         assert_eq!(chunk.chunk_index, i);
         assert_eq!(chunk.id, format!("tests/fixtures/simple.md#{i}"));
-        assert!(!chunk.is_sub_split, "simple.md is small, no sub-splitting expected");
+        assert!(
+            !chunk.is_sub_split,
+            "simple.md is small, no sub-splitting expected"
+        );
     }
 
     // Verify heading hierarchies exist and h2 sections nest under h1
-    let installation = chunks.iter().find(|c| c.heading_hierarchy.contains(&"Installation".to_string()));
+    let installation = chunks
+        .iter()
+        .find(|c| c.heading_hierarchy.contains(&"Installation".to_string()));
     assert!(installation.is_some(), "should have an Installation chunk");
     let inst = installation.unwrap();
-    assert_eq!(inst.heading_hierarchy, vec!["Getting Started", "Installation"]);
+    assert_eq!(
+        inst.heading_hierarchy,
+        vec!["Getting Started", "Installation"]
+    );
 
     // h3 Required Settings should nest under Configuration
-    let required = chunks.iter().find(|c| c.heading_hierarchy.contains(&"Required Settings".to_string()));
+    let required = chunks.iter().find(|c| {
+        c.heading_hierarchy
+            .contains(&"Required Settings".to_string())
+    });
     assert!(required.is_some(), "should have a Required Settings chunk");
     let req = required.unwrap();
-    assert_eq!(req.heading_hierarchy, vec!["Getting Started", "Configuration", "Required Settings"]);
+    assert_eq!(
+        req.heading_hierarchy,
+        vec!["Getting Started", "Configuration", "Required Settings"]
+    );
 
     // Usage resets to h2 level
-    let usage = chunks.iter().find(|c| c.heading_hierarchy.contains(&"Usage".to_string()));
+    let usage = chunks
+        .iter()
+        .find(|c| c.heading_hierarchy.contains(&"Usage".to_string()));
     assert!(usage.is_some(), "should have a Usage chunk");
     let u = usage.unwrap();
     assert_eq!(u.heading_hierarchy, vec!["Getting Started", "Usage"]);
@@ -55,9 +71,9 @@ fn parse_then_chunk_deep_headings() {
     assert!(!chunks.is_empty(), "should produce chunks");
 
     // Find the deepest chunk (h6) and verify full hierarchy breadcrumb
-    let h6_chunk = chunks.iter().find(|c| {
-        c.heading_hierarchy.contains(&"Heading Level 6".to_string())
-    });
+    let h6_chunk = chunks
+        .iter()
+        .find(|c| c.heading_hierarchy.contains(&"Heading Level 6".to_string()));
     assert!(h6_chunk.is_some(), "should have a chunk for h6");
     let h6 = h6_chunk.unwrap();
     assert_eq!(
@@ -83,10 +99,16 @@ fn parse_then_chunk_deep_headings() {
 #[test]
 fn parse_then_chunk_no_frontmatter() {
     let file = parse_fixture("no-frontmatter.md");
-    assert!(file.frontmatter.is_none(), "fixture should have no frontmatter");
+    assert!(
+        file.frontmatter.is_none(),
+        "fixture should have no frontmatter"
+    );
 
     let chunks = chunk_document(&file, 1024, 0).unwrap();
-    assert!(!chunks.is_empty(), "should produce chunks without frontmatter");
+    assert!(
+        !chunks.is_empty(),
+        "should produce chunks without frontmatter"
+    );
 
     // Verify chunk IDs use correct path
     for (i, chunk) in chunks.iter().enumerate() {
@@ -94,7 +116,9 @@ fn parse_then_chunk_no_frontmatter() {
     }
 
     // Should have sections for h1, h2, h2
-    let section_one = chunks.iter().find(|c| c.heading_hierarchy.contains(&"Section One".to_string()));
+    let section_one = chunks
+        .iter()
+        .find(|c| c.heading_hierarchy.contains(&"Section One".to_string()));
     assert!(section_one.is_some(), "should have Section One chunk");
 }
 
@@ -114,7 +138,10 @@ fn various_max_tokens() {
 
     for max_tokens in [64, 128, 512, 1024] {
         let chunks = chunk_document(&file, max_tokens, 0).unwrap();
-        assert!(!chunks.is_empty(), "max_tokens={max_tokens} should produce chunks");
+        assert!(
+            !chunks.is_empty(),
+            "max_tokens={max_tokens} should produce chunks"
+        );
 
         // All chunks should respect token limit (non-sub-split chunks fit within max_tokens)
         for chunk in &chunks {
@@ -129,7 +156,10 @@ fn various_max_tokens() {
 
         // Chunk indices should be sequential
         for (i, chunk) in chunks.iter().enumerate() {
-            assert_eq!(chunk.chunk_index, i, "max_tokens={max_tokens}: chunk index mismatch");
+            assert_eq!(
+                chunk.chunk_index, i,
+                "max_tokens={max_tokens}: chunk index mismatch"
+            );
         }
     }
 

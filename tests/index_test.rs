@@ -275,9 +275,7 @@ fn test_search_returns_correct_result() {
 
     // Use a known vector
     let known_vec = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    index
-        .upsert(&file, &chunks, &[known_vec.clone()])
-        .unwrap();
+    index.upsert(&file, &chunks, &[known_vec.clone()]).unwrap();
 
     // Search with the same vector — should find it
     let results = index.search(&known_vec, 1).unwrap();
@@ -443,10 +441,7 @@ fn test_atomic_save() {
 
     // After save the .tmp file should not exist (renamed to final)
     let tmp_path = path.with_extension("tmp");
-    assert!(
-        !tmp_path.exists(),
-        ".tmp file should not remain after save"
-    );
+    assert!(!tmp_path.exists(), ".tmp file should not remain after save");
     assert!(path.exists(), "final index file should exist");
 }
 

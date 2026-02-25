@@ -132,7 +132,9 @@ impl Index {
         let current_size = state.hnsw.size();
         let needed = current_size + chunks.len();
         if needed > state.hnsw.capacity() {
-            state.hnsw.reserve(needed.max(current_size * 2))
+            state
+                .hnsw
+                .reserve(needed.max(current_size * 2))
                 .map_err(|e| Error::Serialization(format!("usearch reserve: {e}")))?;
         }
 
@@ -142,7 +144,9 @@ impl Index {
             let key = state.next_key;
             state.next_key += 1;
 
-            state.hnsw.add(key, &embeddings[i])
+            state
+                .hnsw
+                .add(key, &embeddings[i])
                 .map_err(|e| Error::Serialization(format!("usearch add: {e}")))?;
 
             let stored_chunk = StoredChunk::from(chunk);
@@ -200,9 +204,7 @@ impl Index {
     /// Return a status snapshot of the index.
     pub fn status(&self) -> IndexStatus {
         let state = self.state.read();
-        let file_size = std::fs::metadata(&self.path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
 
         IndexStatus {
             document_count: state.metadata.files.len(),
@@ -224,15 +226,14 @@ impl Index {
             return Ok(Vec::new());
         }
 
-        let results = state.hnsw.search(query, limit)
+        let results = state
+            .hnsw
+            .search(query, limit)
             .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
 
         // Build reverse lookup: key → chunk_id.
-        let key_to_id: HashMap<u64, &String> = state
-            .id_to_key
-            .iter()
-            .map(|(id, key)| (*key, id))
-            .collect();
+        let key_to_id: HashMap<u64, &String> =
+            state.id_to_key.iter().map(|(id, key)| (*key, id)).collect();
 
         let mut output = Vec::with_capacity(results.keys.len());
         for (key, distance) in results.keys.iter().zip(results.distances.iter()) {

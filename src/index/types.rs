@@ -43,7 +43,9 @@ pub struct StoredFile {
 }
 
 /// Embedding configuration stored in the index and used for JSON output.
-#[derive(Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, serde::Serialize)]
+#[derive(
+    Debug, Clone, PartialEq, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, serde::Serialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct EmbeddingConfig {
     /// Provider name (e.g. "OpenAI", "Ollama", "Custom").
