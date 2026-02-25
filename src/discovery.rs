@@ -69,7 +69,7 @@ impl FileDiscovery {
                 let entry = entry.map_err(|e| {
                     let msg = e.to_string();
                     Error::Io(e.into_io_error().unwrap_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::Other, msg)
+                        std::io::Error::other(msg)
                     }))
                 })?;
 
@@ -86,8 +86,7 @@ impl FileDiscovery {
                 // Convert to relative path from project root
                 let relative = path
                     .strip_prefix(&self.project_root)
-                    .map_err(|_| Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    .map_err(|_| Error::Io(std::io::Error::other(
                         format!("path {} is not under project root {}", path.display(), self.project_root.display()),
                     )))?;
 

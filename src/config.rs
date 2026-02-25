@@ -219,6 +219,10 @@ fn parse_comma_list_string(key: &str, default: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex to serialize tests that read/write environment variables.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn provider_type_case_insensitive() {
@@ -241,6 +245,7 @@ mod tests {
 
     #[test]
     fn default_values_match_spec() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         // Clear all MDVDB env vars to ensure defaults
         let vars_to_clear = [
             "MDVDB_EMBEDDING_PROVIDER", "MDVDB_EMBEDDING_MODEL",
@@ -281,6 +286,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_dimensions() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "0");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
@@ -290,6 +296,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_batch_size() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_EMBEDDING_BATCH_SIZE", "0");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_BATCH_SIZE");
@@ -299,6 +306,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_overlap_exceeds_max() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_CHUNK_MAX_TOKENS", "10");
         std::env::set_var("MDVDB_CHUNK_OVERLAP_TOKENS", "20");
         let result = Config::load(Path::new("/nonexistent"));
@@ -310,6 +318,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_score_out_of_range() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_SEARCH_MIN_SCORE", "1.5");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_SEARCH_MIN_SCORE");
@@ -319,6 +328,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_negative_score() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_SEARCH_MIN_SCORE", "-0.1");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_SEARCH_MIN_SCORE");
@@ -327,6 +337,7 @@ mod tests {
 
     #[test]
     fn parse_error_on_non_numeric() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "abc");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
@@ -336,6 +347,7 @@ mod tests {
 
     #[test]
     fn comma_separated_source_dirs() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_SOURCE_DIRS", " docs , notes ");
         let dirs = parse_comma_list_path("MDVDB_SOURCE_DIRS", vec![]);
         std::env::remove_var("MDVDB_SOURCE_DIRS");
@@ -344,6 +356,7 @@ mod tests {
 
     #[test]
     fn comma_separated_ignore_patterns() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         std::env::set_var("MDVDB_IGNORE_PATTERNS", " *.tmp , .git ");
         let patterns = parse_comma_list_string("MDVDB_IGNORE_PATTERNS", vec![]);
         std::env::remove_var("MDVDB_IGNORE_PATTERNS");
