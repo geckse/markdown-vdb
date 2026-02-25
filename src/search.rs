@@ -121,7 +121,7 @@ pub async fn search(
     }
 
     // Embed the query text.
-    let embeddings = provider.embed_batch(&[query.query.clone()]).await?;
+    let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
     let query_vector = &embeddings[0];
 
     // Over-fetch 3x to account for filtering.
