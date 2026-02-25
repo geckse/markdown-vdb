@@ -215,6 +215,52 @@ impl Index {
         }
     }
 
+    /// Search for nearest vectors, returning `(chunk_id, cosine_similarity_score)` pairs.
+    ///
+    /// Converts usearch distance to cosine similarity: `score = 1.0 - distance`.
+    /// Results are sorted by score descending (most similar first).
+    pub fn search_vectors(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f64)>> {
+        let state = self.state.read();
+
+        if state.hnsw.size() == 0 {
+            return Ok(Vec::new());
+        }
+
+        let results = state
+            .hnsw
+            .search(query, limit)
+            .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
+
+        // Build reverse lookup: key → chunk_id.
+        let key_to_id: HashMap<u64, &String> =
+            state.id_to_key.iter().map(|(id, key)| (*key, id)).collect();
+
+        let mut output = Vec::with_capacity(results.keys.len());
+        for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
+            if let Some(chunk_id) = key_to_id.get(key) {
+                let score = 1.0 - *distance as f64;
+                output.push(((*chunk_id).clone(), score));
+            }
+        }
+
+        // Sort by score descending.
+        output.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        Ok(output)
+    }
+
+    /// Get a stored chunk by its ID.
+    pub fn get_chunk(&self, chunk_id: &str) -> Option<StoredChunk> {
+        let state = self.state.read();
+        state.metadata.chunks.get(chunk_id).cloned()
+    }
+
+    /// Get stored file metadata by relative path.
+    pub fn get_file_metadata(&self, path: &str) -> Option<StoredFile> {
+        let state = self.state.read();
+        state.metadata.files.get(path).cloned()
+    }
+
     /// Search the HNSW index for the nearest neighbors to the query vector.
     ///
     /// Returns a list of `(chunk_id, distance)` pairs sorted by distance.

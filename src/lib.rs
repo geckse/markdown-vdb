@@ -6,6 +6,7 @@ pub mod error;
 pub mod index;
 pub mod logging;
 pub mod parser;
+pub mod search;
 
 pub use error::Error;
 
