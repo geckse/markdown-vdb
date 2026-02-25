@@ -60,53 +60,40 @@ impl Config {
         let embedding_provider = env_or_default("MDVDB_EMBEDDING_PROVIDER", "openai")
             .parse::<EmbeddingProviderType>()?;
 
-        let embedding_model =
-            env_or_default("MDVDB_EMBEDDING_MODEL", "text-embedding-3-small");
+        let embedding_model = env_or_default("MDVDB_EMBEDDING_MODEL", "text-embedding-3-small");
 
-        let embedding_dimensions =
-            parse_env::<usize>("MDVDB_EMBEDDING_DIMENSIONS", 1536)?;
+        let embedding_dimensions = parse_env::<usize>("MDVDB_EMBEDDING_DIMENSIONS", 1536)?;
 
-        let embedding_batch_size =
-            parse_env::<usize>("MDVDB_EMBEDDING_BATCH_SIZE", 100)?;
+        let embedding_batch_size = parse_env::<usize>("MDVDB_EMBEDDING_BATCH_SIZE", 100)?;
 
         let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
 
-        let ollama_host =
-            env_or_default("OLLAMA_HOST", "http://localhost:11434");
+        let ollama_host = env_or_default("OLLAMA_HOST", "http://localhost:11434");
 
         let embedding_endpoint = std::env::var("MDVDB_EMBEDDING_ENDPOINT").ok();
 
         let source_dirs = parse_comma_list_path("MDVDB_SOURCE_DIRS", vec![PathBuf::from(".")]);
 
-        let index_file = PathBuf::from(
-            env_or_default("MDVDB_INDEX_FILE", ".markdownvdb.index"),
-        );
+        let index_file = PathBuf::from(env_or_default("MDVDB_INDEX_FILE", ".markdownvdb.index"));
 
-        let ignore_patterns =
-            parse_comma_list_string("MDVDB_IGNORE_PATTERNS", vec![]);
+        let ignore_patterns = parse_comma_list_string("MDVDB_IGNORE_PATTERNS", vec![]);
 
         let watch_enabled = parse_env_bool("MDVDB_WATCH", true)?;
 
-        let watch_debounce_ms =
-            parse_env::<u64>("MDVDB_WATCH_DEBOUNCE_MS", 300)?;
+        let watch_debounce_ms = parse_env::<u64>("MDVDB_WATCH_DEBOUNCE_MS", 300)?;
 
-        let chunk_max_tokens =
-            parse_env::<usize>("MDVDB_CHUNK_MAX_TOKENS", 512)?;
+        let chunk_max_tokens = parse_env::<usize>("MDVDB_CHUNK_MAX_TOKENS", 512)?;
 
-        let chunk_overlap_tokens =
-            parse_env::<usize>("MDVDB_CHUNK_OVERLAP_TOKENS", 50)?;
+        let chunk_overlap_tokens = parse_env::<usize>("MDVDB_CHUNK_OVERLAP_TOKENS", 50)?;
 
-        let clustering_enabled =
-            parse_env_bool("MDVDB_CLUSTERING_ENABLED", true)?;
+        let clustering_enabled = parse_env_bool("MDVDB_CLUSTERING_ENABLED", true)?;
 
         let clustering_rebalance_threshold =
             parse_env::<usize>("MDVDB_CLUSTERING_REBALANCE_THRESHOLD", 50)?;
 
-        let search_default_limit =
-            parse_env::<usize>("MDVDB_SEARCH_DEFAULT_LIMIT", 10)?;
+        let search_default_limit = parse_env::<usize>("MDVDB_SEARCH_DEFAULT_LIMIT", 10)?;
 
-        let search_min_score =
-            parse_env::<f64>("MDVDB_SEARCH_MIN_SCORE", 0.0)?;
+        let search_min_score = parse_env::<f64>("MDVDB_SEARCH_MIN_SCORE", 0.0)?;
 
         let config = Self {
             embedding_provider,
@@ -136,14 +123,10 @@ impl Config {
     /// Validate constraint invariants on the loaded config.
     fn validate(&self) -> Result<(), Error> {
         if self.embedding_dimensions == 0 {
-            return Err(Error::Config(
-                "embedding_dimensions must be > 0".into(),
-            ));
+            return Err(Error::Config("embedding_dimensions must be > 0".into()));
         }
         if self.embedding_batch_size == 0 {
-            return Err(Error::Config(
-                "embedding_batch_size must be > 0".into(),
-            ));
+            return Err(Error::Config("embedding_batch_size must be > 0".into()));
         }
         if self.chunk_overlap_tokens >= self.chunk_max_tokens {
             return Err(Error::Config(format!(
@@ -173,9 +156,9 @@ where
     T::Err: std::fmt::Display,
 {
     match std::env::var(key) {
-        Ok(val) => val.parse::<T>().map_err(|e| {
-            Error::Config(format!("failed to parse {key}='{val}': {e}"))
-        }),
+        Ok(val) => val
+            .parse::<T>()
+            .map_err(|e| Error::Config(format!("failed to parse {key}='{val}': {e}"))),
         Err(_) => Ok(default),
     }
 }
@@ -197,10 +180,9 @@ fn parse_env_bool(key: &str, default: bool) -> Result<bool, Error> {
 /// Parse a comma-separated env var into Vec<PathBuf>, trimming whitespace.
 fn parse_comma_list_path(key: &str, default: Vec<PathBuf>) -> Vec<PathBuf> {
     match std::env::var(key) {
-        Ok(val) if !val.trim().is_empty() => val
-            .split(',')
-            .map(|s| PathBuf::from(s.trim()))
-            .collect(),
+        Ok(val) if !val.trim().is_empty() => {
+            val.split(',').map(|s| PathBuf::from(s.trim())).collect()
+        }
         _ => default,
     }
 }
@@ -208,10 +190,7 @@ fn parse_comma_list_path(key: &str, default: Vec<PathBuf>) -> Vec<PathBuf> {
 /// Parse a comma-separated env var into Vec<String>, trimming whitespace.
 fn parse_comma_list_string(key: &str, default: Vec<String>) -> Vec<String> {
     match std::env::var(key) {
-        Ok(val) if !val.trim().is_empty() => val
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect(),
+        Ok(val) if !val.trim().is_empty() => val.split(',').map(|s| s.trim().to_string()).collect(),
         _ => default,
     }
 }
@@ -226,13 +205,34 @@ mod tests {
 
     #[test]
     fn provider_type_case_insensitive() {
-        assert_eq!("openai".parse::<EmbeddingProviderType>().unwrap(), EmbeddingProviderType::OpenAI);
-        assert_eq!("OpenAI".parse::<EmbeddingProviderType>().unwrap(), EmbeddingProviderType::OpenAI);
-        assert_eq!("OPENAI".parse::<EmbeddingProviderType>().unwrap(), EmbeddingProviderType::OpenAI);
-        assert_eq!("ollama".parse::<EmbeddingProviderType>().unwrap(), EmbeddingProviderType::Ollama);
-        assert_eq!("Ollama".parse::<EmbeddingProviderType>().unwrap(), EmbeddingProviderType::Ollama);
-        assert_eq!("custom".parse::<EmbeddingProviderType>().unwrap(), EmbeddingProviderType::Custom);
-        assert_eq!("CUSTOM".parse::<EmbeddingProviderType>().unwrap(), EmbeddingProviderType::Custom);
+        assert_eq!(
+            "openai".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::OpenAI
+        );
+        assert_eq!(
+            "OpenAI".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::OpenAI
+        );
+        assert_eq!(
+            "OPENAI".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::OpenAI
+        );
+        assert_eq!(
+            "ollama".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::Ollama
+        );
+        assert_eq!(
+            "Ollama".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::Ollama
+        );
+        assert_eq!(
+            "custom".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::Custom
+        );
+        assert_eq!(
+            "CUSTOM".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::Custom
+        );
     }
 
     #[test]
@@ -248,14 +248,24 @@ mod tests {
         let _lock = ENV_MUTEX.lock().unwrap();
         // Clear all MDVDB env vars to ensure defaults
         let vars_to_clear = [
-            "MDVDB_EMBEDDING_PROVIDER", "MDVDB_EMBEDDING_MODEL",
-            "MDVDB_EMBEDDING_DIMENSIONS", "MDVDB_EMBEDDING_BATCH_SIZE",
-            "OPENAI_API_KEY", "OLLAMA_HOST", "MDVDB_EMBEDDING_ENDPOINT",
-            "MDVDB_SOURCE_DIRS", "MDVDB_INDEX_FILE", "MDVDB_IGNORE_PATTERNS",
-            "MDVDB_WATCH", "MDVDB_WATCH_DEBOUNCE_MS",
-            "MDVDB_CHUNK_MAX_TOKENS", "MDVDB_CHUNK_OVERLAP_TOKENS",
-            "MDVDB_CLUSTERING_ENABLED", "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
-            "MDVDB_SEARCH_DEFAULT_LIMIT", "MDVDB_SEARCH_MIN_SCORE",
+            "MDVDB_EMBEDDING_PROVIDER",
+            "MDVDB_EMBEDDING_MODEL",
+            "MDVDB_EMBEDDING_DIMENSIONS",
+            "MDVDB_EMBEDDING_BATCH_SIZE",
+            "OPENAI_API_KEY",
+            "OLLAMA_HOST",
+            "MDVDB_EMBEDDING_ENDPOINT",
+            "MDVDB_SOURCE_DIRS",
+            "MDVDB_INDEX_FILE",
+            "MDVDB_IGNORE_PATTERNS",
+            "MDVDB_WATCH",
+            "MDVDB_WATCH_DEBOUNCE_MS",
+            "MDVDB_CHUNK_MAX_TOKENS",
+            "MDVDB_CHUNK_OVERLAP_TOKENS",
+            "MDVDB_CLUSTERING_ENABLED",
+            "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
+            "MDVDB_SEARCH_DEFAULT_LIMIT",
+            "MDVDB_SEARCH_MIN_SCORE",
         ];
         for var in &vars_to_clear {
             std::env::remove_var(var);
@@ -291,7 +301,10 @@ mod tests {
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("embedding_dimensions"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("embedding_dimensions"));
     }
 
     #[test]
@@ -301,7 +314,10 @@ mod tests {
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_BATCH_SIZE");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("embedding_batch_size"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("embedding_batch_size"));
     }
 
     #[test]
@@ -313,7 +329,10 @@ mod tests {
         std::env::remove_var("MDVDB_CHUNK_MAX_TOKENS");
         std::env::remove_var("MDVDB_CHUNK_OVERLAP_TOKENS");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("chunk_overlap_tokens"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("chunk_overlap_tokens"));
     }
 
     #[test]
@@ -342,7 +361,10 @@ mod tests {
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("MDVDB_EMBEDDING_DIMENSIONS"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("MDVDB_EMBEDDING_DIMENSIONS"));
     }
 
     #[test]

@@ -72,7 +72,11 @@ impl EmbeddingProvider for OpenAIProvider {
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
                 let delay = std::time::Duration::from_secs(1 << (attempt - 1));
-                debug!(attempt, delay_secs = delay.as_secs(), "retrying embedding request");
+                debug!(
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    "retrying embedding request"
+                );
                 tokio::time::sleep(delay).await;
             }
 
@@ -94,7 +98,11 @@ impl EmbeddingProvider for OpenAIProvider {
             }
 
             if status == StatusCode::TOO_MANY_REQUESTS {
-                warn!("rate limited (429), attempt {}/{}", attempt + 1, MAX_RETRIES + 1);
+                warn!(
+                    "rate limited (429), attempt {}/{}",
+                    attempt + 1,
+                    MAX_RETRIES + 1
+                );
                 last_error = Some(Error::EmbeddingProvider("rate limited (429)".into()));
                 continue;
             }
@@ -193,12 +201,10 @@ mod tests {
 
     #[test]
     fn dimension_validation_catches_mismatch() {
-        let data = vec![
-            EmbeddingData {
-                embedding: vec![0.1, 0.2],
-                index: 0,
-            },
-        ];
+        let data = vec![EmbeddingData {
+            embedding: vec![0.1, 0.2],
+            index: 0,
+        }];
         let expected_dim = 3;
         for item in &data {
             assert_ne!(item.embedding.len(), expected_dim);
@@ -229,12 +235,8 @@ mod tests {
 
     #[test]
     fn provider_name_and_dimensions() {
-        let provider = OpenAIProvider::new(
-            "sk-test".into(),
-            "text-embedding-3-small".into(),
-            768,
-            None,
-        );
+        let provider =
+            OpenAIProvider::new("sk-test".into(), "text-embedding-3-small".into(), 768, None);
         assert_eq!(provider.name(), "openai");
         assert_eq!(provider.dimensions(), 768);
     }

@@ -100,7 +100,11 @@ pub async fn embed_chunks(
         let vectors = provider.embed_batch(&texts).await?;
         api_calls += 1;
 
-        tracing::info!(batch = batch_idx + 1, total = total_batches, "batch complete");
+        tracing::info!(
+            batch = batch_idx + 1,
+            total = total_batches,
+            "batch complete"
+        );
 
         for (chunk, vector) in batch.iter().zip(vectors) {
             embeddings.insert(chunk.id.clone(), vector);

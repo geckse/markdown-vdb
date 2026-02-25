@@ -68,9 +68,10 @@ impl FileDiscovery {
             for entry in walker {
                 let entry = entry.map_err(|e| {
                     let msg = e.to_string();
-                    Error::Io(e.into_io_error().unwrap_or_else(|| {
-                        std::io::Error::other(msg)
-                    }))
+                    Error::Io(
+                        e.into_io_error()
+                            .unwrap_or_else(|| std::io::Error::other(msg)),
+                    )
                 })?;
 
                 let path = entry.path();
@@ -84,11 +85,13 @@ impl FileDiscovery {
                 }
 
                 // Convert to relative path from project root
-                let relative = path
-                    .strip_prefix(&self.project_root)
-                    .map_err(|_| Error::Io(std::io::Error::other(
-                        format!("path {} is not under project root {}", path.display(), self.project_root.display()),
-                    )))?;
+                let relative = path.strip_prefix(&self.project_root).map_err(|_| {
+                    Error::Io(std::io::Error::other(format!(
+                        "path {} is not under project root {}",
+                        path.display(),
+                        self.project_root.display()
+                    )))
+                })?;
 
                 results.push(relative.to_path_buf());
             }
@@ -117,14 +120,14 @@ impl FileDiscovery {
             } else {
                 format!("!{pattern}")
             };
-            builder.add(&negated).map_err(|e| {
-                Error::Config(format!("invalid ignore pattern '{pattern}': {e}"))
-            })?;
+            builder
+                .add(&negated)
+                .map_err(|e| Error::Config(format!("invalid ignore pattern '{pattern}': {e}")))?;
         }
 
-        builder.build().map_err(|e| {
-            Error::Config(format!("failed to build override rules: {e}"))
-        })
+        builder
+            .build()
+            .map_err(|e| Error::Config(format!("failed to build override rules: {e}")))
     }
 }
 
@@ -140,7 +143,10 @@ mod tests {
     #[test]
     fn builtin_patterns_are_negations() {
         for pattern in BUILTIN_IGNORE_PATTERNS {
-            assert!(pattern.starts_with('!'), "pattern should start with '!': {pattern}");
+            assert!(
+                pattern.starts_with('!'),
+                "pattern should start with '!': {pattern}"
+            );
         }
     }
 

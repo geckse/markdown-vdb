@@ -24,9 +24,7 @@ pub fn create_provider(config: &Config) -> crate::Result<Box<dyn EmbeddingProvid
     match config.embedding_provider {
         EmbeddingProviderType::OpenAI => {
             let api_key = config.openai_api_key.as_ref().ok_or_else(|| {
-                Error::EmbeddingProvider(
-                    "OpenAI provider requires OPENAI_API_KEY to be set".into(),
-                )
+                Error::EmbeddingProvider("OpenAI provider requires OPENAI_API_KEY to be set".into())
             })?;
             Ok(Box::new(OpenAIProvider::new(
                 api_key.clone(),

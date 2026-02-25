@@ -41,9 +41,21 @@ fn base_config() -> Config {
 async fn test_embed_chunks_with_mock() {
     let provider = MockProvider::new(128);
     let chunks = vec![
-        make_chunk("docs/intro.md#0", "docs/intro.md", "# Introduction\n\nWelcome to the project."),
-        make_chunk("docs/intro.md#1", "docs/intro.md", "## Getting Started\n\nFollow these steps."),
-        make_chunk("docs/guide.md#0", "docs/guide.md", "# User Guide\n\nThis guide covers usage."),
+        make_chunk(
+            "docs/intro.md#0",
+            "docs/intro.md",
+            "# Introduction\n\nWelcome to the project.",
+        ),
+        make_chunk(
+            "docs/intro.md#1",
+            "docs/intro.md",
+            "## Getting Started\n\nFollow these steps.",
+        ),
+        make_chunk(
+            "docs/guide.md#0",
+            "docs/guide.md",
+            "# User Guide\n\nThis guide covers usage.",
+        ),
     ];
 
     let existing: HashMap<PathBuf, String> = HashMap::new();
@@ -67,7 +79,11 @@ async fn test_embed_chunks_with_mock() {
 
     // Correct dimensions
     for (_id, vector) in &result.embeddings {
-        assert_eq!(vector.len(), 128, "embedding vector should have 128 dimensions");
+        assert_eq!(
+            vector.len(),
+            128,
+            "embedding vector should have 128 dimensions"
+        );
     }
 }
 
@@ -119,10 +135,7 @@ fn test_provider_factory_from_config() {
 #[tokio::test]
 async fn test_mock_provider_integration() {
     let provider = MockProvider::new(256);
-    let texts = vec![
-        "Hello world".to_string(),
-        "Rust programming".to_string(),
-    ];
+    let texts = vec!["Hello world".to_string(), "Rust programming".to_string()];
 
     // First call
     let first = provider.embed_batch(&texts).await.unwrap();
@@ -132,14 +145,20 @@ async fn test_mock_provider_integration() {
 
     // Second call with same input — must produce identical results
     let second = provider.embed_batch(&texts).await.unwrap();
-    assert_eq!(first, second, "MockProvider must return consistent results across calls");
+    assert_eq!(
+        first, second,
+        "MockProvider must return consistent results across calls"
+    );
 
     // Different input produces different vectors
     let different = provider
         .embed_batch(&["Something else".to_string()])
         .await
         .unwrap();
-    assert_ne!(first[0], different[0], "different text should produce different vectors");
+    assert_ne!(
+        first[0], different[0],
+        "different text should produce different vectors"
+    );
 
     // Call count tracks correctly
     assert_eq!(provider.call_count(), 3);

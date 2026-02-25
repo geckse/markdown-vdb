@@ -56,17 +56,15 @@ impl EmbeddingProvider for OllamaProvider {
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
                 let delay = std::time::Duration::from_secs(1 << (attempt - 1));
-                debug!(attempt, delay_secs = delay.as_secs(), "retrying Ollama embedding request");
+                debug!(
+                    attempt,
+                    delay_secs = delay.as_secs(),
+                    "retrying Ollama embedding request"
+                );
                 tokio::time::sleep(delay).await;
             }
 
-            let response = match self
-                .client
-                .post(&endpoint)
-                .json(&request_body)
-                .send()
-                .await
-            {
+            let response = match self.client.post(&endpoint).json(&request_body).send().await {
                 Ok(resp) => resp,
                 Err(e) => {
                     if e.is_connect() {
@@ -210,7 +208,8 @@ mod tests {
 
     #[test]
     fn error_connection_refused() {
-        let err = Error::EmbeddingProvider("Cannot connect to Ollama at http://localhost:11434".into());
+        let err =
+            Error::EmbeddingProvider("Cannot connect to Ollama at http://localhost:11434".into());
         assert!(err.to_string().contains("Cannot connect to Ollama"));
     }
 
