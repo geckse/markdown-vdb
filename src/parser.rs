@@ -112,7 +112,13 @@ pub fn extract_frontmatter(content: &str) -> (Option<serde_json::Value>, &str) {
     };
 
     // Find where the body starts (after closing --- line)
-    let after_closing_start = after_open + closing_pos + if closing_pos == 0 && rest.starts_with("---") { 0 } else { 1 };
+    let after_closing_start = after_open
+        + closing_pos
+        + if closing_pos == 0 && rest.starts_with("---") {
+            0
+        } else {
+            1
+        };
     let after_closing = &trimmed[after_closing_start..];
     let body_start = match after_closing.find('\n') {
         Some(i) => after_closing_start + i + 1,
@@ -179,7 +185,7 @@ fn yaml_to_json(val: serde_yaml::Value) -> serde_json::Value {
 /// Uses `pulldown_cmark::Parser` to find all headings (h1-h6) and returns them
 /// with their text content and 1-based line numbers.
 pub fn extract_headings(content: &str) -> Vec<Heading> {
-    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, HeadingLevel};
+    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
     let parser = Parser::new_ext(content, Options::all());
     let mut headings = Vec::new();
