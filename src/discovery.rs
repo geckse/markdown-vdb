@@ -134,11 +134,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_patterns_constant() {
+    fn builtin_patterns_count() {
         assert_eq!(BUILTIN_IGNORE_PATTERNS.len(), 15);
-        // Every pattern should be a negation
+    }
+
+    #[test]
+    fn builtin_patterns_are_negations() {
         for pattern in BUILTIN_IGNORE_PATTERNS {
             assert!(pattern.starts_with('!'), "pattern should start with '!': {pattern}");
+        }
+    }
+
+    #[test]
+    fn builtin_patterns_contain_expected_dirs() {
+        let expected = [
+            "!.claude/",
+            "!.cursor/",
+            "!.vscode/",
+            "!.idea/",
+            "!.git/",
+            "!node_modules/",
+            "!.obsidian/",
+            "!__pycache__/",
+            "!.next/",
+            "!.nuxt/",
+            "!.svelte-kit/",
+            "!target/",
+            "!dist/",
+            "!build/",
+            "!out/",
+        ];
+        for dir in &expected {
+            assert!(
+                BUILTIN_IGNORE_PATTERNS.contains(dir),
+                "missing expected pattern: {dir}"
+            );
         }
     }
 }
