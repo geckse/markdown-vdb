@@ -1,7 +1,9 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+
+use crate::error::Error;
 
 /// A parsed markdown file with extracted metadata.
 #[derive(Debug, Clone, Serialize)]
@@ -16,6 +18,40 @@ pub struct MarkdownFile {
     pub body: String,
     /// SHA-256 hex digest of the full file content.
     pub content_hash: String,
+    /// File size in bytes.
+    pub file_size: u64,
+}
+
+/// Parse a markdown file from disk into a [`MarkdownFile`].
+///
+/// Reads the file at `project_root.join(relative_path)`, extracts frontmatter,
+/// headings, content hash, and file size. Returns `Error::MarkdownParse` for
+/// non-UTF-8 files.
+pub fn parse_markdown_file(
+    project_root: &Path,
+    relative_path: &Path,
+) -> Result<MarkdownFile, Error> {
+    let full_path = project_root.join(relative_path);
+    let raw_bytes = std::fs::read(&full_path)?;
+    let file_size = raw_bytes.len() as u64;
+
+    let content = String::from_utf8(raw_bytes).map_err(|_| Error::MarkdownParse {
+        path: relative_path.to_path_buf(),
+        message: "file is not valid UTF-8".into(),
+    })?;
+
+    let content_hash = compute_content_hash(&content);
+    let (frontmatter, body) = extract_frontmatter(&content);
+    let headings = extract_headings(body);
+
+    Ok(MarkdownFile {
+        path: relative_path.to_path_buf(),
+        frontmatter,
+        headings,
+        body: body.to_string(),
+        content_hash,
+        file_size,
+    })
 }
 
 /// A heading extracted from a markdown document.
