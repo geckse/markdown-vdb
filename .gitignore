@@ -1,14 +1,7 @@
+.DS_Store
+
 # Auto Claude data directory
 .auto-claude/
-
-# Rust build artifacts
-/target
-
-# Project artifacts
-.markdownvdb.index
-
-# OS
-.DS_Store
 
 # Auto Claude generated files
 .auto-claude-security.json
@@ -17,3 +10,9 @@
 .worktrees/
 .security-key
 logs/security/
+
+# Rust build artifacts
+/target
+
+# Project artifacts
+.markdownvdb.index

@@ -1,0 +1,48 @@
+# Metadata schema overlay for the test vault
+# Auto-inferred fields are enriched with these annotations
+
+fields:
+  title:
+    type: string
+    description: "Document title"
+    required: true
+
+  tags:
+    type: list
+    item_type: string
+    description: "Categorization tags"
+
+  category:
+    type: string
+    description: "Document category"
+    allowed_values:
+      - documentation
+      - notes
+      - guides
+      - runbooks
+
+  author:
+    type: string
+    description: "Primary author"
+
+  status:
+    type: string
+    description: "Publication status"
+    allowed_values:
+      - draft
+      - published
+      - archived
+    default: draft
+
+  severity:
+    type: string
+    description: "Severity level for runbooks"
+    allowed_values:
+      - critical
+      - high
+      - medium
+      - low
+
+  version:
+    type: string
+    description: "Version number (semver)"
