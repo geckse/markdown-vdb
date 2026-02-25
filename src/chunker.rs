@@ -32,7 +32,8 @@ pub struct Chunk {
 static TOKENIZER: OnceLock<CoreBPE> = OnceLock::new();
 
 fn get_tokenizer() -> &'static CoreBPE {
-    TOKENIZER.get_or_init(|| tiktoken_rs::cl100k_base().expect("failed to load cl100k_base tokenizer"))
+    TOKENIZER
+        .get_or_init(|| tiktoken_rs::cl100k_base().expect("failed to load cl100k_base tokenizer"))
 }
 
 /// Count the number of tokens in the given text using the cl100k_base tokenizer.
@@ -73,10 +74,7 @@ fn sub_split_section(
 
     debug!(
         source_path,
-        total_tokens,
-        max_tokens,
-        overlap_tokens,
-        "sub-splitting oversized section"
+        total_tokens, max_tokens, overlap_tokens, "sub-splitting oversized section"
     );
 
     if total_tokens == 0 {
@@ -99,15 +97,15 @@ fn sub_split_section(
         let end = (start + max_tokens).min(total_tokens);
         let window = &tokens[start..end];
 
-        let content = tokenizer.decode(window.to_vec())
-            .unwrap_or_default();
+        let content = tokenizer.decode(window.to_vec()).unwrap_or_default();
 
         // Approximate line ranges based on character offset ratios.
         // Find where this chunk's text starts and ends in the full content.
         let chars_before: usize = if start == 0 {
             0
         } else {
-            tokenizer.decode(tokens[..start].to_vec())
+            tokenizer
+                .decode(tokens[..start].to_vec())
                 .map(|s| s.len())
                 .unwrap_or(0)
         };
@@ -125,7 +123,11 @@ fn sub_split_section(
         };
 
         let start_line = section.start_line + approx_start_line.min(total_lines.saturating_sub(1));
-        let end_line = section.start_line + approx_end_line.min(total_lines).saturating_sub(1).max(approx_start_line);
+        let end_line = section.start_line
+            + approx_end_line
+                .min(total_lines)
+                .saturating_sub(1)
+                .max(approx_start_line);
 
         let idx = *chunk_index;
         chunks.push(Chunk {
@@ -192,8 +194,10 @@ pub fn chunk_document(
         if line_idx > prev_start || (line_idx == 0 && prev_start == 0 && sections.is_empty()) {
             // Only emit if there's actual content before first heading
             if line_idx > prev_start {
-                let section_lines: Vec<String> =
-                    body_lines[prev_start..line_idx].iter().map(|s| s.to_string()).collect();
+                let section_lines: Vec<String> = body_lines[prev_start..line_idx]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
                 let content = section_lines.join("\n");
                 if !content.trim().is_empty() {
                     sections.push(Section {
@@ -218,8 +222,10 @@ pub fn chunk_document(
 
     // Emit final section (from last heading or start to end)
     if prev_start < total_lines {
-        let section_lines: Vec<String> =
-            body_lines[prev_start..total_lines].iter().map(|s| s.to_string()).collect();
+        let section_lines: Vec<String> = body_lines[prev_start..total_lines]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let content = section_lines.join("\n");
         if !content.trim().is_empty() {
             sections.push(Section {
@@ -358,8 +364,16 @@ mod tests {
         use crate::parser::Heading;
         let body = "# Title\nSome intro\n## Section\nSection content";
         let headings = vec![
-            Heading { level: 1, text: "Title".into(), line_number: 1 },
-            Heading { level: 2, text: "Section".into(), line_number: 3 },
+            Heading {
+                level: 1,
+                text: "Title".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 2,
+                text: "Section".into(),
+                line_number: 3,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
@@ -374,9 +388,11 @@ mod tests {
     fn chunk_document_preamble_before_heading() {
         use crate::parser::Heading;
         let body = "Preamble text\n# Title\nBody";
-        let headings = vec![
-            Heading { level: 1, text: "Title".into(), line_number: 2 },
-        ];
+        let headings = vec![Heading {
+            level: 1,
+            text: "Title".into(),
+            line_number: 2,
+        }];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
         assert_eq!(chunks.len(), 2);
@@ -389,9 +405,21 @@ mod tests {
         use crate::parser::Heading;
         let body = "# A\ntext\n# B\ntext\n# C\ntext";
         let headings = vec![
-            Heading { level: 1, text: "A".into(), line_number: 1 },
-            Heading { level: 1, text: "B".into(), line_number: 3 },
-            Heading { level: 1, text: "C".into(), line_number: 5 },
+            Heading {
+                level: 1,
+                text: "A".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 1,
+                text: "B".into(),
+                line_number: 3,
+            },
+            Heading {
+                level: 1,
+                text: "C".into(),
+                line_number: 5,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
@@ -416,14 +444,29 @@ mod tests {
         // H1 > H2, then H1 should reset hierarchy
         let body = "# A\n## B\ntext\n# C\ntext";
         let headings = vec![
-            Heading { level: 1, text: "A".into(), line_number: 1 },
-            Heading { level: 2, text: "B".into(), line_number: 2 },
-            Heading { level: 1, text: "C".into(), line_number: 4 },
+            Heading {
+                level: 1,
+                text: "A".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 2,
+                text: "B".into(),
+                line_number: 2,
+            },
+            Heading {
+                level: 1,
+                text: "C".into(),
+                line_number: 4,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
         // Find the chunk for C
-        let c_chunk = chunks.iter().find(|c| c.heading_hierarchy.contains(&"C".to_string())).unwrap();
+        let c_chunk = chunks
+            .iter()
+            .find(|c| c.heading_hierarchy.contains(&"C".to_string()))
+            .unwrap();
         assert_eq!(c_chunk.heading_hierarchy, vec!["C"]);
     }
 
@@ -434,9 +477,21 @@ mod tests {
         use crate::parser::Heading;
         let body = "# One\nContent one\n# Two\nContent two\n# Three\nContent three";
         let headings = vec![
-            Heading { level: 1, text: "One".into(), line_number: 1 },
-            Heading { level: 1, text: "Two".into(), line_number: 3 },
-            Heading { level: 1, text: "Three".into(), line_number: 5 },
+            Heading {
+                level: 1,
+                text: "One".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 1,
+                text: "Two".into(),
+                line_number: 3,
+            },
+            Heading {
+                level: 1,
+                text: "Three".into(),
+                line_number: 5,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
@@ -455,9 +510,11 @@ mod tests {
     fn preamble_is_chunk_zero() {
         use crate::parser::Heading;
         let body = "This is preamble content.\n# First Heading\nHeading content";
-        let headings = vec![
-            Heading { level: 1, text: "First Heading".into(), line_number: 2 },
-        ];
+        let headings = vec![Heading {
+            level: 1,
+            text: "First Heading".into(),
+            line_number: 2,
+        }];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
         assert!(chunks.len() >= 2);
@@ -472,12 +529,17 @@ mod tests {
         // Create content large enough to exceed a small max_tokens
         let long_text = "word ".repeat(200);
         let body = format!("# Big Section\n{long_text}");
-        let headings = vec![
-            Heading { level: 1, text: "Big Section".into(), line_number: 1 },
-        ];
+        let headings = vec![Heading {
+            level: 1,
+            text: "Big Section".into(),
+            line_number: 1,
+        }];
         let file = make_file(&body, headings);
         let chunks = chunk_document(&file, 50, 10).unwrap();
-        assert!(chunks.len() > 1, "oversized section should produce multiple chunks");
+        assert!(
+            chunks.len() > 1,
+            "oversized section should produce multiple chunks"
+        );
     }
 
     #[test]
@@ -485,14 +547,19 @@ mod tests {
         use crate::parser::Heading;
         let long_text = "word ".repeat(200);
         let body = format!("# Big\n{long_text}");
-        let headings = vec![
-            Heading { level: 1, text: "Big".into(), line_number: 1 },
-        ];
+        let headings = vec![Heading {
+            level: 1,
+            text: "Big".into(),
+            line_number: 1,
+        }];
         let file = make_file(&body, headings);
         let chunks = chunk_document(&file, 50, 10).unwrap();
         assert!(chunks.len() > 1);
         for chunk in &chunks {
-            assert!(chunk.is_sub_split, "sub-split chunks must have is_sub_split = true");
+            assert!(
+                chunk.is_sub_split,
+                "sub-split chunks must have is_sub_split = true"
+            );
         }
     }
 
@@ -501,9 +568,11 @@ mod tests {
         use crate::parser::Heading;
         let long_text = "word ".repeat(200);
         let body = format!("# Big\n{long_text}");
-        let headings = vec![
-            Heading { level: 1, text: "Big".into(), line_number: 1 },
-        ];
+        let headings = vec![Heading {
+            level: 1,
+            text: "Big".into(),
+            line_number: 1,
+        }];
         let file = make_file(&body, headings);
         let overlap = 10;
         let chunks = chunk_document(&file, 50, overlap).unwrap();
@@ -516,7 +585,10 @@ mod tests {
             // Last `overlap` tokens of chunk K should equal first `overlap` tokens of chunk K+1
             let tail = &tokens_k[tokens_k.len().saturating_sub(overlap)..];
             let head = &tokens_k1[..overlap.min(tokens_k1.len())];
-            assert_eq!(tail, head, "overlap tokens must match between consecutive chunks");
+            assert_eq!(
+                tail, head,
+                "overlap tokens must match between consecutive chunks"
+            );
         }
     }
 
@@ -525,9 +597,21 @@ mod tests {
         use crate::parser::Heading;
         let body = "# H1\n## H2\n### H3\nContent here";
         let headings = vec![
-            Heading { level: 1, text: "H1".into(), line_number: 1 },
-            Heading { level: 2, text: "H2".into(), line_number: 2 },
-            Heading { level: 3, text: "H3".into(), line_number: 3 },
+            Heading {
+                level: 1,
+                text: "H1".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 2,
+                text: "H2".into(),
+                line_number: 2,
+            },
+            Heading {
+                level: 3,
+                text: "H3".into(),
+                line_number: 3,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
@@ -540,13 +624,28 @@ mod tests {
         use crate::parser::Heading;
         let body = "# A\n## B\ntext\n## C\ntext";
         let headings = vec![
-            Heading { level: 1, text: "A".into(), line_number: 1 },
-            Heading { level: 2, text: "B".into(), line_number: 2 },
-            Heading { level: 2, text: "C".into(), line_number: 4 },
+            Heading {
+                level: 1,
+                text: "A".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 2,
+                text: "B".into(),
+                line_number: 2,
+            },
+            Heading {
+                level: 2,
+                text: "C".into(),
+                line_number: 4,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
-        let c_chunk = chunks.iter().find(|c| c.heading_hierarchy.contains(&"C".to_string())).unwrap();
+        let c_chunk = chunks
+            .iter()
+            .find(|c| c.heading_hierarchy.contains(&"C".to_string()))
+            .unwrap();
         // C replaces B at same level, hierarchy should be [A, C]
         assert_eq!(c_chunk.heading_hierarchy, vec!["A", "C"]);
     }
@@ -576,7 +675,10 @@ mod tests {
         let count2 = count_tokens("The quick brown fox jumps over the lazy dog");
         assert!(count2 > 0);
         // Verify consistency
-        assert_eq!(count2, count_tokens("The quick brown fox jumps over the lazy dog"));
+        assert_eq!(
+            count2,
+            count_tokens("The quick brown fox jumps over the lazy dog")
+        );
     }
 
     #[test]
@@ -584,13 +686,25 @@ mod tests {
         use crate::parser::Heading;
         let body = "# A\ntext\n# B\ntext";
         let headings = vec![
-            Heading { level: 1, text: "A".into(), line_number: 1 },
-            Heading { level: 1, text: "B".into(), line_number: 3 },
+            Heading {
+                level: 1,
+                text: "A".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 1,
+                text: "B".into(),
+                line_number: 3,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
         for (i, chunk) in chunks.iter().enumerate() {
-            assert_eq!(chunk.id, format!("test.md#{i}"), "ID must follow path#index format");
+            assert_eq!(
+                chunk.id,
+                format!("test.md#{i}"),
+                "ID must follow path#index format"
+            );
         }
     }
 
@@ -599,8 +713,16 @@ mod tests {
         use crate::parser::Heading;
         let body = "# Title\nLine 2\nLine 3\n# Second\nLine 5\nLine 6";
         let headings = vec![
-            Heading { level: 1, text: "Title".into(), line_number: 1 },
-            Heading { level: 1, text: "Second".into(), line_number: 4 },
+            Heading {
+                level: 1,
+                text: "Title".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 1,
+                text: "Second".into(),
+                line_number: 4,
+            },
         ];
         let file = make_file(body, headings);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
@@ -618,9 +740,21 @@ mod tests {
         use crate::parser::Heading;
         let body = "# A\nContent\n## B\nMore content\n# C\nFinal";
         let headings = vec![
-            Heading { level: 1, text: "A".into(), line_number: 1 },
-            Heading { level: 2, text: "B".into(), line_number: 3 },
-            Heading { level: 1, text: "C".into(), line_number: 5 },
+            Heading {
+                level: 1,
+                text: "A".into(),
+                line_number: 1,
+            },
+            Heading {
+                level: 2,
+                text: "B".into(),
+                line_number: 3,
+            },
+            Heading {
+                level: 1,
+                text: "C".into(),
+                line_number: 5,
+            },
         ];
         let file = make_file(body, headings.clone());
         let chunks1 = chunk_document(&file, 1000, 0).unwrap();
