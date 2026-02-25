@@ -10,3 +10,9 @@
 .worktrees/
 .security-key
 logs/security/
+
+# Rust build artifacts
+/target
+
+# Project artifacts
+.markdownvdb.index
