@@ -51,65 +51,90 @@ struct Section {
     end_line: usize,
 }
 
-/// Split a section that exceeds `max_tokens` into smaller chunks by lines.
+/// Split a section that exceeds `max_tokens` into smaller chunks using token-based
+/// sliding windows with overlap.
 ///
-/// Each sub-chunk targets at most `max_tokens` tokens. Lines are never split
-/// mid-line — if a single line exceeds `max_tokens`, it becomes its own chunk.
+/// Tokenizes the full section content, creates windows of `max_tokens` size with
+/// `overlap_tokens` overlap between consecutive windows, then detokenizes each window
+/// back to text. Each sub-chunk inherits the parent heading hierarchy and has
+/// `is_sub_split = true`. Line ranges are approximated from character offset ratios.
 fn sub_split_section(
     section: &Section,
     source_path: &str,
     max_tokens: usize,
-    _overlap_tokens: usize,
+    overlap_tokens: usize,
     chunk_index: &mut usize,
 ) -> Vec<Chunk> {
-    let mut chunks = Vec::new();
-    let mut current_lines: Vec<&str> = Vec::new();
-    let mut current_start = section.start_line;
-    let mut current_tokens = 0usize;
+    let tokenizer = get_tokenizer();
+    let full_content = section.lines.join("\n");
+    let tokens = tokenizer.encode_ordinary(&full_content);
+    let total_tokens = tokens.len();
 
-    for (i, line) in section.lines.iter().enumerate() {
-        let line_tokens = count_tokens(line);
-        let line_num = section.start_line + i;
-
-        // If adding this line would exceed max and we have content, emit chunk
-        if !current_lines.is_empty() && current_tokens + line_tokens > max_tokens {
-            let content = current_lines.join("\n");
-            let idx = *chunk_index;
-            chunks.push(Chunk {
-                id: format!("{source_path}#{idx}"),
-                source_path: PathBuf::from(source_path),
-                heading_hierarchy: section.heading_hierarchy.clone(),
-                content,
-                start_line: current_start,
-                end_line: line_num - 1,
-                chunk_index: idx,
-                is_sub_split: true,
-            });
-            *chunk_index += 1;
-            current_lines.clear();
-            current_tokens = 0;
-            current_start = line_num;
-        }
-
-        current_lines.push(line);
-        current_tokens += line_tokens;
+    if total_tokens == 0 {
+        return Vec::new();
     }
 
-    // Emit remaining lines
-    if !current_lines.is_empty() {
-        let content = current_lines.join("\n");
+    let total_lines = section.lines.len();
+    let total_chars = full_content.len();
+    let mut chunks = Vec::new();
+
+    // Ensure stride is at least 1 to avoid infinite loop
+    let stride = if max_tokens > overlap_tokens {
+        max_tokens - overlap_tokens
+    } else {
+        max_tokens.max(1)
+    };
+
+    let mut start = 0usize;
+    while start < total_tokens {
+        let end = (start + max_tokens).min(total_tokens);
+        let window = &tokens[start..end];
+
+        let content = tokenizer.decode(window.to_vec())
+            .unwrap_or_default();
+
+        // Approximate line ranges based on character offset ratios.
+        // Find where this chunk's text starts and ends in the full content.
+        let chars_before: usize = if start == 0 {
+            0
+        } else {
+            tokenizer.decode(tokens[..start].to_vec())
+                .map(|s| s.len())
+                .unwrap_or(0)
+        };
+
+        let approx_start_line = if total_chars > 0 {
+            (chars_before as f64 / total_chars as f64 * total_lines as f64).floor() as usize
+        } else {
+            0
+        };
+        let chars_end = chars_before + content.len();
+        let approx_end_line = if total_chars > 0 {
+            (chars_end as f64 / total_chars as f64 * total_lines as f64).ceil() as usize
+        } else {
+            0
+        };
+
+        let start_line = section.start_line + approx_start_line.min(total_lines.saturating_sub(1));
+        let end_line = section.start_line + approx_end_line.min(total_lines).saturating_sub(1).max(approx_start_line);
+
         let idx = *chunk_index;
         chunks.push(Chunk {
             id: format!("{source_path}#{idx}"),
             source_path: PathBuf::from(source_path),
             heading_hierarchy: section.heading_hierarchy.clone(),
             content,
-            start_line: current_start,
-            end_line: section.end_line,
+            start_line,
+            end_line: end_line.max(start_line),
             chunk_index: idx,
             is_sub_split: true,
         });
         *chunk_index += 1;
+
+        if end >= total_tokens {
+            break;
+        }
+        start += stride;
     }
 
     chunks
