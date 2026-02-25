@@ -5,10 +5,14 @@ use std::time::SystemTime;
 use parking_lot::RwLock;
 use usearch::Index as HnswIndex;
 
+use tracing::debug;
+
+use crate::chunker::Chunk;
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::index::storage;
-use crate::index::types::{EmbeddingConfig, IndexMetadata};
+use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
+use crate::parser::MarkdownFile;
 
 /// Internal mutable state protected by the RwLock.
 struct IndexState {
@@ -96,6 +100,188 @@ impl Index {
             Err(Error::IndexNotFound { .. }) => Self::create(path, config),
             Err(e) => Err(e),
         }
+    }
+
+    /// Upsert a file and its chunks into the index.
+    ///
+    /// If the file already exists, its old chunks and vectors are removed first.
+    /// Each chunk is assigned a sequential HNSW key, and the corresponding embedding
+    /// vector is added to the HNSW index.
+    pub fn upsert(
+        &self,
+        file: &MarkdownFile,
+        chunks: &[Chunk],
+        embeddings: &[Vec<f32>],
+    ) -> Result<()> {
+        let mut state = self.state.write();
+        let relative_path = file.path.to_string_lossy().to_string();
+
+        debug!(path = %relative_path, chunks = chunks.len(), "upserting file");
+
+        // Remove old data if file already exists.
+        if let Some(old_file) = state.metadata.files.remove(&relative_path) {
+            for chunk_id in &old_file.chunk_ids {
+                if let Some(key) = state.id_to_key.remove(chunk_id) {
+                    let _ = state.hnsw.remove(key);
+                }
+                state.metadata.chunks.remove(chunk_id);
+            }
+        }
+
+        // Ensure HNSW has capacity for new vectors.
+        let current_size = state.hnsw.size();
+        let needed = current_size + chunks.len();
+        if needed > state.hnsw.capacity() {
+            state.hnsw.reserve(needed.max(current_size * 2))
+                .map_err(|e| Error::Serialization(format!("usearch reserve: {e}")))?;
+        }
+
+        // Insert new chunks.
+        let mut stored_file = StoredFile::from(file);
+        for (i, chunk) in chunks.iter().enumerate() {
+            let key = state.next_key;
+            state.next_key += 1;
+
+            state.hnsw.add(key, &embeddings[i])
+                .map_err(|e| Error::Serialization(format!("usearch add: {e}")))?;
+
+            let stored_chunk = StoredChunk::from(chunk);
+            state.metadata.chunks.insert(chunk.id.clone(), stored_chunk);
+            state.id_to_key.insert(chunk.id.clone(), key);
+            stored_file.chunk_ids.push(chunk.id.clone());
+        }
+
+        state.metadata.files.insert(relative_path, stored_file);
+        state.dirty = true;
+        Ok(())
+    }
+
+    /// Remove a file and all its chunks from the index.
+    ///
+    /// Returns `Ok(())` if the file is not found (no-op).
+    pub fn remove_file(&self, relative_path: &str) -> Result<()> {
+        let mut state = self.state.write();
+
+        let file = match state.metadata.files.remove(relative_path) {
+            Some(f) => f,
+            None => return Ok(()),
+        };
+
+        debug!(path = %relative_path, chunks = file.chunk_ids.len(), "removing file");
+
+        for chunk_id in &file.chunk_ids {
+            if let Some(key) = state.id_to_key.remove(chunk_id) {
+                let _ = state.hnsw.remove(key);
+            }
+            state.metadata.chunks.remove(chunk_id);
+        }
+
+        state.dirty = true;
+        Ok(())
+    }
+
+    /// Get a cloned copy of the stored file entry for the given path.
+    pub fn get_file(&self, relative_path: &str) -> Option<StoredFile> {
+        let state = self.state.read();
+        state.metadata.files.get(relative_path).cloned()
+    }
+
+    /// Get a map of all file paths to their content hashes.
+    pub fn get_file_hashes(&self) -> HashMap<String, String> {
+        let state = self.state.read();
+        state
+            .metadata
+            .files
+            .iter()
+            .map(|(path, file)| (path.clone(), file.content_hash.clone()))
+            .collect()
+    }
+
+    /// Return a status snapshot of the index.
+    pub fn status(&self) -> IndexStatus {
+        let state = self.state.read();
+        let file_size = std::fs::metadata(&self.path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        IndexStatus {
+            document_count: state.metadata.files.len(),
+            chunk_count: state.metadata.chunks.len(),
+            vector_count: state.hnsw.size(),
+            last_updated: state.metadata.last_updated,
+            file_size,
+            embedding_config: state.metadata.embedding_config.clone(),
+        }
+    }
+
+    /// Search the HNSW index for the nearest neighbors to the query vector.
+    ///
+    /// Returns a list of `(chunk_id, distance)` pairs sorted by distance.
+    pub fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
+        let state = self.state.read();
+
+        if state.hnsw.size() == 0 {
+            return Ok(Vec::new());
+        }
+
+        let results = state.hnsw.search(query, limit)
+            .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
+
+        // Build reverse lookup: key → chunk_id.
+        let key_to_id: HashMap<u64, &String> = state
+            .id_to_key
+            .iter()
+            .map(|(id, key)| (*key, id))
+            .collect();
+
+        let mut output = Vec::with_capacity(results.keys.len());
+        for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
+            if let Some(chunk_id) = key_to_id.get(key) {
+                output.push(((*chunk_id).clone(), *distance));
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// Persist the index to disk atomically.
+    pub fn save(&self) -> Result<()> {
+        let mut state = self.state.write();
+
+        state.metadata.last_updated = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        storage::write_index(&self.path, &state.metadata, &state.hnsw)?;
+        state.dirty = false;
+
+        debug!(path = %self.path.display(), "index saved");
+        Ok(())
+    }
+
+    /// Check that the index's embedding configuration is compatible with the given config.
+    ///
+    /// Returns `Error::IndexCorrupted` if dimensions or model don't match.
+    pub fn check_config_compatibility(&self, config: &EmbeddingConfig) -> Result<()> {
+        let state = self.state.read();
+        let existing = &state.metadata.embedding_config;
+
+        if existing.dimensions != config.dimensions {
+            return Err(Error::IndexCorrupted(format!(
+                "dimension mismatch: index has {}, config has {}",
+                existing.dimensions, config.dimensions
+            )));
+        }
+
+        if existing.model != config.model {
+            return Err(Error::IndexCorrupted(format!(
+                "model mismatch: index has '{}', config has '{}'",
+                existing.model, config.model
+            )));
+        }
+
+        Ok(())
     }
 }
 
