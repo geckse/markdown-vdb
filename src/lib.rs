@@ -1,6 +1,8 @@
 pub mod config;
+pub mod discovery;
 pub mod error;
 pub mod logging;
+pub mod parser;
 
 pub use error::Error;
 
