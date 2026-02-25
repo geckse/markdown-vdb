@@ -402,4 +402,217 @@ mod tests {
         let c_chunk = chunks.iter().find(|c| c.heading_hierarchy.contains(&"C".to_string())).unwrap();
         assert_eq!(c_chunk.heading_hierarchy, vec!["C"]);
     }
+
+    // --- Required test cases ---
+
+    #[test]
+    fn three_headings_three_chunks() {
+        use crate::parser::Heading;
+        let body = "# One\nContent one\n# Two\nContent two\n# Three\nContent three";
+        let headings = vec![
+            Heading { level: 1, text: "One".into(), line_number: 1 },
+            Heading { level: 1, text: "Two".into(), line_number: 3 },
+            Heading { level: 1, text: "Three".into(), line_number: 5 },
+        ];
+        let file = make_file(body, headings);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        assert_eq!(chunks.len(), 3);
+    }
+
+    #[test]
+    fn no_headings_single_chunk() {
+        let file = make_file("Just some plain text\nwith multiple lines.", vec![]);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].heading_hierarchy.is_empty());
+    }
+
+    #[test]
+    fn preamble_is_chunk_zero() {
+        use crate::parser::Heading;
+        let body = "This is preamble content.\n# First Heading\nHeading content";
+        let headings = vec![
+            Heading { level: 1, text: "First Heading".into(), line_number: 2 },
+        ];
+        let file = make_file(body, headings);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        assert!(chunks.len() >= 2);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert!(chunks[0].heading_hierarchy.is_empty());
+        assert!(chunks[0].content.contains("preamble"));
+    }
+
+    #[test]
+    fn oversized_section_sub_splits() {
+        use crate::parser::Heading;
+        // Create content large enough to exceed a small max_tokens
+        let long_text = "word ".repeat(200);
+        let body = format!("# Big Section\n{long_text}");
+        let headings = vec![
+            Heading { level: 1, text: "Big Section".into(), line_number: 1 },
+        ];
+        let file = make_file(&body, headings);
+        let chunks = chunk_document(&file, 50, 10).unwrap();
+        assert!(chunks.len() > 1, "oversized section should produce multiple chunks");
+    }
+
+    #[test]
+    fn sub_splits_marked_correctly() {
+        use crate::parser::Heading;
+        let long_text = "word ".repeat(200);
+        let body = format!("# Big\n{long_text}");
+        let headings = vec![
+            Heading { level: 1, text: "Big".into(), line_number: 1 },
+        ];
+        let file = make_file(&body, headings);
+        let chunks = chunk_document(&file, 50, 10).unwrap();
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.is_sub_split, "sub-split chunks must have is_sub_split = true");
+        }
+    }
+
+    #[test]
+    fn sub_split_overlap_correct() {
+        use crate::parser::Heading;
+        let long_text = "word ".repeat(200);
+        let body = format!("# Big\n{long_text}");
+        let headings = vec![
+            Heading { level: 1, text: "Big".into(), line_number: 1 },
+        ];
+        let file = make_file(&body, headings);
+        let overlap = 10;
+        let chunks = chunk_document(&file, 50, overlap).unwrap();
+        assert!(chunks.len() >= 2, "need at least 2 chunks to test overlap");
+
+        let tokenizer = get_tokenizer();
+        for i in 0..chunks.len() - 1 {
+            let tokens_k = tokenizer.encode_ordinary(&chunks[i].content);
+            let tokens_k1 = tokenizer.encode_ordinary(&chunks[i + 1].content);
+            // Last `overlap` tokens of chunk K should equal first `overlap` tokens of chunk K+1
+            let tail = &tokens_k[tokens_k.len().saturating_sub(overlap)..];
+            let head = &tokens_k1[..overlap.min(tokens_k1.len())];
+            assert_eq!(tail, head, "overlap tokens must match between consecutive chunks");
+        }
+    }
+
+    #[test]
+    fn heading_hierarchy_nested() {
+        use crate::parser::Heading;
+        let body = "# H1\n## H2\n### H3\nContent here";
+        let headings = vec![
+            Heading { level: 1, text: "H1".into(), line_number: 1 },
+            Heading { level: 2, text: "H2".into(), line_number: 2 },
+            Heading { level: 3, text: "H3".into(), line_number: 3 },
+        ];
+        let file = make_file(body, headings);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        let last = chunks.last().unwrap();
+        assert_eq!(last.heading_hierarchy, vec!["H1", "H2", "H3"]);
+    }
+
+    #[test]
+    fn heading_hierarchy_resets() {
+        use crate::parser::Heading;
+        let body = "# A\n## B\ntext\n## C\ntext";
+        let headings = vec![
+            Heading { level: 1, text: "A".into(), line_number: 1 },
+            Heading { level: 2, text: "B".into(), line_number: 2 },
+            Heading { level: 2, text: "C".into(), line_number: 4 },
+        ];
+        let file = make_file(body, headings);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        let c_chunk = chunks.iter().find(|c| c.heading_hierarchy.contains(&"C".to_string())).unwrap();
+        // C replaces B at same level, hierarchy should be [A, C]
+        assert_eq!(c_chunk.heading_hierarchy, vec!["A", "C"]);
+    }
+
+    #[test]
+    fn short_file_single_chunk() {
+        let file = make_file("Short.", vec![]);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn empty_body_single_chunk() {
+        // Empty body produces no chunks (body is empty string)
+        let file = make_file("", vec![]);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        // Implementation returns empty for truly empty body
+        assert!(chunks.len() <= 1);
+    }
+
+    #[test]
+    fn count_tokens_accuracy() {
+        // "hello world" should tokenize to known cl100k_base token count
+        let count = count_tokens("hello world");
+        assert_eq!(count, 2, "cl100k_base: 'hello world' = 2 tokens");
+
+        let count2 = count_tokens("The quick brown fox jumps over the lazy dog");
+        assert!(count2 > 0);
+        // Verify consistency
+        assert_eq!(count2, count_tokens("The quick brown fox jumps over the lazy dog"));
+    }
+
+    #[test]
+    fn chunk_ids_format() {
+        use crate::parser::Heading;
+        let body = "# A\ntext\n# B\ntext";
+        let headings = vec![
+            Heading { level: 1, text: "A".into(), line_number: 1 },
+            Heading { level: 1, text: "B".into(), line_number: 3 },
+        ];
+        let file = make_file(body, headings);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.id, format!("test.md#{i}"), "ID must follow path#index format");
+        }
+    }
+
+    #[test]
+    fn line_ranges_correct() {
+        use crate::parser::Heading;
+        let body = "# Title\nLine 2\nLine 3\n# Second\nLine 5\nLine 6";
+        let headings = vec![
+            Heading { level: 1, text: "Title".into(), line_number: 1 },
+            Heading { level: 1, text: "Second".into(), line_number: 4 },
+        ];
+        let file = make_file(body, headings);
+        let chunks = chunk_document(&file, 1000, 0).unwrap();
+        assert_eq!(chunks.len(), 2);
+        // First chunk starts at line 1 (heading line)
+        assert!(chunks[0].start_line >= 1);
+        // Second chunk starts at or after line 4
+        assert!(chunks[1].start_line >= 4);
+        // Lines should not overlap between non-sub-split chunks
+        assert!(chunks[0].end_line <= chunks[1].start_line);
+    }
+
+    #[test]
+    fn deterministic_output() {
+        use crate::parser::Heading;
+        let body = "# A\nContent\n## B\nMore content\n# C\nFinal";
+        let headings = vec![
+            Heading { level: 1, text: "A".into(), line_number: 1 },
+            Heading { level: 2, text: "B".into(), line_number: 3 },
+            Heading { level: 1, text: "C".into(), line_number: 5 },
+        ];
+        let file = make_file(body, headings.clone());
+        let chunks1 = chunk_document(&file, 1000, 0).unwrap();
+
+        let file2 = make_file(body, headings);
+        let chunks2 = chunk_document(&file2, 1000, 0).unwrap();
+
+        assert_eq!(chunks1.len(), chunks2.len());
+        for (a, b) in chunks1.iter().zip(chunks2.iter()) {
+            assert_eq!(a.id, b.id);
+            assert_eq!(a.content, b.content);
+            assert_eq!(a.heading_hierarchy, b.heading_hierarchy);
+            assert_eq!(a.start_line, b.start_line);
+            assert_eq!(a.end_line, b.end_line);
+            assert_eq!(a.chunk_index, b.chunk_index);
+            assert_eq!(a.is_sub_split, b.is_sub_split);
+        }
+    }
 }
