@@ -1,6 +1,8 @@
-# mdvdb
+# Markdown Vector Database (mdvdb)
+(pronounced /ˌɛm di ˌvi di ˈbi/)
 
-A filesystem-native vector database built around Markdown files. Zero infrastructure — no servers, no containers, everything lives on disk.
+A filesystem-native vector database built around Markdown files. 
+Zero infrastructure — no servers, no containers, everything lives on disk.
 
 Designed for AI agents that need fast semantic search over local knowledge bases.
 
