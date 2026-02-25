@@ -1,0 +1,67 @@
+# .markdownvdb — Configuration for mdvdb
+# Copy this file to .markdownvdb and uncomment the variables you want to change.
+# Priority: shell environment > .markdownvdb file > built-in defaults
+
+# ── Embedding ────────────────────────────────────────────────────────────────
+
+# Embedding provider: openai, ollama, or custom
+# MDVDB_EMBEDDING_PROVIDER=openai
+
+# Model name passed to the embedding provider
+# MDVDB_EMBEDDING_MODEL=text-embedding-3-small
+
+# Dimensionality of embedding vectors (must be > 0)
+# MDVDB_EMBEDDING_DIMENSIONS=1536
+
+# Number of chunks sent per embedding API call
+# MDVDB_EMBEDDING_BATCH_SIZE=100
+
+# OpenAI API key (required when provider is openai)
+# OPENAI_API_KEY=
+
+# Ollama server address (used when provider is ollama)
+# OLLAMA_HOST=http://localhost:11434
+
+# Custom embedding endpoint URL (used when provider is custom)
+# MDVDB_EMBEDDING_ENDPOINT=
+
+# ── Source & Index ───────────────────────────────────────────────────────────
+
+# Comma-separated list of directories to scan for markdown files
+# MDVDB_SOURCE_DIRS=.
+
+# Path to the index file (relative to project root)
+# MDVDB_INDEX_FILE=.markdownvdb.index
+
+# Comma-separated glob patterns to ignore
+# MDVDB_IGNORE_PATTERNS=
+
+# Enable file watching for automatic re-indexing
+# MDVDB_WATCH=true
+
+# Debounce delay in milliseconds for file watch events
+# MDVDB_WATCH_DEBOUNCE_MS=300
+
+# ── Chunking ─────────────────────────────────────────────────────────────────
+
+# Maximum tokens per chunk (must be > overlap)
+# MDVDB_CHUNK_MAX_TOKENS=512
+
+# Overlap tokens between consecutive chunks
+# MDVDB_CHUNK_OVERLAP_TOKENS=50
+
+# ── Clustering ───────────────────────────────────────────────────────────────
+
+# Enable clustering of embeddings for faster search
+# MDVDB_CLUSTERING_ENABLED=true
+
+# Number of new vectors before triggering a rebalance
+# MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
+
+# ── Search ───────────────────────────────────────────────────────────────────
+
+# Default number of results returned by search
+# MDVDB_SEARCH_DEFAULT_LIMIT=10
+
+# Minimum cosine similarity score to include in results (0.0–1.0)
+# MDVDB_SEARCH_MIN_SCORE=0.0
