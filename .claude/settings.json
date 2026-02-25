@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git branch*)",
+      "Bash(gh *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)"
+    ]
+  },
+   "mcpServers": {
+    "pdf-mcp": {
+      "url": "https://api.pdf-mcp.io/mcp"
+    }
+  }
+}
