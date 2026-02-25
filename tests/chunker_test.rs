@@ -103,8 +103,9 @@ fn parse_then_chunk_empty() {
     let file = parse_fixture("empty.md");
     let chunks = chunk_document(&file, 1024, 0).unwrap();
 
-    // Empty file should produce 0 or 1 chunks
-    assert!(chunks.len() <= 1, "empty file should produce at most 1 chunk");
+    // Empty file should produce exactly 1 chunk with empty content
+    assert_eq!(chunks.len(), 1, "empty file should produce exactly 1 chunk");
+    assert!(chunks[0].content.is_empty());
 }
 
 #[test]

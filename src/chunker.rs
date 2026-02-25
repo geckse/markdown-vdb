@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 use tiktoken_rs::CoreBPE;
+use tracing::debug;
 
 use crate::parser::MarkdownFile;
 
@@ -69,6 +70,14 @@ fn sub_split_section(
     let full_content = section.lines.join("\n");
     let tokens = tokenizer.encode_ordinary(&full_content);
     let total_tokens = tokens.len();
+
+    debug!(
+        source_path,
+        total_tokens,
+        max_tokens,
+        overlap_tokens,
+        "sub-splitting oversized section"
+    );
 
     if total_tokens == 0 {
         return Vec::new();
@@ -222,7 +231,7 @@ pub fn chunk_document(
         }
     }
 
-    // Handle empty body — no headings, no content
+    // Handle no-heading body — all content as single section
     if sections.is_empty() && !file.body.trim().is_empty() {
         let section_lines: Vec<String> = body_lines.iter().map(|s| s.to_string()).collect();
         sections.push(Section {
@@ -232,6 +241,18 @@ pub fn chunk_document(
             end_line: total_lines,
         });
     }
+
+    // Handle empty body — produce exactly 1 chunk with empty content
+    if sections.is_empty() {
+        sections.push(Section {
+            heading_hierarchy: Vec::new(),
+            lines: Vec::new(),
+            start_line: 1,
+            end_line: 1,
+        });
+    }
+
+    debug!(sections = sections.len(), "heading-based sections found");
 
     // Convert sections to chunks, sub-splitting oversized sections
     let mut chunks = Vec::new();
@@ -265,6 +286,8 @@ pub fn chunk_document(
             chunks.extend(sub_chunks);
         }
     }
+
+    debug!(chunks = chunks.len(), source = %source_path, "chunking complete");
 
     Ok(chunks)
 }
@@ -383,7 +406,8 @@ mod tests {
     fn chunk_document_empty_body() {
         let file = make_file("", vec![]);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
-        assert!(chunks.is_empty());
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].content.is_empty());
     }
 
     #[test]
@@ -536,11 +560,11 @@ mod tests {
 
     #[test]
     fn empty_body_single_chunk() {
-        // Empty body produces no chunks (body is empty string)
         let file = make_file("", vec![]);
         let chunks = chunk_document(&file, 1000, 0).unwrap();
-        // Implementation returns empty for truly empty body
-        assert!(chunks.len() <= 1);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].content.is_empty());
+        assert!(chunks[0].heading_hierarchy.is_empty());
     }
 
     #[test]
