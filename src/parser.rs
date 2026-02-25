@@ -138,6 +138,54 @@ fn yaml_to_json(val: serde_yaml::Value) -> serde_json::Value {
     }
 }
 
+/// Extract headings from markdown content.
+///
+/// Uses `pulldown_cmark::Parser` to find all headings (h1-h6) and returns them
+/// with their text content and 1-based line numbers.
+pub fn extract_headings(content: &str) -> Vec<Heading> {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, HeadingLevel};
+
+    let parser = Parser::new_ext(content, Options::all());
+    let mut headings = Vec::new();
+    let mut in_heading: Option<(u8, usize)> = None; // (level, byte_offset)
+    let mut heading_text = String::new();
+
+    for (event, range) in parser.into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                let byte_offset = range.start;
+                let level_num = match level {
+                    HeadingLevel::H1 => 1,
+                    HeadingLevel::H2 => 2,
+                    HeadingLevel::H3 => 3,
+                    HeadingLevel::H4 => 4,
+                    HeadingLevel::H5 => 5,
+                    HeadingLevel::H6 => 6,
+                };
+                in_heading = Some((level_num, byte_offset));
+                heading_text.clear();
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some((level, byte_offset)) = in_heading.take() {
+                    let line_number = content[..byte_offset].matches('\n').count() + 1;
+                    headings.push(Heading {
+                        level,
+                        text: heading_text.trim().to_string(),
+                        line_number,
+                    });
+                    heading_text.clear();
+                }
+            }
+            Event::Text(text) | Event::Code(text) if in_heading.is_some() => {
+                heading_text.push_str(&text);
+            }
+            _ => {}
+        }
+    }
+
+    headings
+}
+
 /// Compute a SHA-256 hex digest of the given content.
 pub fn compute_content_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
@@ -206,6 +254,63 @@ mod tests {
         let (fm, body) = extract_frontmatter(content);
         assert_eq!(fm.unwrap()["title"], "BOM");
         assert_eq!(body, "Body");
+    }
+
+    // --- extract_headings tests ---
+
+    #[test]
+    fn extract_headings_basic() {
+        let content = "# Title\n\nSome text\n\n## Section\n\nMore text";
+        let headings = extract_headings(content);
+        assert_eq!(headings.len(), 2);
+        assert_eq!(headings[0].level, 1);
+        assert_eq!(headings[0].text, "Title");
+        assert_eq!(headings[0].line_number, 1);
+        assert_eq!(headings[1].level, 2);
+        assert_eq!(headings[1].text, "Section");
+        assert_eq!(headings[1].line_number, 5);
+    }
+
+    #[test]
+    fn extract_headings_all_levels() {
+        let content = "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6";
+        let headings = extract_headings(content);
+        assert_eq!(headings.len(), 6);
+        for (i, h) in headings.iter().enumerate() {
+            assert_eq!(h.level, (i + 1) as u8);
+            assert_eq!(h.line_number, i + 1);
+        }
+    }
+
+    #[test]
+    fn extract_headings_no_headings() {
+        let content = "Just some text\nwithout headings";
+        let headings = extract_headings(content);
+        assert!(headings.is_empty());
+    }
+
+    #[test]
+    fn extract_headings_with_inline_code() {
+        let content = "# Heading with `code`";
+        let headings = extract_headings(content);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].text, "Heading with code");
+    }
+
+    #[test]
+    fn extract_headings_empty_content() {
+        let headings = extract_headings("");
+        assert!(headings.is_empty());
+    }
+
+    #[test]
+    fn extract_headings_after_frontmatter() {
+        let content = "---\ntitle: Test\n---\n# First Heading\n\nBody\n\n## Second";
+        let (_fm, body) = extract_frontmatter(content);
+        let headings = extract_headings(body);
+        assert_eq!(headings.len(), 2);
+        assert_eq!(headings[0].text, "First Heading");
+        assert_eq!(headings[1].text, "Second");
     }
 
     // --- content_hash tests ---
