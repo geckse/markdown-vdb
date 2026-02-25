@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("lock acquisition timed out")]
     LockTimeout,
+
+    #[error("logging initialization failed: {0}")]
+    Logging(String),
 }
 
 /// Convenience alias used throughout the crate.
