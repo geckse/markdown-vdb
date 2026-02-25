@@ -1,5 +1,6 @@
 pub mod config;
 pub mod discovery;
+pub mod embedding;
 pub mod error;
 pub mod logging;
 pub mod parser;
