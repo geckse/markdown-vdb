@@ -1,3 +1,4 @@
+pub mod chunker;
 pub mod config;
 pub mod discovery;
 pub mod error;
