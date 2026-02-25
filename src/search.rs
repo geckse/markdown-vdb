@@ -1,5 +1,10 @@
 use serde::Serialize;
 use serde_json::Value;
+use tracing::{debug, info};
+
+use crate::embedding::provider::EmbeddingProvider;
+use crate::error::Result;
+use crate::index::state::Index;
 
 /// Builder-pattern query for semantic search.
 #[derive(Debug, Clone)]
@@ -99,6 +104,95 @@ pub struct SearchResultFile {
     pub frontmatter: Option<Value>,
     /// File size in bytes.
     pub file_size: u64,
+}
+
+/// Execute a semantic search query against the index.
+///
+/// Pipeline: validate → embed → HNSW search (3x over-fetch) → filter → assemble → sort → truncate.
+pub async fn search(
+    query: &SearchQuery,
+    index: &Index,
+    provider: &dyn EmbeddingProvider,
+) -> Result<Vec<SearchResult>> {
+    // Validate: empty query is a no-op.
+    if query.query.trim().is_empty() {
+        debug!("empty query, returning no results");
+        return Ok(Vec::new());
+    }
+
+    // Embed the query text.
+    let embeddings = provider.embed_batch(&[query.query.clone()]).await?;
+    let query_vector = &embeddings[0];
+
+    // Over-fetch 3x to account for filtering.
+    let over_fetch = query.limit * 3;
+    let candidates = index.search_vectors(query_vector, over_fetch)?;
+
+    debug!(
+        candidates = candidates.len(),
+        limit = query.limit,
+        "HNSW search returned candidates"
+    );
+
+    // Filter, assemble results, and apply min_score.
+    let mut results = Vec::new();
+    for (chunk_id, score) in &candidates {
+        // Apply min_score threshold.
+        if *score < query.min_score {
+            continue;
+        }
+
+        // Look up chunk metadata.
+        let Some(chunk) = index.get_chunk(chunk_id) else {
+            continue;
+        };
+
+        // Look up file metadata.
+        let Some(file) = index.get_file_metadata(&chunk.source_path) else {
+            continue;
+        };
+
+        // Parse frontmatter JSON for filter evaluation.
+        let frontmatter: Option<Value> = file
+            .frontmatter
+            .as_ref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
+        // Apply metadata filters.
+        if !evaluate_filters(&query.filters, frontmatter.as_ref()) {
+            continue;
+        }
+
+        results.push(SearchResult {
+            score: *score,
+            chunk: SearchResultChunk {
+                chunk_id: chunk_id.clone(),
+                heading_hierarchy: chunk.heading_hierarchy.clone(),
+                content: chunk.content.clone(),
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+            },
+            file: SearchResultFile {
+                path: chunk.source_path.clone(),
+                frontmatter,
+                file_size: file.file_size,
+            },
+        });
+
+        // Stop once we have enough results.
+        if results.len() >= query.limit {
+            break;
+        }
+    }
+
+    // Results are already sorted by score descending from search_vectors.
+    info!(
+        query = %query.query,
+        results = results.len(),
+        "search complete"
+    );
+
+    Ok(results)
 }
 
 /// Evaluate all metadata filters against parsed frontmatter. Returns `true` if all pass.
