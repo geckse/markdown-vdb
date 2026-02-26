@@ -35,6 +35,8 @@ tiktoken-rs = "0.6"
 ignore = "0.4"
 async-trait = "0.1"
 futures = "0.3"
+colored = "2"
+indicatif = "0.17"
 # clap_complete = "4" # TODO: re-enable when available offline
 
 [dev-dependencies]
