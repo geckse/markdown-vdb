@@ -26,7 +26,6 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
-use crate::config::Config;
 use crate::embedding::provider::{create_provider, EmbeddingProvider};
 use crate::index::state::Index;
 use crate::index::types::EmbeddingConfig;
