@@ -1,6 +1,9 @@
 # .markdownvdb — Configuration for mdvdb
 # Copy this file to .markdownvdb and uncomment the variables you want to change.
-# Priority: shell environment > .markdownvdb file > built-in defaults
+# Priority: shell environment > .markdownvdb > .env file > built-in defaults
+#
+# Shared secrets like OPENAI_API_KEY can live in a .env file (gitignored)
+# and will be picked up automatically — no need to duplicate them here.
 
 # ── Embedding ────────────────────────────────────────────────────────────────
 
@@ -17,6 +20,7 @@
 # MDVDB_EMBEDDING_BATCH_SIZE=100
 
 # OpenAI API key (required when provider is openai)
+# Tip: put this in .env instead so it's gitignored and shared with other tools
 # OPENAI_API_KEY=
 
 # Ollama server address (used when provider is ollama)

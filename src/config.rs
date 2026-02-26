@@ -54,10 +54,16 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration with priority: shell env > `.markdownvdb` file > built-in defaults.
+    /// Load configuration with priority: shell env > `.markdownvdb` file > `.env` file > built-in defaults.
     pub fn load(project_root: &Path) -> Result<Self, Error> {
-        // Load .markdownvdb file (ignore if missing)
+        // Load .markdownvdb file first (ignore if missing).
+        // dotenvy::from_path does NOT override existing env vars,
+        // so shell env always takes priority.
         let _ = dotenvy::from_path(project_root.join(".markdownvdb"));
+
+        // Load .env as a fallback for shared secrets (e.g., OPENAI_API_KEY).
+        // Since .markdownvdb was loaded first, its values take priority over .env.
+        let _ = dotenvy::from_path(project_root.join(".env"));
 
         let embedding_provider = env_or_default("MDVDB_EMBEDDING_PROVIDER", "openai")
             .parse::<EmbeddingProviderType>()?;

@@ -255,3 +255,88 @@ fn missing_dotenv_file_ok() {
     assert!(result.is_ok());
     clear_env();
 }
+
+#[test]
+#[serial]
+fn env_file_provides_fallback_values() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    // .markdownvdb has mdvdb-specific settings but no API key
+    fs::write(
+        tmp.path().join(".markdownvdb"),
+        "MDVDB_EMBEDDING_PROVIDER=openai\nMDVDB_EMBEDDING_DIMENSIONS=768\n",
+    )
+    .unwrap();
+
+    // .env has the shared secret
+    fs::write(
+        tmp.path().join(".env"),
+        "OPENAI_API_KEY=sk-test-from-dotenv\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(config.openai_api_key, Some("sk-test-from-dotenv".into()));
+    assert_eq!(config.embedding_dimensions, 768);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn markdownvdb_overrides_env_file() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    // .env has a dimension setting
+    fs::write(
+        tmp.path().join(".env"),
+        "MDVDB_EMBEDDING_DIMENSIONS=256\n",
+    )
+    .unwrap();
+
+    // .markdownvdb overrides it
+    fs::write(
+        tmp.path().join(".markdownvdb"),
+        "MDVDB_EMBEDDING_DIMENSIONS=768\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(
+        config.embedding_dimensions, 768,
+        ".markdownvdb should take priority over .env"
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn shell_env_overrides_both_files() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    fs::write(
+        tmp.path().join(".env"),
+        "MDVDB_EMBEDDING_DIMENSIONS=256\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join(".markdownvdb"),
+        "MDVDB_EMBEDDING_DIMENSIONS=768\n",
+    )
+    .unwrap();
+
+    // Shell env overrides everything
+    std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "1024");
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(
+        config.embedding_dimensions, 1024,
+        "shell env should take priority over both files"
+    );
+
+    clear_env();
+}
