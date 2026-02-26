@@ -397,7 +397,7 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// Uses the heuristic: `clamp(sqrt(n / 2), 2, 50)`.
 pub(crate) fn compute_k(n: usize) -> usize {
     let k = (n as f64 / 2.0).sqrt() as usize;
-    k.max(2).min(50)
+    k.clamp(2, 50)
 }
 
 /// Check if a word is a stop word.
