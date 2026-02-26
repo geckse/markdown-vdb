@@ -238,24 +238,27 @@ async fn run() -> anyhow::Result<()> {
                 file: args.file,
             };
 
+            let use_spinner = !args.json && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let spinner = if use_spinner {
+                let sp = indicatif::ProgressBar::new_spinner();
+                sp.set_message("Ingesting markdown files...");
+                sp.enable_steady_tick(std::time::Duration::from_millis(120));
+                Some(sp)
+            } else {
+                None
+            };
+
             let result = vdb.ingest(options).await?;
+
+            if let Some(sp) = spinner {
+                sp.finish_and_clear();
+            }
 
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &result)?;
                 writeln!(std::io::stdout())?;
             } else {
-                println!("Ingestion complete");
-                println!("  Files indexed:  {}", result.files_indexed);
-                println!("  Files skipped:  {}", result.files_skipped);
-                println!("  Files removed:  {}", result.files_removed);
-                println!("  Chunks created: {}", result.chunks_created);
-                println!("  API calls:      {}", result.api_calls);
-                if result.files_failed > 0 {
-                    println!("  Files failed:   {}", result.files_failed);
-                    for err in &result.errors {
-                        eprintln!("    {}: {}", err.path, err.message);
-                    }
-                }
+                format::print_ingest_result(&result);
             }
         }
         Some(Commands::Status(args)) => {

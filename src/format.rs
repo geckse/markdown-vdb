@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::time::SystemTime;
 
 use mdvdb::search::SearchResult;
+use mdvdb::IngestResult;
 
 /// Format a timestamp as a human-readable relative time string.
 ///
@@ -185,6 +186,61 @@ pub fn print_search_results(results: &[SearchResult], query: &str) {
 
         println!();
     }
+}
+
+/// Print ingest results with colored formatting to stdout.
+///
+/// Displays success/failure counts with colored indicators:
+/// green checkmark and counts for successful operations,
+/// red for failures, yellow for numeric values.
+pub fn print_ingest_result(result: &IngestResult) {
+    println!(
+        "\n  {} {}\n",
+        "✓".green().bold(),
+        "Ingestion complete".bold()
+    );
+    println!(
+        "  {}  {}",
+        "Files indexed:".dimmed(),
+        result.files_indexed.to_string().green()
+    );
+    println!(
+        "  {}  {}",
+        "Files skipped:".dimmed(),
+        result.files_skipped.to_string().yellow()
+    );
+    println!(
+        "  {}  {}",
+        "Files removed:".dimmed(),
+        result.files_removed.to_string().yellow()
+    );
+    println!(
+        "  {} {}",
+        "Chunks created:".dimmed(),
+        result.chunks_created.to_string().yellow()
+    );
+    println!(
+        "  {}      {}",
+        "API calls:".dimmed(),
+        result.api_calls.to_string().yellow()
+    );
+
+    if result.files_failed > 0 {
+        println!(
+            "  {}  {}",
+            "Files failed:".dimmed(),
+            result.files_failed.to_string().red().bold()
+        );
+        for err in &result.errors {
+            eprintln!(
+                "    {} {}: {}",
+                "✗".red().bold(),
+                err.path,
+                err.message
+            );
+        }
+    }
+    println!();
 }
 
 #[cfg(test)]
