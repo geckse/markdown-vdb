@@ -41,6 +41,9 @@ pub enum Error {
 
     #[error("config already exists: {}", path.display())]
     ConfigAlreadyExists { path: PathBuf },
+
+    #[error("clustering error: {0}")]
+    Clustering(String),
 }
 
 /// Convenience alias used throughout the crate.
@@ -136,6 +139,12 @@ mod tests {
             path: PathBuf::from(".markdownvdb"),
         };
         assert_eq!(err.to_string(), "config already exists: .markdownvdb");
+    }
+
+    #[test]
+    fn clustering_variant_formats() {
+        let err = Error::Clustering("too few points".into());
+        assert_eq!(err.to_string(), "clustering error: too few points");
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use crate::chunker::Chunk;
+use crate::clustering::ClusterState;
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
 
@@ -71,6 +72,8 @@ pub struct IndexMetadata {
     pub last_updated: u64,
     /// Inferred metadata schema, if available.
     pub schema: Option<Schema>,
+    /// Cluster state from K-means clustering, if available.
+    pub cluster_state: Option<ClusterState>,
 }
 
 /// Status snapshot returned by `Index::status()`.

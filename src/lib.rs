@@ -1,4 +1,5 @@
 pub mod chunker;
+pub mod clustering;
 pub mod config;
 pub mod discovery;
 pub mod embedding;
@@ -6,8 +7,10 @@ pub mod error;
 pub mod index;
 pub mod logging;
 pub mod parser;
+pub mod ingest;
 pub mod schema;
 pub mod search;
+pub mod watcher;
 
 pub use error::Error;
 

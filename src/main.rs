@@ -354,8 +354,6 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Completions(args)) => {
             // Shell completion generation.
-            // When clap_complete is available, this will use clap_complete::generate().
-            // For now, output basic completion scripts directly.
             let script = match args.shell {
                 ShellType::Bash => {
                     r#"# mdvdb bash completions
