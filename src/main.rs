@@ -201,21 +201,19 @@ async fn run() -> anyhow::Result<()> {
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &results)?;
                 writeln!(std::io::stdout())?;
+            } else if results.is_empty() {
+                eprintln!("No results found.");
             } else {
-                if results.is_empty() {
-                    eprintln!("No results found.");
-                } else {
-                    for (i, r) in results.iter().enumerate() {
-                        println!("{}. [score: {:.4}] {}", i + 1, r.score, r.file.path);
-                        if !r.chunk.heading_hierarchy.is_empty() {
-                            println!("   Section: {}", r.chunk.heading_hierarchy.join(" > "));
-                        }
-                        println!("   Lines {}-{}", r.chunk.start_line, r.chunk.end_line);
-                        // Show first 200 chars of content.
-                        let preview: String = r.chunk.content.chars().take(200).collect();
-                        println!("   {}", preview.replace('\n', " "));
-                        println!();
+                for (i, r) in results.iter().enumerate() {
+                    println!("{}. [score: {:.4}] {}", i + 1, r.score, r.file.path);
+                    if !r.chunk.heading_hierarchy.is_empty() {
+                        println!("   Section: {}", r.chunk.heading_hierarchy.join(" > "));
                     }
+                    println!("   Lines {}-{}", r.chunk.start_line, r.chunk.end_line);
+                    // Show first 200 chars of content.
+                    let preview: String = r.chunk.content.chars().take(200).collect();
+                    println!("   {}", preview.replace('\n', " "));
+                    println!();
                 }
             }
         }
@@ -273,30 +271,28 @@ async fn run() -> anyhow::Result<()> {
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &schema)?;
                 writeln!(std::io::stdout())?;
+            } else if schema.fields.is_empty() {
+                println!("No schema fields found.");
             } else {
-                if schema.fields.is_empty() {
-                    println!("No schema fields found.");
-                } else {
-                    println!("Metadata Schema ({} fields)", schema.fields.len());
-                    println!();
-                    for field in &schema.fields {
-                        println!("  {} ({:?})", field.name, field.field_type);
-                        if let Some(desc) = &field.description {
-                            println!("    Description: {}", desc);
-                        }
-                        println!("    Occurrences: {}", field.occurrence_count);
-                        if field.required {
-                            println!("    Required: yes");
-                        }
-                        if !field.sample_values.is_empty() {
-                            let samples: Vec<_> = field.sample_values.iter().take(5).collect();
-                            println!("    Samples: {}", samples.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
-                        }
-                        if let Some(allowed) = &field.allowed_values {
-                            println!("    Allowed: {}", allowed.join(", "));
-                        }
-                        println!();
+                println!("Metadata Schema ({} fields)", schema.fields.len());
+                println!();
+                for field in &schema.fields {
+                    println!("  {} ({:?})", field.name, field.field_type);
+                    if let Some(desc) = &field.description {
+                        println!("    Description: {}", desc);
                     }
+                    println!("    Occurrences: {}", field.occurrence_count);
+                    if field.required {
+                        println!("    Required: yes");
+                    }
+                    if !field.sample_values.is_empty() {
+                        let samples: Vec<_> = field.sample_values.iter().take(5).collect();
+                        println!("    Samples: {}", samples.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+                    }
+                    if let Some(allowed) = &field.allowed_values {
+                        println!("    Allowed: {}", allowed.join(", "));
+                    }
+                    println!();
                 }
             }
         }
