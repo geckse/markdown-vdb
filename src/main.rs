@@ -1,3 +1,5 @@
+mod format;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
