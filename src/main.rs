@@ -226,20 +226,8 @@ async fn run() -> anyhow::Result<()> {
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
-            } else if results.is_empty() {
-                eprintln!("No results found.");
             } else {
-                for (i, r) in results.iter().enumerate() {
-                    println!("{}. [score: {:.4}] {}", i + 1, r.score, r.file.path);
-                    if !r.chunk.heading_hierarchy.is_empty() {
-                        println!("   Section: {}", r.chunk.heading_hierarchy.join(" > "));
-                    }
-                    println!("   Lines {}-{}", r.chunk.start_line, r.chunk.end_line);
-                    // Show first 200 chars of content.
-                    let preview: String = r.chunk.content.chars().take(200).collect();
-                    println!("   {}", preview.replace('\n', " "));
-                    println!();
-                }
+                format::print_search_results(&results, &args.query);
             }
         }
         Some(Commands::Ingest(args)) => {

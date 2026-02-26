@@ -1,5 +1,8 @@
 use colored::Colorize;
+use serde_json::Value;
 use std::time::SystemTime;
+
+use mdvdb::search::SearchResult;
 
 /// Format a timestamp as a human-readable relative time string.
 ///
@@ -100,6 +103,88 @@ pub fn render_bar(filled: usize, total: usize) -> String {
         "█".repeat(filled),
         "░".repeat(unfilled),
     )
+}
+
+/// Print search results with colored formatting to stdout.
+///
+/// Displays numbered results with score bars, colored scores, bold file paths,
+/// section hierarchy, line ranges, content previews, file sizes, and frontmatter.
+pub fn print_search_results(results: &[SearchResult], query: &str) {
+    if results.is_empty() {
+        println!(
+            "  {} No results found for {}",
+            "✗".red().bold(),
+            format!("\"{}\"", query).yellow()
+        );
+        return;
+    }
+
+    println!(
+        "{} {} result{} for {}\n",
+        "Search:".bold(),
+        results.len().to_string().bold(),
+        if results.len() == 1 { "" } else { "s" },
+        format!("\"{}\"", query).yellow()
+    );
+
+    for (i, r) in results.iter().enumerate() {
+        // Score bar: map 0.0–1.0 to 0–10 filled segments
+        let filled = (r.score * 10.0).round() as usize;
+        let bar = render_bar(filled, 10);
+
+        println!(
+            "  {} {} {} {}",
+            format!("{}.", i + 1).bold(),
+            bar,
+            format!("{:.4}", r.score).yellow(),
+            r.file.path.bold()
+        );
+
+        // Section hierarchy
+        if !r.chunk.heading_hierarchy.is_empty() {
+            println!(
+                "     {} {}",
+                "Section:".dimmed(),
+                r.chunk.heading_hierarchy.join(" > ").cyan()
+            );
+        }
+
+        // Line range and file size
+        let line_range = format!("{}-{}", r.chunk.start_line, r.chunk.end_line);
+        let size_str = format!("({})", format_file_size(r.file.file_size));
+        println!(
+            "     {} {}  {}",
+            "Lines:".dimmed(),
+            line_range,
+            size_str.dimmed()
+        );
+
+        // Content preview (first 200 chars, dimmed)
+        let preview: String = r.chunk.content.chars().take(200).collect();
+        let preview = preview.replace('\n', " ");
+        if !preview.is_empty() {
+            println!("     {}", preview.dimmed());
+        }
+
+        // Frontmatter key-value pairs
+        if let Some(Value::Object(map)) = &r.file.frontmatter {
+            if !map.is_empty() {
+                let pairs: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        format!("{}: {}", k.dimmed(), val)
+                    })
+                    .collect();
+                println!("     {}", pairs.join("  "));
+            }
+        }
+
+        println!();
+    }
 }
 
 #[cfg(test)]
