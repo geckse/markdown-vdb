@@ -42,11 +42,47 @@ pub fn format_timestamp(time: SystemTime) -> String {
     }
 
     let days = hours / 24;
+    if days > 30 {
+        // Convert to absolute date format for old timestamps
+        let epoch_secs = time
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        return format_epoch_datetime(epoch_secs);
+    }
     if days == 1 {
         "1 day ago".to_string()
     } else {
         format!("{days} days ago")
     }
+}
+
+/// Format epoch seconds as "YYYY-MM-DD HH:MM:SS" without chrono.
+fn format_epoch_datetime(epoch_secs: u64) -> String {
+    // Days from epoch
+    let total_days = epoch_secs / 86400;
+    let day_secs = epoch_secs % 86400;
+    let hour = day_secs / 3600;
+    let minute = (day_secs % 3600) / 60;
+    let second = day_secs % 60;
+
+    // Convert total days since 1970-01-01 to year/month/day
+    // Using a standard civil-from-days algorithm
+    let z = total_days as i64 + 719468; // shift to 0000-03-01 epoch
+    let era = z / 146097;
+    let doe = z - era * 146097; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y, m, d, hour, minute, second
+    )
 }
 
 /// Format a byte count as a human-readable file size (1024-based).
@@ -83,7 +119,6 @@ pub fn print_logo() {
 }
 
 /// Print the logo followed by version and tagline.
-#[allow(dead_code)]
 pub fn print_version() {
     print_logo();
     println!(
@@ -553,6 +588,35 @@ mod tests {
     fn timestamp_future() {
         let time = SystemTime::now() + Duration::from_secs(3600);
         assert_eq!(format_timestamp(time), "in the future");
+    }
+
+    #[test]
+    fn test_format_timestamp_old_date() {
+        // ~60 days ago should show YYYY-MM-DD HH:MM:SS
+        let time = SystemTime::now() - Duration::from_secs(86400 * 60);
+        let result = format_timestamp(time);
+        // Should NOT contain "days ago"
+        assert!(!result.contains("days ago"), "Expected date format, got: {}", result);
+        // Should match YYYY-MM-DD HH:MM:SS pattern
+        assert!(
+            result.len() == 19 && result.chars().nth(4) == Some('-') && result.chars().nth(10) == Some(' '),
+            "Expected YYYY-MM-DD HH:MM:SS format, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_format_timestamp_epoch_zero() {
+        let time = SystemTime::UNIX_EPOCH;
+        let result = format_timestamp(time);
+        assert_eq!(result, "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn test_format_timestamp_30_days_still_relative() {
+        let time = SystemTime::now() - Duration::from_secs(86400 * 30);
+        let result = format_timestamp(time);
+        assert_eq!(result, "30 days ago");
     }
 
     #[test]

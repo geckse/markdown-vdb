@@ -21,7 +21,7 @@ struct SearchOutput {
 
 /// mdvdb — Markdown Vector Database
 #[derive(Parser)]
-#[command(name = "mdvdb", version, about)]
+#[command(name = "mdvdb", about)]
 struct Cli {
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -34,6 +34,10 @@ struct Cli {
     /// Disable colored output
     #[arg(long, global = true)]
     no_color: bool,
+
+    /// Print version information with logo
+    #[arg(long)]
+    version: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -191,6 +195,11 @@ async fn run() -> anyhow::Result<()> {
     // Disable colors if --no-color flag, NO_COLOR env var, or JSON mode is active.
     if cli.no_color || std::env::var_os("NO_COLOR").is_some() {
         colored::control::set_override(false);
+    }
+
+    if cli.version {
+        format::print_version();
+        return Ok(());
     }
 
     mdvdb::logging::init(cli.verbose)?;
