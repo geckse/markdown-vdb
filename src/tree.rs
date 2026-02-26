@@ -1,4 +1,13 @@
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
 use serde::Serialize;
+
+use crate::config::Config;
+use crate::discovery::FileDiscovery;
+use crate::error::Error;
+use crate::index::Index;
+use crate::parser::compute_content_hash;
 
 /// Sync state of a file relative to the index.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -29,6 +38,69 @@ pub struct FileTree {
     pub modified_count: usize,
     pub new_count: usize,
     pub deleted_count: usize,
+}
+
+/// Build a file tree by comparing discovered files on disk against the index.
+///
+/// Classifies each file as Indexed (hash match), Modified (hash mismatch),
+/// New (on disk but not in index), or Deleted (in index but not on disk).
+pub fn build_file_tree(root: &Path, config: &Config, index: &Index) -> Result<FileTree, Error> {
+    let discovery = FileDiscovery::new(root, config);
+    let disk_files = discovery.discover()?;
+    let indexed_hashes: HashMap<String, String> = index.get_file_hashes();
+
+    let disk_paths: HashSet<String> = disk_files
+        .iter()
+        .filter_map(|p| p.to_str().map(|s| s.to_string()))
+        .collect();
+
+    let mut entries: Vec<(String, FileState)> = Vec::new();
+    let mut indexed_count = 0usize;
+    let mut modified_count = 0usize;
+    let mut new_count = 0usize;
+    let mut deleted_count = 0usize;
+
+    // Classify disk files
+    for rel_path in &disk_paths {
+        if let Some(expected_hash) = indexed_hashes.get(rel_path) {
+            // File exists in index — compare hashes
+            let full_path = root.join(rel_path);
+            let content = std::fs::read_to_string(&full_path).map_err(|e| {
+                Error::Io(std::io::Error::new(e.kind(), format!("{}: {}", rel_path, e)))
+            })?;
+            let disk_hash = compute_content_hash(&content);
+            if disk_hash == *expected_hash {
+                entries.push((rel_path.clone(), FileState::Indexed));
+                indexed_count += 1;
+            } else {
+                entries.push((rel_path.clone(), FileState::Modified));
+                modified_count += 1;
+            }
+        } else {
+            entries.push((rel_path.clone(), FileState::New));
+            new_count += 1;
+        }
+    }
+
+    // Find deleted files (in index but not on disk)
+    for indexed_path in indexed_hashes.keys() {
+        if !disk_paths.contains(indexed_path) {
+            entries.push((indexed_path.clone(), FileState::Deleted));
+            deleted_count += 1;
+        }
+    }
+
+    let total_files = entries.len();
+    let root_node = build_tree_from_entries(&entries);
+
+    Ok(FileTree {
+        root: root_node,
+        total_files,
+        indexed_count,
+        modified_count,
+        new_count,
+        deleted_count,
+    })
 }
 
 /// Build a hierarchical tree from a flat list of (path, state) entries.
@@ -108,6 +180,97 @@ fn sort_children(node: &mut FileTreeNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+    use std::path::PathBuf;
+    use crate::config::EmbeddingProviderType;
+    use crate::index::Index;
+    use crate::index::types::EmbeddingConfig;
+
+    const DIMS: usize = 8;
+
+    fn test_embedding_config() -> EmbeddingConfig {
+        EmbeddingConfig {
+            provider: "mock".to_string(),
+            model: "test".to_string(),
+            dimensions: DIMS,
+        }
+    }
+
+    fn mock_config() -> Config {
+        Config {
+            embedding_provider: EmbeddingProviderType::Mock,
+            embedding_model: "mock-model".into(),
+            embedding_dimensions: DIMS,
+            embedding_batch_size: 100,
+            openai_api_key: None,
+            ollama_host: "http://localhost:11434".into(),
+            embedding_endpoint: None,
+            source_dirs: vec![PathBuf::from(".")],
+            index_file: PathBuf::from(".markdownvdb.index"),
+            ignore_patterns: vec![],
+            watch_enabled: false,
+            watch_debounce_ms: 300,
+            chunk_max_tokens: 512,
+            chunk_overlap_tokens: 50,
+            clustering_enabled: false,
+            clustering_rebalance_threshold: 50,
+            search_default_limit: 10,
+            search_min_score: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_build_file_tree_summary_counts() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        // Create markdown files on disk
+        std::fs::write(root.join("a.md"), "# Alpha\nContent A").unwrap();
+        std::fs::write(root.join("b.md"), "# Beta\nContent B").unwrap();
+        std::fs::write(root.join("c.md"), "# Gamma\nContent C").unwrap();
+
+        let config = mock_config();
+        let idx_path = root.join(".markdownvdb.index");
+        let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
+
+        // "a.md" with matching hash → Indexed
+        let content_a = std::fs::read_to_string(root.join("a.md")).unwrap();
+        let hash_a = compute_content_hash(&content_a);
+        index.insert_file_hash_for_test("a.md", &hash_a);
+
+        // "d.md" not on disk → Deleted
+        index.insert_file_hash_for_test("d.md", "oldhash");
+
+        // b.md and c.md not in index → New
+        let tree = build_file_tree(root, &config, &index).unwrap();
+
+        assert_eq!(tree.total_files, 4);
+        assert_eq!(tree.indexed_count, 1);
+        assert_eq!(tree.new_count, 2);
+        assert_eq!(tree.deleted_count, 1);
+        assert_eq!(tree.modified_count, 0);
+    }
+
+    #[test]
+    fn test_build_file_tree_modified_detection() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+
+        std::fs::write(root.join("doc.md"), "# Updated\nNew content").unwrap();
+
+        let config = mock_config();
+        let idx_path = root.join(".markdownvdb.index");
+        let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
+
+        // Index with stale hash → Modified
+        index.insert_file_hash_for_test("doc.md", "stale_hash_value");
+
+        let tree = build_file_tree(root, &config, &index).unwrap();
+
+        assert_eq!(tree.total_files, 1);
+        assert_eq!(tree.modified_count, 1);
+        assert_eq!(tree.indexed_count, 0);
+    }
 
     #[test]
     fn test_build_tree_empty() {
