@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::time::SystemTime;
 
 use mdvdb::search::SearchResult;
+use mdvdb::IndexStatus;
+use mdvdb::DocumentInfo;
 use mdvdb::IngestResult;
 
 /// Format a timestamp as a human-readable relative time string.
@@ -238,6 +240,95 @@ pub fn print_ingest_result(result: &IngestResult) {
                 err.path,
                 err.message
             );
+        }
+    }
+    println!();
+}
+
+/// Convert a Unix timestamp (seconds since epoch) to a SystemTime.
+fn unix_to_system_time(secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
+/// Print index status with colored formatting to stdout.
+pub fn print_status(status: &IndexStatus) {
+    println!("\n  {} {}\n", "●".cyan().bold(), "Index Status".bold());
+    println!(
+        "  {}  {}",
+        "Documents:".cyan(),
+        status.document_count.to_string().yellow()
+    );
+    println!(
+        "  {}     {}",
+        "Chunks:".cyan(),
+        status.chunk_count.to_string().yellow()
+    );
+    println!(
+        "  {}    {}",
+        "Vectors:".cyan(),
+        status.vector_count.to_string().yellow()
+    );
+    println!(
+        "  {}  {}",
+        "File size:".cyan(),
+        format_file_size(status.file_size).yellow()
+    );
+    let updated = format_timestamp(unix_to_system_time(status.last_updated));
+    println!(
+        "  {}    {}",
+        "Updated:".cyan(),
+        updated
+    );
+    println!();
+    println!("  {} {}", "Embedding:".cyan(), status.embedding_config.provider.bold());
+    println!(
+        "  {}      {}",
+        "Model:".cyan(),
+        status.embedding_config.model
+    );
+    println!(
+        "  {} {}",
+        "Dimensions:".cyan(),
+        status.embedding_config.dimensions.to_string().yellow()
+    );
+    println!();
+}
+
+/// Print document info with colored formatting to stdout.
+pub fn print_document(doc: &DocumentInfo) {
+    println!("\n  {} {}\n", "●".cyan().bold(), doc.path.bold());
+    println!(
+        "  {}  {}",
+        "File size:".cyan(),
+        format_file_size(doc.file_size).yellow()
+    );
+    println!(
+        "  {} {}",
+        "Indexed at:".cyan(),
+        format_timestamp(unix_to_system_time(doc.indexed_at))
+    );
+    println!(
+        "  {}     {}",
+        "Hash:".cyan(),
+        doc.content_hash.dimmed()
+    );
+    println!(
+        "  {}   {}",
+        "Chunks:".cyan(),
+        doc.chunk_count.to_string().yellow()
+    );
+
+    if let Some(Value::Object(map)) = &doc.frontmatter {
+        if !map.is_empty() {
+            println!();
+            println!("  {}", "Frontmatter:".cyan());
+            for (k, v) in map {
+                let val = match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                println!("    {}: {}", k.dimmed(), val);
+            }
         }
     }
     println!();

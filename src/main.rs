@@ -269,15 +269,7 @@ async fn run() -> anyhow::Result<()> {
                 serde_json::to_writer_pretty(std::io::stdout(), &status)?;
                 writeln!(std::io::stdout())?;
             } else {
-                println!("Index Status");
-                println!("  Documents:  {}", status.document_count);
-                println!("  Chunks:     {}", status.chunk_count);
-                println!("  Vectors:    {}", status.vector_count);
-                println!("  File size:  {} bytes", status.file_size);
-                println!("  Updated:    {}", status.last_updated);
-                println!("  Provider:   {}", status.embedding_config.provider);
-                println!("  Model:      {}", status.embedding_config.model);
-                println!("  Dimensions: {}", status.embedding_config.dimensions);
+                format::print_status(&status);
             }
         }
         Some(Commands::Schema(args)) => {
@@ -343,11 +335,7 @@ async fn run() -> anyhow::Result<()> {
                 serde_json::to_writer_pretty(std::io::stdout(), &doc)?;
                 writeln!(std::io::stdout())?;
             } else {
-                println!("Document: {}", doc.path);
-                println!("  Content hash: {}", doc.content_hash);
-                println!("  Chunks:       {}", doc.chunk_count);
-                println!("  File size:    {} bytes", doc.file_size);
-                println!("  Indexed at:   {}", doc.indexed_at);
+                format::print_document(&doc);
             }
         }
         Some(Commands::Watch(args)) => {
