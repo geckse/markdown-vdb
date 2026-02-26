@@ -219,8 +219,33 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Ingest(_args)) => {
-            todo!("ingest command implementation")
+        Some(Commands::Ingest(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+
+            let options = mdvdb::IngestOptions {
+                full: args.full,
+                file: args.file,
+            };
+
+            let result = vdb.ingest(options).await?;
+
+            if args.json {
+                serde_json::to_writer_pretty(std::io::stdout(), &result)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                println!("Ingestion complete");
+                println!("  Files indexed:  {}", result.files_indexed);
+                println!("  Files skipped:  {}", result.files_skipped);
+                println!("  Files removed:  {}", result.files_removed);
+                println!("  Chunks created: {}", result.chunks_created);
+                println!("  API calls:      {}", result.api_calls);
+                if result.files_failed > 0 {
+                    println!("  Files failed:   {}", result.files_failed);
+                    for err in &result.errors {
+                        eprintln!("    {}: {}", err.path, err.message);
+                    }
+                }
+            }
         }
         Some(Commands::Status(args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
@@ -298,10 +323,72 @@ async fn run() -> anyhow::Result<()> {
             todo!("watch command implementation")
         }
         Some(Commands::Init(_args)) => {
-            todo!("init command implementation")
+            MarkdownVdb::init(&cwd)?;
+            println!("Created .markdownvdb config file in {}", cwd.display());
+            println!("Edit it to configure your embedding provider and other settings.");
         }
-        Some(Commands::Completions(_args)) => {
-            todo!("completions command implementation")
+        Some(Commands::Completions(args)) => {
+            // Shell completion generation.
+            // When clap_complete is available, this will use clap_complete::generate().
+            // For now, output basic completion scripts directly.
+            let script = match args.shell {
+                ShellType::Bash => {
+                    r#"# mdvdb bash completions
+_mdvdb() {
+    local cur prev commands
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    commands="search ingest status schema clusters get watch init completions"
+
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        COMPREPLY=($(compgen -W "$commands --help --version --verbose --root" -- "$cur"))
+    fi
+}
+complete -F _mdvdb mdvdb"#
+                }
+                ShellType::Zsh => {
+                    r#"#compdef mdvdb
+_mdvdb() {
+    local -a commands
+    commands=(
+        'search:Semantic search across indexed markdown files'
+        'ingest:Ingest markdown files into the index'
+        'status:Show index status and configuration'
+        'schema:Show inferred metadata schema'
+        'clusters:Show document clusters'
+        'get:Get metadata for a specific file'
+        'watch:Watch for file changes and re-index automatically'
+        'init:Initialize a new .markdownvdb config file'
+    )
+    _describe 'command' commands
+}
+_mdvdb"#
+                }
+                ShellType::Fish => {
+                    r#"# mdvdb fish completions
+complete -c mdvdb -n '__fish_use_subcommand' -a search -d 'Semantic search across indexed markdown files'
+complete -c mdvdb -n '__fish_use_subcommand' -a ingest -d 'Ingest markdown files into the index'
+complete -c mdvdb -n '__fish_use_subcommand' -a status -d 'Show index status and configuration'
+complete -c mdvdb -n '__fish_use_subcommand' -a schema -d 'Show inferred metadata schema'
+complete -c mdvdb -n '__fish_use_subcommand' -a clusters -d 'Show document clusters'
+complete -c mdvdb -n '__fish_use_subcommand' -a get -d 'Get metadata for a specific file'
+complete -c mdvdb -n '__fish_use_subcommand' -a watch -d 'Watch for file changes and re-index automatically'
+complete -c mdvdb -n '__fish_use_subcommand' -a init -d 'Initialize a new .markdownvdb config file'"#
+                }
+                ShellType::PowerShell => {
+                    r#"# mdvdb PowerShell completions
+Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+    $commands = @('search', 'ingest', 'status', 'schema', 'clusters', 'get', 'watch', 'init')
+    $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    }
+}"#
+                }
+            };
+            write!(std::io::stdout(), "{}", script)?;
+            writeln!(std::io::stdout())?;
         }
         None => {
             println!("mdvdb - Markdown Vector Database");
