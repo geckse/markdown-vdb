@@ -7,7 +7,7 @@ use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::discovery::FileDiscovery;
@@ -163,12 +163,13 @@ impl Watcher {
     async fn process_file(&self, relative_path: &Path) -> Result<()> {
         let abs_path = self.project_root.join(relative_path);
 
-        // Check if file still exists (may have been deleted between event and processing).
+        // If the file no longer exists (deleted between event and processing, or the
+        // OS sent a Modify event for a removal), treat it as a deletion.
         if !abs_path.is_file() {
-            warn!(
-                path = %relative_path.display(),
-                "file no longer exists, skipping"
-            );
+            let relative = relative_path.to_string_lossy().to_string();
+            info!(path = %relative, "file no longer exists, removing from index");
+            self.index.remove_file(&relative)?;
+            self.index.save()?;
             return Ok(());
         }
 
@@ -178,7 +179,7 @@ impl Watcher {
             .get_file(&relative_path.to_string_lossy())
             .map(|f| f.content_hash.clone());
 
-        let file = crate::parser::parse_markdown_file(&abs_path, relative_path)?;
+        let file = crate::parser::parse_markdown_file(&self.project_root, relative_path)?;
 
         if let Some(ref hash) = stored_hash {
             if hash == &file.content_hash {
