@@ -1,12 +1,14 @@
 // Full + incremental ingestion pipeline
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::chunker::{self, Chunk};
+use crate::config::Config;
+use crate::discovery::FileDiscovery;
 use crate::embedding::batch::{self, Chunk as BatchChunk};
 use crate::embedding::provider::EmbeddingProvider;
 use crate::error::Result;
@@ -146,5 +148,135 @@ pub async fn ingest_file(
         chunks_skipped,
         api_calls: embed_result.api_calls,
         skipped: false,
+    })
+}
+
+/// Aggregate result of a full ingestion run across all discovered files.
+#[derive(Debug, Serialize)]
+pub struct FullIngestResult {
+    /// Total number of files discovered.
+    pub files_discovered: usize,
+    /// Number of files that were ingested (new or changed).
+    pub files_ingested: usize,
+    /// Number of files skipped (unchanged content hash).
+    pub files_skipped: usize,
+    /// Number of stale files removed from the index.
+    pub files_removed: usize,
+    /// Total chunks across all files.
+    pub chunks_total: usize,
+    /// Total chunks embedded (new or changed).
+    pub chunks_embedded: usize,
+    /// Total chunks skipped (unchanged).
+    pub chunks_skipped: usize,
+    /// Total API calls made to the embedding provider.
+    pub api_calls: usize,
+    /// Per-file results.
+    pub results: Vec<IngestResult>,
+}
+
+/// Perform a full ingestion: discover all markdown files, parse and chunk them,
+/// embed changed files, upsert into the index, and remove stale entries.
+pub async fn ingest_full(
+    project_root: &Path,
+    config: &Config,
+    index: &Index,
+    provider: &dyn EmbeddingProvider,
+    max_tokens: usize,
+    overlap_tokens: usize,
+    batch_size: usize,
+) -> Result<FullIngestResult> {
+    // 1. Discover all markdown files.
+    let discovery = FileDiscovery::new(project_root, config);
+    let discovered_paths = discovery.discover()?;
+    let files_discovered = discovered_paths.len();
+    info!(files = files_discovered, "discovered markdown files");
+
+    // 2. Track which files are currently on disk for stale detection.
+    let discovered_set: HashSet<String> = discovered_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    // 3. Ingest each discovered file.
+    let mut results = Vec::with_capacity(files_discovered);
+    let mut files_ingested: usize = 0;
+    let mut files_skipped: usize = 0;
+    let mut chunks_total: usize = 0;
+    let mut chunks_embedded: usize = 0;
+    let mut chunks_skipped: usize = 0;
+    let mut api_calls: usize = 0;
+
+    for relative_path in &discovered_paths {
+        match ingest_file(
+            project_root,
+            relative_path,
+            index,
+            provider,
+            max_tokens,
+            overlap_tokens,
+            batch_size,
+        )
+        .await
+        {
+            Ok(result) => {
+                if result.skipped {
+                    files_skipped += 1;
+                } else {
+                    files_ingested += 1;
+                }
+                chunks_total += result.chunks_total;
+                chunks_embedded += result.chunks_embedded;
+                chunks_skipped += result.chunks_skipped;
+                api_calls += result.api_calls;
+                results.push(result);
+            }
+            Err(e) => {
+                warn!(
+                    path = %relative_path.display(),
+                    error = %e,
+                    "failed to ingest file, skipping"
+                );
+            }
+        }
+    }
+
+    // 4. Remove stale entries (files in the index that no longer exist on disk).
+    let indexed_hashes = index.get_file_hashes();
+    let mut files_removed: usize = 0;
+    for indexed_path in indexed_hashes.keys() {
+        if !discovered_set.contains(indexed_path) {
+            debug!(path = %indexed_path, "removing stale file from index");
+            index.remove_file(indexed_path)?;
+            files_removed += 1;
+        }
+    }
+
+    // 5. Save the index once after all mutations.
+    if files_ingested > 0 || files_removed > 0 {
+        index.save()?;
+    }
+
+    info!(
+        files_discovered,
+        files_ingested,
+        files_skipped,
+        files_removed,
+        chunks_total,
+        chunks_embedded,
+        chunks_skipped,
+        api_calls,
+        "full ingestion complete"
+    );
+
+    Ok(FullIngestResult {
+        files_discovered,
+        files_ingested,
+        files_skipped,
+        files_removed,
+        chunks_total,
+        chunks_embedded,
+        chunks_skipped,
+        api_calls,
+        results,
     })
 }
