@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
+use linfa::traits::Fit;
+use linfa::DatasetBase;
+use ndarray::Array2;
 use serde::Serialize;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::config::Config;
 
@@ -70,10 +73,142 @@ impl Clusterer {
     /// `documents` maps chunk ID to its text content (for keyword extraction).
     pub fn cluster_all(
         &self,
-        _vectors: &HashMap<String, Vec<f32>>,
-        _documents: &HashMap<String, String>,
+        vectors: &HashMap<String, Vec<f32>>,
+        documents: &HashMap<String, String>,
     ) -> crate::Result<ClusterState> {
-        todo!("cluster_all: full K-means implementation in Phase 2")
+        if vectors.is_empty() {
+            debug!("cluster_all: no vectors, returning empty state");
+            return Ok(ClusterState {
+                clusters: Vec::new(),
+                docs_since_rebalance: 0,
+                docs_at_last_rebalance: 0,
+            });
+        }
+
+        // Collect chunk IDs and their vectors in deterministic order
+        let mut ids: Vec<String> = vectors.keys().cloned().collect();
+        ids.sort();
+
+        // Filter out zero-norm vectors
+        let (ids, vecs): (Vec<String>, Vec<&Vec<f32>>) = ids
+            .into_iter()
+            .filter_map(|id| {
+                let v = vectors.get(&id)?;
+                let norm: f32 = v.iter().map(|x| x * x).sum();
+                if norm == 0.0 {
+                    debug!("cluster_all: skipping zero-norm vector for {id}");
+                    None
+                } else {
+                    Some((id, v))
+                }
+            })
+            .unzip();
+
+        let n = ids.len();
+        if n == 0 {
+            return Ok(ClusterState {
+                clusters: Vec::new(),
+                docs_since_rebalance: 0,
+                docs_at_last_rebalance: 0,
+            });
+        }
+
+        // Single document: return one cluster
+        if n == 1 {
+            let chunk_id = &ids[0];
+            let doc_texts: Vec<&str> = documents
+                .get(chunk_id)
+                .map(|s| vec![s.as_str()])
+                .unwrap_or_default();
+            let keywords = self.extract_keywords(&doc_texts, 5);
+            let label = self.generate_label(&keywords);
+
+            return Ok(ClusterState {
+                clusters: vec![ClusterInfo {
+                    id: 0,
+                    label,
+                    centroid: vecs[0].clone(),
+                    members: vec![chunk_id.clone()],
+                    keywords,
+                }],
+                docs_since_rebalance: 0,
+                docs_at_last_rebalance: n,
+            });
+        }
+
+        let dim = vecs[0].len();
+        let k = compute_k(n);
+
+        // Build ndarray matrix (f64 for linfa)
+        let mut data = Array2::<f64>::zeros((n, dim));
+        for (i, v) in vecs.iter().enumerate() {
+            for (j, &val) in v.iter().enumerate() {
+                data[[i, j]] = val as f64;
+            }
+        }
+
+        let dataset = DatasetBase::from(data);
+
+        // Run K-means
+        let model = linfa_clustering::KMeans::params(k)
+            .max_n_iterations(100)
+            .tolerance(1e-4)
+            .fit(&dataset)
+            .map_err(|e| crate::Error::Clustering(format!("K-means failed: {e}")))?;
+
+        // Get cluster assignments
+        let centroids = model.centroids();
+        let assignments = linfa::traits::Predict::predict(&model, &dataset);
+
+        info!("cluster_all: clustered {n} documents into {k} clusters");
+
+        // Group members by cluster
+        let mut cluster_members: HashMap<usize, Vec<String>> = HashMap::new();
+        for (i, &cluster_id) in assignments.iter().enumerate() {
+            cluster_members
+                .entry(cluster_id)
+                .or_default()
+                .push(ids[i].clone());
+        }
+
+        // Build ClusterInfo for each cluster
+        let mut clusters: Vec<ClusterInfo> = Vec::new();
+        for cluster_id in 0..k {
+            let members = cluster_members.remove(&cluster_id).unwrap_or_default();
+            if members.is_empty() {
+                continue;
+            }
+
+            // Extract centroid as f32
+            let centroid: Vec<f32> = centroids
+                .row(cluster_id)
+                .iter()
+                .map(|&v| v as f32)
+                .collect();
+
+            // Collect document texts for keyword extraction
+            let doc_texts: Vec<&str> = members
+                .iter()
+                .filter_map(|id| documents.get(id).map(|s| s.as_str()))
+                .collect();
+
+            let keywords = self.extract_keywords(&doc_texts, 5);
+            let label = self.generate_label(&keywords);
+
+            clusters.push(ClusterInfo {
+                id: cluster_id,
+                label,
+                centroid,
+                members,
+                keywords,
+            });
+        }
+
+        Ok(ClusterState {
+            clusters,
+            docs_since_rebalance: 0,
+            docs_at_last_rebalance: n,
+        })
     }
 
     /// Assign a single new document to the nearest existing cluster.
