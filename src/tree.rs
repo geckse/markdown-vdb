@@ -161,6 +161,116 @@ pub fn build_tree_from_entries(entries: &[(String, FileState)]) -> FileTreeNode 
     root
 }
 
+/// Render a file tree as an ASCII string with box-drawing characters.
+///
+/// When `colored` is true, applies ANSI colors: green for indexed, yellow for
+/// modified, blue for new, red for deleted, bold for directories.
+/// Non-indexed files always get a `[state]` suffix regardless of color mode.
+/// Appends a summary line at the end.
+pub fn render_tree(tree: &FileTree, colored: bool) -> String {
+    use colored::Colorize;
+
+    let mut out = String::new();
+
+    // Render root
+    let root_label = if colored {
+        format!("{}", tree.root.name.bold())
+    } else {
+        tree.root.name.clone()
+    };
+    out.push_str(&root_label);
+    out.push('\n');
+
+    render_node_children(&tree.root.children, "", colored, &mut out);
+
+    // Summary line
+    out.push_str(&format!(
+        "\n{} files ({} indexed, {} modified, {} new, {} deleted)\n",
+        tree.total_files,
+        tree.indexed_count,
+        tree.modified_count,
+        tree.new_count,
+        tree.deleted_count,
+    ));
+
+    out
+}
+
+fn render_node_children(children: &[FileTreeNode], prefix: &str, colored: bool, out: &mut String) {
+    use colored::Colorize;
+
+    for (i, child) in children.iter().enumerate() {
+        let is_last = i == children.len() - 1;
+        let connector = if is_last { "└── " } else { "├── " };
+        let child_prefix = if is_last {
+            format!("{}    ", prefix)
+        } else {
+            format!("{}│   ", prefix)
+        };
+
+        let name = if colored {
+            if child.is_dir {
+                format!("{}", child.name.bold())
+            } else {
+                match &child.state {
+                    Some(FileState::Indexed) => format!("{}", child.name.green()),
+                    Some(FileState::Modified) => format!("{}", child.name.yellow()),
+                    Some(FileState::New) => format!("{}", child.name.blue()),
+                    Some(FileState::Deleted) => format!("{}", child.name.red()),
+                    None => child.name.clone(),
+                }
+            }
+        } else {
+            child.name.clone()
+        };
+
+        let suffix = if !child.is_dir {
+            match &child.state {
+                Some(FileState::Modified) => " [modified]",
+                Some(FileState::New) => " [new]",
+                Some(FileState::Deleted) => " [deleted]",
+                _ => "",
+            }
+        } else {
+            ""
+        };
+
+        out.push_str(&format!("{}{}{}{}\n", prefix, connector, name, suffix));
+
+        if child.is_dir {
+            render_node_children(&child.children, &child_prefix, colored, out);
+        }
+    }
+}
+
+/// Filter a file tree to only include the subtree rooted at the given path prefix.
+///
+/// Walks the tree looking for the directory matching `prefix`. Returns the matching
+/// subtree node, or `None` if no match is found.
+pub fn filter_subtree(tree: &FileTreeNode, prefix: &str) -> Option<FileTreeNode> {
+    let prefix = prefix.trim_end_matches('/');
+
+    // Check if this node matches
+    if tree.path == prefix || (tree.path == "." && prefix == ".") {
+        return Some(tree.clone());
+    }
+
+    // Walk children looking for a match
+    for child in &tree.children {
+        if child.is_dir {
+            if child.path == prefix {
+                return Some(child.clone());
+            }
+            // Check if the prefix is deeper within this child
+            if prefix.starts_with(&format!("{}/", child.path)) {
+                return filter_subtree(child, prefix);
+            }
+        }
+    }
+
+    None
+}
+
 /// Recursively sort children: directories first (alphabetical), then files (alphabetical).
 fn sort_children(node: &mut FileTreeNode) {
     node.children.sort_by(|a, b| {
@@ -346,6 +456,130 @@ mod tests {
         assert_eq!(root.children[2].name, "alpha.md");
         assert_eq!(root.children[3].name, "beta.md");
         assert_eq!(root.children[4].name, "zebra.md");
+    }
+
+    #[test]
+    fn test_render_tree_ascii() {
+        let entries = vec![
+            ("docs/guide.md".to_string(), FileState::Indexed),
+            ("docs/api/auth.md".to_string(), FileState::Modified),
+            ("readme.md".to_string(), FileState::New),
+        ];
+        let root = build_tree_from_entries(&entries);
+        let tree = FileTree {
+            root,
+            total_files: 3,
+            indexed_count: 1,
+            modified_count: 1,
+            new_count: 1,
+            deleted_count: 0,
+        };
+
+        let output = render_tree(&tree, false);
+        assert!(output.contains("├── ") || output.contains("└── "));
+        assert!(output.contains("│"));
+        assert!(output.contains("docs"));
+        assert!(output.contains("readme.md"));
+        assert!(output.contains("[modified]"));
+        assert!(output.contains("[new]"));
+        // Indexed files should NOT have a suffix
+        assert!(!output.contains("[indexed]"));
+        assert!(output.contains("3 files (1 indexed, 1 modified, 1 new, 0 deleted)"));
+    }
+
+    #[test]
+    fn test_render_tree_no_color() {
+        let entries = vec![
+            ("a.md".to_string(), FileState::Indexed),
+            ("b.md".to_string(), FileState::Deleted),
+        ];
+        let root = build_tree_from_entries(&entries);
+        let tree = FileTree {
+            root,
+            total_files: 2,
+            indexed_count: 1,
+            modified_count: 0,
+            new_count: 0,
+            deleted_count: 1,
+        };
+
+        let output = render_tree(&tree, false);
+        // No ANSI escape codes
+        assert!(!output.contains("\x1b["));
+    }
+
+    #[test]
+    fn test_render_tree_colored() {
+        // Force colored output
+        colored::control::set_override(true);
+
+        let entries = vec![
+            ("a.md".to_string(), FileState::Indexed),
+            ("b.md".to_string(), FileState::Modified),
+        ];
+        let root = build_tree_from_entries(&entries);
+        let tree = FileTree {
+            root,
+            total_files: 2,
+            indexed_count: 1,
+            modified_count: 1,
+            new_count: 0,
+            deleted_count: 0,
+        };
+
+        let output = render_tree(&tree, true);
+        // Should contain ANSI escape codes
+        assert!(output.contains("\x1b["));
+
+        colored::control::unset_override();
+    }
+
+    #[test]
+    fn test_filter_subtree() {
+        let entries = vec![
+            ("docs/api/auth.md".to_string(), FileState::Indexed),
+            ("docs/guide.md".to_string(), FileState::New),
+            ("src/main.rs".to_string(), FileState::Indexed),
+        ];
+        let root = build_tree_from_entries(&entries);
+
+        // Filter to docs/
+        let subtree = filter_subtree(&root, "docs").unwrap();
+        assert_eq!(subtree.name, "docs");
+        assert!(subtree.is_dir);
+        assert_eq!(subtree.children.len(), 2); // api dir + guide.md
+
+        // Filter to docs/api
+        let subtree = filter_subtree(&root, "docs/api").unwrap();
+        assert_eq!(subtree.name, "api");
+        assert_eq!(subtree.children.len(), 1);
+        assert_eq!(subtree.children[0].name, "auth.md");
+
+        // Filter to nonexistent
+        let result = filter_subtree(&root, "nonexistent");
+        assert!(result.is_none());
+
+        // Filter with trailing slash
+        let subtree = filter_subtree(&root, "docs/").unwrap();
+        assert_eq!(subtree.name, "docs");
+    }
+
+    #[test]
+    fn test_render_tree_deleted_suffix() {
+        let entries = vec![
+            ("old.md".to_string(), FileState::Deleted),
+        ];
+        let root = build_tree_from_entries(&entries);
+        let tree = FileTree {
+            root,
+            total_files: 1,
+            indexed_count: 0,
+            modified_count: 0,
+            new_count: 0,
+            deleted_count: 1,
+        };
+        let output = render_tree(&tree, false);
+        assert!(output.contains("[deleted]"));
     }
 
     #[test]
