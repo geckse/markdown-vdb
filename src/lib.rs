@@ -172,4 +172,54 @@ impl MarkdownVdb {
     pub fn provider(&self) -> &dyn EmbeddingProvider {
         self.provider.as_ref()
     }
+
+    /// Execute a semantic search query against the index.
+    pub async fn search(
+        &self,
+        query: search::SearchQuery,
+    ) -> Result<Vec<search::SearchResult>> {
+        search::search(&query, &self.index, self.provider.as_ref()).await
+    }
+
+    /// Return a status snapshot of the index.
+    pub fn status(&self) -> index::types::IndexStatus {
+        self.index.status()
+    }
+
+    /// Return the metadata schema, either from the index or inferred from discovered files.
+    pub fn schema(&self) -> Result<schema::Schema> {
+        // Return stored schema if available.
+        if let Some(s) = self.index.get_schema() {
+            return Ok(s);
+        }
+
+        // Otherwise infer from discovered files.
+        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+        let files = disco.discover()?;
+        let mut parsed = Vec::new();
+        for path in &files {
+            match parser::parse_markdown_file(&self.root, path) {
+                Ok(md) => parsed.push(md),
+                Err(_) => continue,
+            }
+        }
+        Ok(schema::Schema::infer(&parsed))
+    }
+
+    /// Get information about an indexed document by its relative path.
+    pub fn get_document(&self, relative_path: &str) -> Result<DocumentInfo> {
+        let file = self.index.get_file(relative_path).ok_or_else(|| {
+            Error::FileNotInIndex {
+                path: PathBuf::from(relative_path),
+            }
+        })?;
+
+        Ok(DocumentInfo {
+            path: relative_path.to_string(),
+            content_hash: file.content_hash.clone(),
+            chunk_count: file.chunk_ids.len(),
+            file_size: file.file_size,
+            indexed_at: file.indexed_at,
+        })
+    }
 }
