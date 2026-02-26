@@ -11,6 +11,7 @@ pub enum EmbeddingProviderType {
     OpenAI,
     Ollama,
     Custom,
+    Mock,
 }
 
 impl FromStr for EmbeddingProviderType {
@@ -21,6 +22,7 @@ impl FromStr for EmbeddingProviderType {
             "openai" => Ok(Self::OpenAI),
             "ollama" => Ok(Self::Ollama),
             "custom" => Ok(Self::Custom),
+            "mock" => Ok(Self::Mock),
             other => Err(Error::Config(format!(
                 "unknown embedding provider '{other}': expected openai, ollama, or custom"
             ))),

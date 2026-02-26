@@ -33,6 +33,15 @@ pub enum Error {
     #[error("logging initialization failed: {0}")]
     Logging(String),
 
+    #[error("file not in index: {}", path.display())]
+    FileNotInIndex { path: PathBuf },
+
+    #[error("index already exists: {}", path.display())]
+    IndexAlreadyExists { path: PathBuf },
+
+    #[error("config already exists: {}", path.display())]
+    ConfigAlreadyExists { path: PathBuf },
+
     #[error("clustering error: {0}")]
     Clustering(String),
 }
@@ -106,6 +115,30 @@ mod tests {
     fn lock_timeout_variant_formats() {
         let err = Error::LockTimeout;
         assert_eq!(err.to_string(), "lock acquisition timed out");
+    }
+
+    #[test]
+    fn file_not_in_index_variant_formats() {
+        let err = Error::FileNotInIndex {
+            path: PathBuf::from("missing.md"),
+        };
+        assert_eq!(err.to_string(), "file not in index: missing.md");
+    }
+
+    #[test]
+    fn index_already_exists_variant_formats() {
+        let err = Error::IndexAlreadyExists {
+            path: PathBuf::from("/tmp/index.bin"),
+        };
+        assert_eq!(err.to_string(), "index already exists: /tmp/index.bin");
+    }
+
+    #[test]
+    fn config_already_exists_variant_formats() {
+        let err = Error::ConfigAlreadyExists {
+            path: PathBuf::from(".markdownvdb"),
+        };
+        assert_eq!(err.to_string(), "config already exists: .markdownvdb");
     }
 
     #[test]
