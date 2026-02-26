@@ -83,6 +83,7 @@ pub fn print_logo() {
 }
 
 /// Print the logo followed by version and tagline.
+#[allow(dead_code)]
 pub fn print_version() {
     print_logo();
     println!(
