@@ -306,6 +306,68 @@ impl Index {
         state.metadata.cluster_state.clone()
     }
 
+    /// Compute document-level vectors by averaging chunk vectors per file.
+    ///
+    /// Returns a map from relative file path to its averaged embedding vector.
+    /// Used by the clustering pipeline which operates at the document level.
+    pub fn get_document_vectors(&self) -> HashMap<String, Vec<f32>> {
+        let state = self.state.read();
+        let dims = state.metadata.embedding_config.dimensions;
+        let mut result: HashMap<String, Vec<f32>> = HashMap::new();
+
+        for (path, file) in &state.metadata.files {
+            let mut sum = vec![0.0f32; dims];
+            let mut count = 0usize;
+
+            for chunk_id in &file.chunk_ids {
+                if let Some(&key) = state.id_to_key.get(chunk_id) {
+                    let mut buf = vec![0.0f32; dims];
+                    if state.hnsw.get(key, &mut buf).is_ok() {
+                        for (s, v) in sum.iter_mut().zip(buf.iter()) {
+                            *s += v;
+                        }
+                        count += 1;
+                    }
+                }
+            }
+
+            if count > 0 {
+                let scale = 1.0 / count as f32;
+                for s in &mut sum {
+                    *s *= scale;
+                }
+                result.insert(path.clone(), sum);
+            }
+        }
+
+        result
+    }
+
+    /// Get concatenated chunk content for each document (for keyword extraction).
+    ///
+    /// Returns a map from relative file path to the combined text of all its chunks.
+    pub fn get_document_contents(&self) -> HashMap<String, String> {
+        let state = self.state.read();
+        let mut result: HashMap<String, String> = HashMap::new();
+
+        for (path, file) in &state.metadata.files {
+            let mut content = String::new();
+            for chunk_id in &file.chunk_ids {
+                if let Some(chunk) = state.metadata.chunks.get(chunk_id) {
+                    if !content.is_empty() {
+                        content.push(' ');
+                    }
+                    content.push_str(&chunk.content);
+                }
+            }
+            if !content.is_empty() {
+                result.insert(path.clone(), content);
+            }
+        }
+
+        result
+    }
+
     /// Update (or clear) the cluster state.
     pub fn update_clusters(&self, cluster_state: Option<ClusterState>) {
         let mut state = self.state.write();

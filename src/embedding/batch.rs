@@ -91,23 +91,40 @@ pub async fn embed_chunks(
         "embedding chunks"
     );
 
-    // Process batches sequentially (provider is &dyn, cannot be sent across tasks)
+    // Process batches concurrently (up to 4 at a time).
+    use futures::stream::{self, StreamExt};
+
+    const MAX_CONCURRENT: usize = 4;
+
+    type BatchResult = crate::Result<(usize, Vec<(String, Vec<f32>)>)>;
+    let batch_results: Vec<BatchResult> =
+        stream::iter(batches.into_iter().enumerate().map(|(batch_idx, batch)| {
+            let chunk_ids: Vec<String> = batch.iter().map(|c| c.id.clone()).collect();
+            let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
+            async move {
+                let vectors = provider.embed_batch(&texts).await?;
+                tracing::info!(
+                    batch = batch_idx + 1,
+                    total = total_batches,
+                    "batch complete"
+                );
+                let pairs: Vec<(String, Vec<f32>)> =
+                    chunk_ids.into_iter().zip(vectors).collect();
+                Ok((batch_idx, pairs))
+            }
+        }))
+        .buffer_unordered(MAX_CONCURRENT)
+        .collect()
+        .await;
+
     let mut embeddings: HashMap<String, Vec<f32>> = HashMap::new();
     let mut api_calls: usize = 0;
 
-    for (batch_idx, batch) in batches.iter().enumerate() {
-        let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
-        let vectors = provider.embed_batch(&texts).await?;
+    for result in batch_results {
+        let (_batch_idx, pairs) = result?;
         api_calls += 1;
-
-        tracing::info!(
-            batch = batch_idx + 1,
-            total = total_batches,
-            "batch complete"
-        );
-
-        for (chunk, vector) in batch.iter().zip(vectors) {
-            embeddings.insert(chunk.id.clone(), vector);
+        for (id, vector) in pairs {
+            embeddings.insert(id, vector);
         }
     }
 

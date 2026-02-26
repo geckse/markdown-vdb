@@ -94,7 +94,10 @@ fn parse_frontmatter_types() {
     let fm = result.frontmatter.unwrap();
     assert_eq!(fm["string_val"], "hello");
     assert_eq!(fm["number_int"], 42);
-    assert_eq!(fm["number_float"], 3.14);
+    #[allow(clippy::approx_constant)]
+    {
+        assert_eq!(fm["number_float"], 3.14);
+    }
     assert_eq!(fm["bool_val"], true);
     assert!(fm["list_val"].is_array());
     assert_eq!(fm["list_val"].as_array().unwrap().len(), 3);

@@ -16,3 +16,4 @@ logs/security/
 
 # Project artifacts
 .markdownvdb.index
+.env

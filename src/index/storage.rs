@@ -188,7 +188,7 @@ mod tests {
     fn load_corrupted_magic() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("bad.idx");
-        fs::write(&path, &[0u8; 64]).unwrap();
+        fs::write(&path, [0u8; 64]).unwrap();
         let result = load_index(&path);
         assert!(matches!(result, Err(Error::IndexCorrupted(_))));
     }
@@ -197,7 +197,7 @@ mod tests {
     fn load_too_small() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("tiny.idx");
-        fs::write(&path, &[0u8; 10]).unwrap();
+        fs::write(&path, [0u8; 10]).unwrap();
         let result = load_index(&path);
         assert!(matches!(result, Err(Error::IndexCorrupted(_))));
     }

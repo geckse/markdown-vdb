@@ -36,7 +36,7 @@ pub struct ClusterInfo {
     pub label: String,
     /// Centroid vector (mean of member embeddings).
     pub centroid: Vec<f32>,
-    /// Chunk IDs belonging to this cluster.
+    /// File paths (relative) belonging to this cluster.
     pub members: Vec<String>,
     /// Top keywords extracted via TF-IDF.
     pub keywords: Vec<String>,
@@ -69,8 +69,8 @@ impl Clusterer {
 
     /// Run a full K-means clustering pass over all document vectors.
     ///
-    /// `vectors` maps chunk ID to its embedding vector.
-    /// `documents` maps chunk ID to its text content (for keyword extraction).
+    /// `vectors` maps document path (relative) to its embedding vector.
+    /// `documents` maps document path to its text content (for keyword extraction).
     pub fn cluster_all(
         &self,
         vectors: &HashMap<String, Vec<f32>>,
@@ -115,9 +115,9 @@ impl Clusterer {
 
         // Single document: return one cluster
         if n == 1 {
-            let chunk_id = &ids[0];
+            let doc_id = &ids[0];
             let doc_texts: Vec<&str> = documents
-                .get(chunk_id)
+                .get(doc_id)
                 .map(|s| vec![s.as_str()])
                 .unwrap_or_default();
             let keywords = self.extract_keywords(&doc_texts, 5);
@@ -128,7 +128,7 @@ impl Clusterer {
                     id: 0,
                     label,
                     centroid: vecs[0].clone(),
-                    members: vec![chunk_id.clone()],
+                    members: vec![doc_id.clone()],
                     keywords,
                 }],
                 docs_since_rebalance: 0,
@@ -171,7 +171,7 @@ impl Clusterer {
                 .push(ids[i].clone());
         }
 
-        // Build ClusterInfo for each cluster
+        // Build ClusterInfo for each cluster (without keywords yet)
         let mut clusters: Vec<ClusterInfo> = Vec::new();
         for cluster_id in 0..k {
             let members = cluster_members.remove(&cluster_id).unwrap_or_default();
@@ -186,23 +186,17 @@ impl Clusterer {
                 .map(|&v| v as f32)
                 .collect();
 
-            // Collect document texts for keyword extraction
-            let doc_texts: Vec<&str> = members
-                .iter()
-                .filter_map(|id| documents.get(id).map(|s| s.as_str()))
-                .collect();
-
-            let keywords = self.extract_keywords(&doc_texts, 5);
-            let label = self.generate_label(&keywords);
-
             clusters.push(ClusterInfo {
                 id: cluster_id,
-                label,
+                label: String::new(),
                 centroid,
                 members,
-                keywords,
+                keywords: Vec::new(),
             });
         }
+
+        // Compute cross-cluster TF-IDF keywords and labels
+        self.assign_cross_cluster_keywords(&mut clusters, documents, 5);
 
         Ok(ClusterState {
             clusters,
@@ -214,14 +208,14 @@ impl Clusterer {
     /// Assign a single new document to the nearest existing cluster.
     ///
     /// Finds the cluster whose centroid has the highest cosine similarity to the
-    /// given vector, adds the chunk to that cluster, updates the centroid, and
+    /// given vector, adds the document to that cluster, updates the centroid, and
     /// increments `docs_since_rebalance`.
     ///
     /// Returns the cluster ID the document was assigned to.
     pub fn assign_to_nearest(
         &self,
         state: &mut ClusterState,
-        chunk_id: &str,
+        doc_path: &str,
         vector: &[f32],
     ) -> crate::Result<usize> {
         if state.clusters.is_empty() {
@@ -250,11 +244,11 @@ impl Clusterer {
             *c = (*c * n + vector[i]) / (n + 1.0);
         }
 
-        cluster.members.push(chunk_id.to_string());
+        cluster.members.push(doc_path.to_string());
         state.docs_since_rebalance += 1;
 
         debug!(
-            "assign_to_nearest: assigned {chunk_id} to cluster {cluster_id} (similarity={best_sim:.4})"
+            "assign_to_nearest: assigned {doc_path} to cluster {cluster_id} (similarity={best_sim:.4})"
         );
 
         Ok(cluster_id)
@@ -354,6 +348,75 @@ impl Clusterer {
             "Unlabeled".to_string()
         } else {
             top.join(" / ")
+        }
+    }
+
+    /// Compute cross-cluster TF-IDF keywords and labels for all clusters.
+    ///
+    /// Uses IDF = log(total_clusters / clusters_containing_term) so that terms
+    /// appearing in many clusters are down-weighted, and cluster-distinctive terms
+    /// are promoted.
+    fn assign_cross_cluster_keywords(
+        &self,
+        clusters: &mut [ClusterInfo],
+        documents: &HashMap<String, String>,
+        n: usize,
+    ) {
+        if clusters.is_empty() {
+            return;
+        }
+
+        let num_clusters = clusters.len() as f64;
+
+        // Tokenize each cluster's documents and compute per-cluster TF
+        let mut cluster_tfs: Vec<HashMap<String, f64>> = Vec::with_capacity(clusters.len());
+        let mut cluster_term_sets: Vec<std::collections::HashSet<String>> =
+            Vec::with_capacity(clusters.len());
+
+        for cluster in clusters.iter() {
+            let mut tf: HashMap<String, f64> = HashMap::new();
+            let mut terms_in_cluster: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
+            for member in &cluster.members {
+                if let Some(text) = documents.get(member) {
+                    let tokens = tokenize_and_filter(text);
+                    for token in &tokens {
+                        *tf.entry(token.clone()).or_insert(0.0) += 1.0;
+                        terms_in_cluster.insert(token.clone());
+                    }
+                }
+            }
+
+            cluster_tfs.push(tf);
+            cluster_term_sets.push(terms_in_cluster);
+        }
+
+        // Compute cross-cluster DF: number of clusters containing each term
+        let mut cross_df: HashMap<String, f64> = HashMap::new();
+        for term_set in &cluster_term_sets {
+            for term in term_set {
+                *cross_df.entry(term.clone()).or_insert(0.0) += 1.0;
+            }
+        }
+
+        // For each cluster, compute TF * IDF scores and assign top-N keywords
+        for (i, cluster) in clusters.iter_mut().enumerate() {
+            let tf = &cluster_tfs[i];
+
+            let mut scores: Vec<(String, f64)> = tf
+                .iter()
+                .map(|(term, &tf_val)| {
+                    let df_val = cross_df.get(term).copied().unwrap_or(1.0);
+                    let idf = (num_clusters / df_val).ln();
+                    (term.clone(), tf_val * idf)
+                })
+                .collect();
+
+            scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            cluster.keywords = scores.into_iter().take(n).map(|(term, _)| term).collect();
+            cluster.label = self.generate_label(&cluster.keywords);
         }
     }
 

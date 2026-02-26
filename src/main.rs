@@ -5,8 +5,16 @@ use std::process;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 
-use mdvdb::search::{MetadataFilter, SearchQuery};
+use mdvdb::search::{MetadataFilter, SearchQuery, SearchResult};
 use mdvdb::MarkdownVdb;
+
+/// Wrapped search output for JSON mode.
+#[derive(serde::Serialize)]
+struct SearchOutput {
+    results: Vec<SearchResult>,
+    query: String,
+    total_results: usize,
+}
 
 /// mdvdb — Markdown Vector Database
 #[derive(Parser)]
@@ -199,7 +207,12 @@ async fn run() -> anyhow::Result<()> {
             let results = vdb.search(query).await?;
 
             if args.json {
-                serde_json::to_writer_pretty(std::io::stdout(), &results)?;
+                let output = SearchOutput {
+                    total_results: results.len(),
+                    query: args.query.clone(),
+                    results,
+                };
+                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
             } else if results.is_empty() {
                 eprintln!("No results found.");
@@ -309,7 +322,7 @@ async fn run() -> anyhow::Result<()> {
                 println!("Document Clusters ({} clusters)", clusters.len());
                 println!();
                 for cluster in &clusters {
-                    println!("  Cluster {} ({} chunks)", cluster.id, cluster.chunk_count);
+                    println!("  Cluster {} ({} documents)", cluster.id, cluster.document_count);
                     if let Some(label) = &cluster.label {
                         if !label.is_empty() {
                             println!("    Label: {}", label);
@@ -337,15 +350,26 @@ async fn run() -> anyhow::Result<()> {
         Some(Commands::Watch(args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
 
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let cancel_clone = cancel.clone();
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.ok();
+                cancel_clone.cancel();
+            });
+
             if args.json {
                 let msg = serde_json::json!({"status": "watching", "message": "File watching started"});
                 serde_json::to_writer_pretty(std::io::stdout(), &msg)?;
                 writeln!(std::io::stdout())?;
             } else {
-                println!("Watching for file changes... (press Ctrl+C to stop)");
+                let dirs = vdb.config().source_dirs.iter()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!("Watching [{}] for changes... (press Ctrl+C to stop)", dirs);
             }
 
-            vdb.watch()?;
+            vdb.watch(cancel).await?;
         }
         Some(Commands::Init(_args)) => {
             MarkdownVdb::init(&cwd)?;

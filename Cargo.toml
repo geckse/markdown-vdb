@@ -34,6 +34,7 @@ linfa-clustering = "0.7"
 tiktoken-rs = "0.6"
 ignore = "0.4"
 async-trait = "0.1"
+futures = "0.3"
 # clap_complete = "4" # TODO: re-enable when available offline
 
 [dev-dependencies]

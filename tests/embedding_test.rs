@@ -78,7 +78,7 @@ async fn test_embed_chunks_with_mock() {
     assert!(result.embeddings.contains_key("docs/guide.md#0"));
 
     // Correct dimensions
-    for (_id, vector) in &result.embeddings {
+    for vector in result.embeddings.values() {
         assert_eq!(
             vector.len(),
             128,

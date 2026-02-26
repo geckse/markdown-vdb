@@ -254,7 +254,7 @@ fn test_search_returns_correct_result() {
 
     // Use a known vector
     let known_vec = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    index.upsert(&file, &chunks, &[known_vec.clone()]).unwrap();
+    index.upsert(&file, &chunks, std::slice::from_ref(&known_vec)).unwrap();
 
     // Search with the same vector — should find it
     let results = index.search(&known_vec, 1).unwrap();
@@ -449,7 +449,7 @@ fn test_portable_paths() {
     );
 
     let hashes = reopened.get_file_hashes();
-    for (p, _) in &hashes {
+    for p in hashes.keys() {
         assert!(
             !p.starts_with('/'),
             "hash key path should be relative, got: {p}"

@@ -19,14 +19,18 @@ pub use config::Config;
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
 pub use search::{MetadataFilter, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
+// Additional re-exports for library consumers.
+pub use clustering::{ClusterInfo, ClusterState};
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::embedding::provider::{create_provider, EmbeddingProvider};
@@ -77,6 +81,8 @@ pub struct DocumentInfo {
     pub path: String,
     /// SHA-256 content hash.
     pub content_hash: String,
+    /// Frontmatter metadata, if present.
+    pub frontmatter: Option<serde_json::Value>,
     /// Number of chunks for this document.
     pub chunk_count: usize,
     /// File size in bytes.
@@ -90,10 +96,12 @@ pub struct DocumentInfo {
 pub struct ClusterSummary {
     /// Cluster identifier.
     pub id: usize,
-    /// Number of chunks in this cluster.
-    pub chunk_count: usize,
+    /// Number of documents in this cluster.
+    pub document_count: usize,
     /// Representative keywords or label.
     pub label: Option<String>,
+    /// Top keywords extracted via TF-IDF.
+    pub keywords: Vec<String>,
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -102,10 +110,10 @@ pub struct MarkdownVdb {
     root: PathBuf,
     /// Loaded configuration.
     config: Config,
-    /// Embedding provider instance.
-    provider: Box<dyn EmbeddingProvider>,
-    /// Vector index.
-    index: Index,
+    /// Embedding provider instance (Arc for sharing with watcher).
+    provider: Arc<dyn EmbeddingProvider>,
+    /// Vector index (Arc for sharing with watcher).
+    index: Arc<Index>,
 }
 
 impl MarkdownVdb {
@@ -140,7 +148,7 @@ impl MarkdownVdb {
             root
         };
 
-        let provider = create_provider(&config)?;
+        let provider: Arc<dyn EmbeddingProvider> = Arc::from(create_provider(&config)?);
 
         let embedding_config = EmbeddingConfig {
             provider: format!("{:?}", config.embedding_provider),
@@ -149,7 +157,7 @@ impl MarkdownVdb {
         };
 
         let index_path = root.join(&config.index_file);
-        let index = Index::open_or_create(&index_path, &embedding_config)?;
+        let index = Arc::new(Index::open_or_create(&index_path, &embedding_config)?);
 
         // Check config compatibility: dimensions must match.
         let status = index.status();
@@ -190,9 +198,19 @@ impl MarkdownVdb {
         &self.index
     }
 
+    /// Get a shared reference to the index (for watcher integration).
+    pub fn index_arc(&self) -> Arc<Index> {
+        Arc::clone(&self.index)
+    }
+
     /// Get a reference to the embedding provider.
     pub fn provider(&self) -> &dyn EmbeddingProvider {
         self.provider.as_ref()
+    }
+
+    /// Get a shared reference to the embedding provider (for watcher integration).
+    pub fn provider_arc(&self) -> Arc<dyn EmbeddingProvider> {
+        Arc::clone(&self.provider)
     }
 
     /// Ingest markdown files into the index.
@@ -355,6 +373,52 @@ impl MarkdownVdb {
         // Save the index to disk.
         self.index.save()?;
 
+        // Run clustering if enabled.
+        if self.config.clustering_enabled {
+            let clusterer = clustering::Clusterer::new(&self.config);
+            let doc_vectors = self.index.get_document_vectors();
+            let doc_contents = self.index.get_document_contents();
+
+            if !doc_vectors.is_empty() {
+                if let Some(ref single_file) = options.file {
+                    // Single-file ingest: assign to nearest cluster + maybe rebalance.
+                    if let Some(mut state) = self.index.get_clusters() {
+                        let path_str = single_file.to_string_lossy().to_string();
+                        if let Some(vec) = doc_vectors.get(&path_str) {
+                            if let Err(e) = clusterer.assign_to_nearest(&mut state, &path_str, vec) {
+                                warn!(error = %e, "failed to assign document to cluster");
+                            } else {
+                                // Attempt rebalance with all document vectors.
+                                match clusterer.maybe_rebalance(&mut state, &doc_vectors, &doc_contents) {
+                                    Ok(rebalanced) => {
+                                        if rebalanced {
+                                            info!("clusters rebalanced after single-file ingest");
+                                        }
+                                    }
+                                    Err(e) => warn!(error = %e, "cluster rebalance failed"),
+                                }
+                                self.index.update_clusters(Some(state));
+                                self.index.save()?;
+                            }
+                        }
+                    }
+                    // If no existing clusters, skip — full ingest will create them.
+                } else {
+                    // Full ingest: run full K-means clustering.
+                    match clusterer.cluster_all(&doc_vectors, &doc_contents) {
+                        Ok(state) => {
+                            self.index.update_clusters(Some(state));
+                            self.index.save()?;
+                            info!("clustering complete after full ingest");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "clustering failed (non-fatal)");
+                        }
+                    }
+                }
+            }
+        }
+
         info!(
             files_indexed = result.files_indexed,
             files_skipped = result.files_skipped,
@@ -452,18 +516,36 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
 
     /// Start watching for file changes and re-index incrementally.
     ///
-    /// This is a stub that returns an error until the watcher module is fully integrated.
-    pub fn watch(&self) -> Result<()> {
-        Err(Error::Watch(
-            "watch is not yet implemented; use `ingest` for manual indexing".into(),
-        ))
+    /// Blocks until the provided `cancel` token is triggered (e.g. Ctrl+C).
+    pub async fn watch(&self, cancel: CancellationToken) -> Result<()> {
+        let w = watcher::Watcher::new(
+            self.config.clone(),
+            &self.root,
+            Arc::clone(&self.index),
+            Arc::clone(&self.provider),
+        );
+        w.watch(cancel).await
     }
 
     /// Return cluster summaries for the indexed documents.
-    ///
-    /// This is a stub that returns an empty list until clustering is fully integrated.
     pub fn clusters(&self) -> Result<Vec<ClusterSummary>> {
-        Ok(Vec::new())
+        match self.index.get_clusters() {
+            Some(state) => Ok(state
+                .clusters
+                .iter()
+                .map(|c| ClusterSummary {
+                    id: c.id,
+                    document_count: c.members.len(),
+                    label: if c.label.is_empty() {
+                        None
+                    } else {
+                        Some(c.label.clone())
+                    },
+                    keywords: c.keywords.clone(),
+                })
+                .collect()),
+            None => Ok(Vec::new()),
+        }
     }
 
     /// Get information about an indexed document by its relative path.
@@ -474,9 +556,16 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             }
         })?;
 
+        // Parse frontmatter from stored JSON string.
+        let frontmatter = file
+            .frontmatter
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+
         Ok(DocumentInfo {
             path: relative_path.to_string(),
             content_hash: file.content_hash.clone(),
+            frontmatter,
             chunk_count: file.chunk_ids.len(),
             file_size: file.file_size,
             indexed_at: file.indexed_at,

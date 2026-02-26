@@ -138,7 +138,7 @@ impl Watcher {
     }
 
     /// Process a single file event.
-    async fn handle_event(&self, event: &FileEvent) -> Result<()> {
+    pub async fn handle_event(&self, event: &FileEvent) -> Result<()> {
         match event {
             FileEvent::Created(path) | FileEvent::Modified(path) => {
                 debug!(path = %path.display(), "processing created/modified event");
@@ -206,6 +206,24 @@ impl Watcher {
 
         // Upsert and save.
         self.index.upsert(&file, &chunks, &embeddings)?;
+
+        // Update schema inference with the new/changed file's frontmatter.
+        if file.frontmatter.is_some() {
+            let schema = crate::schema::Schema::infer(&[file]);
+            let overlay = crate::schema::Schema::load_overlay(&self.project_root)
+                .unwrap_or(None);
+            let merged = if let Some(existing) = self.index.get_schema() {
+                // Merge new schema fields into existing schema.
+                let combined = crate::schema::Schema::merge(existing, None);
+                // Re-infer to include all frontmatter from the index is not
+                // practical here, so we merge the new inferences into existing.
+                crate::schema::Schema::merge(combined, overlay)
+            } else {
+                crate::schema::Schema::merge(schema, overlay)
+            };
+            self.index.set_schema(Some(merged));
+        }
+
         self.index.save()?;
         info!(
             path = %relative_path.display(),

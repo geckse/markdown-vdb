@@ -168,3 +168,63 @@ async fn test_schema_returns_fields_after_ingest() {
         "schema should contain 'status' field, got: {field_names:?}"
     );
 }
+
+/// Setup project with clustering enabled.
+fn setup_project_with_clustering() -> (TempDir, MarkdownVdb) {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join(".markdownvdb"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    // Create several markdown files to get meaningful clusters.
+    for i in 0..5 {
+        fs::write(
+            root.join(format!("doc{i}.md")),
+            format!(
+                "---\ntitle: Document {i}\n---\n\n# Document {i}\n\nContent of document number {i} with some text.\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let mut config = mock_config();
+    config.clustering_enabled = true;
+    config.clustering_rebalance_threshold = 50;
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), config).unwrap();
+    (dir, vdb)
+}
+
+#[tokio::test]
+async fn test_clusters_returns_data_after_ingest() {
+    let (_dir, vdb) = setup_project_with_clustering();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let clusters = vdb.clusters().unwrap();
+    assert!(!clusters.is_empty(), "should have clusters after ingest with clustering enabled");
+
+    // All documents should be distributed across clusters.
+    let total_docs: usize = clusters.iter().map(|c| c.document_count).sum();
+    assert_eq!(total_docs, 5, "all 5 docs should be in clusters");
+
+    // Each cluster should have a label.
+    for cluster in &clusters {
+        assert!(cluster.label.is_some(), "cluster should have a label");
+    }
+}
+
+#[tokio::test]
+async fn test_get_document_returns_frontmatter() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let doc = vdb.get_document("hello.md").unwrap();
+    assert!(doc.frontmatter.is_some(), "should have frontmatter");
+    let fm = doc.frontmatter.unwrap();
+    assert_eq!(fm["title"], "Hello World");
+    assert_eq!(fm["status"], "published");
+}
