@@ -300,8 +300,27 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Clusters(_args)) => {
-            todo!("clusters command implementation")
+        Some(Commands::Clusters(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let clusters = vdb.clusters()?;
+
+            if args.json {
+                serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
+                writeln!(std::io::stdout())?;
+            } else if clusters.is_empty() {
+                println!("No clusters available. Run `mdvdb ingest` first, then clustering will be computed.");
+            } else {
+                println!("Document Clusters ({} clusters)", clusters.len());
+                println!();
+                for cluster in &clusters {
+                    println!("  Cluster {} ({} chunks)", cluster.id, cluster.chunk_count);
+                    if let Some(label) = &cluster.label {
+                        if !label.is_empty() {
+                            println!("    Label: {}", label);
+                        }
+                    }
+                }
+            }
         }
         Some(Commands::Get(args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
@@ -319,8 +338,18 @@ async fn run() -> anyhow::Result<()> {
                 println!("  Indexed at:   {}", doc.indexed_at);
             }
         }
-        Some(Commands::Watch(_args)) => {
-            todo!("watch command implementation")
+        Some(Commands::Watch(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+
+            if args.json {
+                let msg = serde_json::json!({"status": "watching", "message": "File watching started"});
+                serde_json::to_writer_pretty(std::io::stdout(), &msg)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                println!("Watching for file changes... (press Ctrl+C to stop)");
+            }
+
+            vdb.watch()?;
         }
         Some(Commands::Init(_args)) => {
             MarkdownVdb::init(&cwd)?;
