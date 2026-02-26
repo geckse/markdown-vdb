@@ -35,6 +35,7 @@ pub struct Watcher {
     project_root: PathBuf,
     index: Arc<Index>,
     provider: Arc<dyn EmbeddingProvider>,
+    #[allow(dead_code)]
     discovery: FileDiscovery,
 }
 
@@ -253,7 +254,7 @@ fn classify_event(
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
             if paths.len() >= 2 {
-                let from_rel = paths[0].strip_prefix(project_root).ok();
+                let from_rel = paths[0].strip_prefix(project_root).ok().map(Path::to_path_buf);
                 let to_rel = to_relative(&paths[1]);
                 match (from_rel, to_rel) {
                     (Some(from), Some(to)) => {
@@ -278,7 +279,7 @@ fn classify_event(
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
             for path in paths {
-                if let Some(rel) = path.strip_prefix(project_root).ok() {
+                if let Ok(rel) = path.strip_prefix(project_root) {
                     if rel.extension().and_then(|e| e.to_str()) == Some("md") {
                         result.push(FileEvent::Deleted(rel.to_path_buf()));
                     }
@@ -294,7 +295,7 @@ fn classify_event(
         }
         EventKind::Remove(RemoveKind::File) | EventKind::Remove(RemoveKind::Any) => {
             for path in paths {
-                if let Some(rel) = path.strip_prefix(project_root).ok() {
+                if let Ok(rel) = path.strip_prefix(project_root) {
                     if rel.extension().and_then(|e| e.to_str()) == Some("md") {
                         result.push(FileEvent::Deleted(rel.to_path_buf()));
                     }

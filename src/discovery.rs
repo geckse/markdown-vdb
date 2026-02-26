@@ -129,8 +129,8 @@ impl FileDiscovery {
         // Check against user-configured ignore patterns
         let path_str = relative_path.to_string_lossy();
         for pattern in &self.ignore_patterns {
-            let pat = if pattern.starts_with('!') {
-                &pattern[1..]
+            let pat = if let Some(stripped) = pattern.strip_prefix('!') {
+                stripped
             } else {
                 pattern.as_str()
             };
