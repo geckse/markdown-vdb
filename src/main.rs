@@ -60,6 +60,9 @@ enum Commands {
     /// Show document clusters
     Clusters(ClustersArgs),
 
+    /// Show file tree with sync status indicators
+    Tree(TreeArgs),
+
     /// Get metadata for a specific file
     Get(GetArgs),
 
@@ -94,6 +97,10 @@ struct SearchArgs {
     /// Output results as JSON
     #[arg(long)]
     json: bool,
+
+    /// Restrict search to files under this path prefix
+    #[arg(long)]
+    path: Option<String>,
 }
 
 #[derive(Parser)]
@@ -127,6 +134,17 @@ struct SchemaArgs {
 
 #[derive(Parser)]
 struct ClustersArgs {
+    /// Output results as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct TreeArgs {
+    /// Restrict tree to files under this path prefix
+    #[arg(long)]
+    path: Option<String>,
+
     /// Output results as JSON
     #[arg(long)]
     json: bool,
@@ -209,6 +227,7 @@ async fn run() -> anyhow::Result<()> {
         None => std::env::current_dir()?,
     };
     let config = mdvdb::config::Config::load(&cwd)?;
+    let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some();
 
     match cli.command {
         Some(Commands::Search(args)) => {
@@ -223,6 +242,9 @@ async fn run() -> anyhow::Result<()> {
             }
             for f in &args.filter {
                 query = query.with_filter(parse_filter(f)?);
+            }
+            if let Some(ref path) = args.path {
+                query = query.with_path_prefix(path);
             }
 
             let results = vdb.search(query).await?;
@@ -304,6 +326,67 @@ async fn run() -> anyhow::Result<()> {
                 format::print_clusters(&clusters);
             }
         }
+        Some(Commands::Tree(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let tree = vdb.file_tree()?;
+
+            if args.json {
+                if let Some(ref prefix) = args.path {
+                    if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
+                        let filtered = mdvdb::tree::FileTree {
+                            root: subtree,
+                            ..tree
+                        };
+                        serde_json::to_writer_pretty(std::io::stdout(), &filtered)?;
+                    } else {
+                        let empty = mdvdb::tree::FileTree {
+                            root: mdvdb::tree::FileTreeNode {
+                                name: ".".to_string(),
+                                path: ".".to_string(),
+                                is_dir: true,
+                                state: None,
+                                children: Vec::new(),
+                            },
+                            total_files: 0,
+                            indexed_count: 0,
+                            modified_count: 0,
+                            new_count: 0,
+                            deleted_count: 0,
+                        };
+                        serde_json::to_writer_pretty(std::io::stdout(), &empty)?;
+                    }
+                } else {
+                    serde_json::to_writer_pretty(std::io::stdout(), &tree)?;
+                }
+                writeln!(std::io::stdout())?;
+            } else if let Some(ref prefix) = args.path {
+                if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
+                    let filtered = mdvdb::tree::FileTree {
+                        root: subtree,
+                        ..tree
+                    };
+                    format::print_file_tree(&filtered, !no_color);
+                } else {
+                    let empty = mdvdb::tree::FileTree {
+                        root: mdvdb::tree::FileTreeNode {
+                            name: ".".to_string(),
+                            path: ".".to_string(),
+                            is_dir: true,
+                            state: None,
+                            children: Vec::new(),
+                        },
+                        total_files: 0,
+                        indexed_count: 0,
+                        modified_count: 0,
+                        new_count: 0,
+                        deleted_count: 0,
+                    };
+                    format::print_file_tree(&empty, !no_color);
+                }
+            } else {
+                format::print_file_tree(&tree, !no_color);
+            }
+        }
         Some(Commands::Get(args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy();
@@ -353,7 +436,7 @@ _mdvdb() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="search ingest status schema clusters get watch init completions"
+    commands="search ingest status schema clusters tree get watch init completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands --help --version --verbose --root" -- "$cur"))
@@ -371,6 +454,7 @@ _mdvdb() {
         'status:Show index status and configuration'
         'schema:Show inferred metadata schema'
         'clusters:Show document clusters'
+        'tree:Show file tree with sync status indicators'
         'get:Get metadata for a specific file'
         'watch:Watch for file changes and re-index automatically'
         'init:Initialize a new .markdownvdb config file'
@@ -386,6 +470,7 @@ complete -c mdvdb -n '__fish_use_subcommand' -a ingest -d 'Ingest markdown files
 complete -c mdvdb -n '__fish_use_subcommand' -a status -d 'Show index status and configuration'
 complete -c mdvdb -n '__fish_use_subcommand' -a schema -d 'Show inferred metadata schema'
 complete -c mdvdb -n '__fish_use_subcommand' -a clusters -d 'Show document clusters'
+complete -c mdvdb -n '__fish_use_subcommand' -a tree -d 'Show file tree with sync status indicators'
 complete -c mdvdb -n '__fish_use_subcommand' -a get -d 'Get metadata for a specific file'
 complete -c mdvdb -n '__fish_use_subcommand' -a watch -d 'Watch for file changes and re-index automatically'
 complete -c mdvdb -n '__fish_use_subcommand' -a init -d 'Initialize a new .markdownvdb config file'"#
@@ -394,7 +479,7 @@ complete -c mdvdb -n '__fish_use_subcommand' -a init -d 'Initialize a new .markd
                     r#"# mdvdb PowerShell completions
 Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('search', 'ingest', 'status', 'schema', 'clusters', 'get', 'watch', 'init')
+    $commands = @('search', 'ingest', 'status', 'schema', 'clusters', 'tree', 'get', 'watch', 'init')
     $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }
