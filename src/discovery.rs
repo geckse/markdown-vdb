@@ -102,6 +102,48 @@ impl FileDiscovery {
         Ok(results)
     }
 
+    /// Check whether a relative path should be indexed.
+    ///
+    /// Returns `true` if the path has a `.md` extension, is not under any
+    /// built-in ignored directory, and does not match any custom ignore pattern.
+    /// Used by the file watcher to filter filesystem events.
+    pub fn should_index(&self, relative_path: &Path) -> bool {
+        // Must have .md extension
+        if relative_path.extension().and_then(|e| e.to_str()) != Some("md") {
+            return false;
+        }
+
+        // Check against built-in ignored directories
+        for pattern in BUILTIN_IGNORE_PATTERNS {
+            // Patterns are like "!.git/" — strip the "!" and trailing "/"
+            let dir_name = pattern.trim_start_matches('!').trim_end_matches('/');
+            for component in relative_path.components() {
+                if let std::path::Component::Normal(c) = component {
+                    if c == dir_name {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Check against user-configured ignore patterns
+        let path_str = relative_path.to_string_lossy();
+        for pattern in &self.ignore_patterns {
+            let pat = if pattern.starts_with('!') {
+                &pattern[1..]
+            } else {
+                pattern.as_str()
+            };
+
+            // Check if pattern matches the full path or any component
+            if path_str.contains(pat.trim_end_matches('/')) {
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Build override rules combining built-in patterns and user-configured patterns.
     fn build_overrides(&self, dir: &Path) -> Result<ignore::overrides::Override> {
         let mut builder = OverrideBuilder::new(dir);
@@ -148,6 +190,52 @@ mod tests {
                 "pattern should start with '!': {pattern}"
             );
         }
+    }
+
+    fn make_discovery(ignore_patterns: Vec<String>) -> FileDiscovery {
+        FileDiscovery {
+            source_dirs: vec![PathBuf::from(".")],
+            ignore_patterns,
+            project_root: PathBuf::from("/tmp/test"),
+        }
+    }
+
+    #[test]
+    fn should_index_accepts_md_files() {
+        let fd = make_discovery(vec![]);
+        assert!(fd.should_index(Path::new("docs/readme.md")));
+        assert!(fd.should_index(Path::new("notes.md")));
+    }
+
+    #[test]
+    fn should_index_rejects_non_md_files() {
+        let fd = make_discovery(vec![]);
+        assert!(!fd.should_index(Path::new("readme.txt")));
+        assert!(!fd.should_index(Path::new("src/main.rs")));
+        assert!(!fd.should_index(Path::new("file")));
+    }
+
+    #[test]
+    fn should_index_rejects_builtin_ignored_dirs() {
+        let fd = make_discovery(vec![]);
+        assert!(!fd.should_index(Path::new(".git/hooks/readme.md")));
+        assert!(!fd.should_index(Path::new("node_modules/pkg/readme.md")));
+        assert!(!fd.should_index(Path::new("target/debug/notes.md")));
+        assert!(!fd.should_index(Path::new(".claude/docs/notes.md")));
+        assert!(!fd.should_index(Path::new("dist/readme.md")));
+    }
+
+    #[test]
+    fn should_index_rejects_custom_ignore_patterns() {
+        let fd = make_discovery(vec!["drafts/".to_string()]);
+        assert!(!fd.should_index(Path::new("drafts/wip.md")));
+        assert!(fd.should_index(Path::new("docs/readme.md")));
+    }
+
+    #[test]
+    fn should_index_handles_custom_pattern_with_bang() {
+        let fd = make_discovery(vec!["!private/".to_string()]);
+        assert!(!fd.should_index(Path::new("private/secret.md")));
     }
 
     #[test]
