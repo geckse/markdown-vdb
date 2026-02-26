@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use colored::Colorize;
 use serde_json::Value;
 
 use mdvdb::search::{MetadataFilter, SearchQuery, SearchResult};
@@ -29,6 +30,10 @@ struct Cli {
     /// Project root directory (defaults to current directory)
     #[arg(long, global = true)]
     root: Option<PathBuf>,
+
+    /// Disable colored output
+    #[arg(long, global = true)]
+    no_color: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -182,6 +187,11 @@ fn parse_filter(s: &str) -> anyhow::Result<MetadataFilter> {
 /// Run the main logic, returning Result for error handling. Errors are printed to stderr.
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    // Disable colors if --no-color flag, NO_COLOR env var, or JSON mode is active.
+    if cli.no_color || std::env::var_os("NO_COLOR").is_some() {
+        colored::control::set_override(false);
+    }
 
     mdvdb::logging::init(cli.verbose)?;
 
@@ -440,8 +450,8 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
             writeln!(std::io::stdout())?;
         }
         None => {
-            println!("mdvdb - Markdown Vector Database");
-            println!("Run `mdvdb --help` for usage information.");
+            format::print_logo();
+            println!("{}", "  Run `mdvdb --help` for usage information.".dimmed());
         }
     }
 
