@@ -99,17 +99,68 @@ impl Clusterer {
     }
 
     /// Extract top-N keywords from a set of documents using TF-IDF.
+    ///
+    /// Tokenizes on non-alphanumeric boundaries, lowercases, filters tokens < 3 chars,
+    /// removes stop words, then ranks by TF-IDF score.
     pub fn extract_keywords(
         &self,
-        _documents: &[&str],
-        _n: usize,
+        documents: &[&str],
+        n: usize,
     ) -> Vec<String> {
-        todo!("extract_keywords: TF-IDF extraction in Phase 2")
+        if documents.is_empty() || n == 0 {
+            return Vec::new();
+        }
+
+        // Tokenize each document into filtered terms
+        let tokenized: Vec<Vec<String>> = documents
+            .iter()
+            .map(|doc| tokenize_and_filter(doc))
+            .collect();
+
+        let num_docs = tokenized.len() as f64;
+
+        // Compute TF: total term count across all documents in this cluster
+        let mut tf: HashMap<String, f64> = HashMap::new();
+        for doc_terms in &tokenized {
+            for term in doc_terms {
+                *tf.entry(term.clone()).or_insert(0.0) += 1.0;
+            }
+        }
+
+        // Compute DF: number of documents containing each term
+        let mut df: HashMap<String, f64> = HashMap::new();
+        for doc_terms in &tokenized {
+            let unique: std::collections::HashSet<&String> = doc_terms.iter().collect();
+            for term in unique {
+                *df.entry(term.clone()).or_insert(0.0) += 1.0;
+            }
+        }
+
+        // Compute TF-IDF and sort
+        let mut scores: Vec<(String, f64)> = tf
+            .into_iter()
+            .map(|(term, tf_val)| {
+                let df_val = df.get(&term).copied().unwrap_or(1.0);
+                let idf = (num_docs / df_val).ln();
+                (term, tf_val * idf)
+            })
+            .collect();
+
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        scores.into_iter().take(n).map(|(term, _)| term).collect()
     }
 
     /// Generate a human-readable label from keywords.
-    pub fn generate_label(&self, _keywords: &[String]) -> String {
-        todo!("generate_label: label generation in Phase 2")
+    ///
+    /// Takes the top 3 keywords and joins them with " / ".
+    pub fn generate_label(&self, keywords: &[String]) -> String {
+        let top: Vec<&str> = keywords.iter().take(3).map(|s| s.as_str()).collect();
+        if top.is_empty() {
+            "Unlabeled".to_string()
+        } else {
+            top.join(" / ")
+        }
     }
 
     /// Returns the configured rebalance threshold.
@@ -158,6 +209,15 @@ pub(crate) fn compute_k(n: usize) -> usize {
 /// Check if a word is a stop word.
 pub(crate) fn is_stop_word(word: &str) -> bool {
     STOP_WORDS.contains(&word)
+}
+
+/// Tokenize text into filtered terms: split on non-alphanumeric, lowercase,
+/// remove tokens < 3 chars, and remove stop words.
+fn tokenize_and_filter(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() >= 3 && !is_stop_word(w))
+        .collect()
 }
 
 #[cfg(test)]
@@ -239,6 +299,82 @@ mod tests {
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("Test Cluster"));
+    }
+
+    fn test_config() -> Config {
+        let mut config = Config::load(std::path::Path::new("/nonexistent")).unwrap();
+        config.clustering_enabled = true;
+        config.clustering_rebalance_threshold = 50;
+        config
+    }
+
+    #[test]
+    fn extract_keywords_no_stopwords() {
+        let clusterer = Clusterer::new(&test_config());
+        let docs = vec![
+            "The quick brown fox jumps over the lazy dog",
+            "A brown fox is quick and nimble",
+            "Foxes are brown animals that jump quickly",
+        ];
+        let keywords = clusterer.extract_keywords(&docs, 5);
+        for kw in &keywords {
+            assert!(!is_stop_word(kw), "keyword '{kw}' is a stop word");
+        }
+        assert!(!keywords.is_empty());
+    }
+
+    #[test]
+    fn extract_keywords_empty_docs() {
+        let clusterer = Clusterer::new(&test_config());
+        let keywords = clusterer.extract_keywords(&[], 5);
+        assert!(keywords.is_empty());
+    }
+
+    #[test]
+    fn extract_keywords_respects_n() {
+        let clusterer = Clusterer::new(&test_config());
+        let docs = vec!["rust programming language systems performance memory safety"];
+        let keywords = clusterer.extract_keywords(&docs, 3);
+        assert!(keywords.len() <= 3);
+    }
+
+    #[test]
+    fn generate_label_format() {
+        let clusterer = Clusterer::new(&test_config());
+        let keywords = vec![
+            "rust".to_string(),
+            "programming".to_string(),
+            "systems".to_string(),
+            "extra".to_string(),
+        ];
+        let label = clusterer.generate_label(&keywords);
+        assert_eq!(label, "rust / programming / systems");
+    }
+
+    #[test]
+    fn generate_label_fewer_than_three() {
+        let clusterer = Clusterer::new(&test_config());
+        let keywords = vec!["rust".to_string()];
+        let label = clusterer.generate_label(&keywords);
+        assert_eq!(label, "rust");
+    }
+
+    #[test]
+    fn generate_label_empty() {
+        let clusterer = Clusterer::new(&test_config());
+        let label = clusterer.generate_label(&[]);
+        assert_eq!(label, "Unlabeled");
+    }
+
+    #[test]
+    fn tokenize_filters_short_and_stopwords() {
+        let tokens = tokenize_and_filter("The big cat is on a mat");
+        assert!(!tokens.contains(&"the".to_string()));
+        assert!(!tokens.contains(&"is".to_string()));
+        assert!(!tokens.contains(&"on".to_string()));
+        assert!(tokens.contains(&"big".to_string()));
+        assert!(tokens.contains(&"cat".to_string()));
+        assert!(tokens.contains(&"mat".to_string()));
     }
 
     #[test]

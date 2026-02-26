@@ -152,6 +152,7 @@ mod tests {
             },
             last_updated: 1234567890,
             schema: None,
+            cluster_state: None,
         }
     }
 
