@@ -1,3 +1,4 @@
+use colored::Colorize;
 use std::time::SystemTime;
 
 /// Format a timestamp as a human-readable relative time string.
@@ -55,6 +56,36 @@ pub fn format_file_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// ASCII art logo for the mdvdb CLI.
+const LOGO: &str = r#"
+               _       _ _
+  _ __ ___  __| |_   _| | |__
+ | '_ ` _ \/ _` \ \ / / | '_ \
+ | | | | | |_| |\ V /| |_| |_) |
+ |_| |_| |_|\__,_| \_/ |_|_.__/
+"#;
+
+/// Print the ASCII logo in bold cyan to stdout.
+pub fn print_logo() {
+    for line in LOGO.trim_start_matches('\n').lines() {
+        println!("{}", line.bold().cyan());
+    }
+}
+
+/// Print the logo followed by version and tagline.
+pub fn print_version() {
+    print_logo();
+    println!(
+        "  {} {}",
+        "v".dimmed(),
+        env!("CARGO_PKG_VERSION").bold()
+    );
+    println!(
+        "  {}",
+        "Filesystem-native vector database for Markdown".dimmed()
+    );
 }
 
 /// Render an ASCII progress/percentage bar.
@@ -171,5 +202,39 @@ mod tests {
     #[test]
     fn bar_zero_width() {
         assert_eq!(render_bar(0, 0), "");
+    }
+
+    #[test]
+    fn test_logo() {
+        // Disable colors for deterministic assertions
+        colored::control::set_override(false);
+
+        // Verify logo content
+        // ASCII art spells out "mdvdb" in stylized form
+        assert!(LOGO.contains("__,_"));
+        // Logo lines should be under 40 chars wide
+        for line in LOGO.lines() {
+            assert!(
+                line.len() <= 40,
+                "Logo line too wide ({} chars): {:?}",
+                line.len(),
+                line
+            );
+        }
+        // Logo should be 3-5 content lines
+        let content_lines: Vec<&str> = LOGO.trim().lines().collect();
+        assert!(
+            (3..=5).contains(&content_lines.len()),
+            "Logo should be 3-5 lines, got {}",
+            content_lines.len()
+        );
+    }
+
+    #[test]
+    fn test_version_contains_version_string() {
+        colored::control::set_override(false);
+        // Just verify the version string is accessible
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(!version.is_empty());
     }
 }
