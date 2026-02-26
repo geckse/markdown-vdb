@@ -359,34 +359,32 @@ async fn run() -> anyhow::Result<()> {
                     serde_json::to_writer_pretty(std::io::stdout(), &tree)?;
                 }
                 writeln!(std::io::stdout())?;
-            } else {
-                if let Some(ref prefix) = args.path {
-                    if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
-                        let filtered = mdvdb::tree::FileTree {
-                            root: subtree,
-                            ..tree
-                        };
-                        format::print_file_tree(&filtered, !no_color);
-                    } else {
-                        let empty = mdvdb::tree::FileTree {
-                            root: mdvdb::tree::FileTreeNode {
-                                name: ".".to_string(),
-                                path: ".".to_string(),
-                                is_dir: true,
-                                state: None,
-                                children: Vec::new(),
-                            },
-                            total_files: 0,
-                            indexed_count: 0,
-                            modified_count: 0,
-                            new_count: 0,
-                            deleted_count: 0,
-                        };
-                        format::print_file_tree(&empty, !no_color);
-                    }
+            } else if let Some(ref prefix) = args.path {
+                if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
+                    let filtered = mdvdb::tree::FileTree {
+                        root: subtree,
+                        ..tree
+                    };
+                    format::print_file_tree(&filtered, !no_color);
                 } else {
-                    format::print_file_tree(&tree, !no_color);
+                    let empty = mdvdb::tree::FileTree {
+                        root: mdvdb::tree::FileTreeNode {
+                            name: ".".to_string(),
+                            path: ".".to_string(),
+                            is_dir: true,
+                            state: None,
+                            children: Vec::new(),
+                        },
+                        total_files: 0,
+                        indexed_count: 0,
+                        modified_count: 0,
+                        new_count: 0,
+                        deleted_count: 0,
+                    };
+                    format::print_file_tree(&empty, !no_color);
                 }
+            } else {
+                format::print_file_tree(&tree, !no_color);
             }
         }
         Some(Commands::Get(args)) => {
