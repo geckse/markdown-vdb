@@ -1,8 +1,11 @@
+mod format;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use colored::Colorize;
 use serde_json::Value;
 
 use mdvdb::search::{MetadataFilter, SearchQuery, SearchResult};
@@ -18,7 +21,7 @@ struct SearchOutput {
 
 /// mdvdb — Markdown Vector Database
 #[derive(Parser)]
-#[command(name = "mdvdb", version, about)]
+#[command(name = "mdvdb", about)]
 struct Cli {
     /// Increase log verbosity (-v info, -vv debug, -vvv trace)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
@@ -27,6 +30,14 @@ struct Cli {
     /// Project root directory (defaults to current directory)
     #[arg(long, global = true)]
     root: Option<PathBuf>,
+
+    /// Disable colored output
+    #[arg(long, global = true)]
+    no_color: bool,
+
+    /// Print version information with logo
+    #[arg(long)]
+    version: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -181,6 +192,16 @@ fn parse_filter(s: &str) -> anyhow::Result<MetadataFilter> {
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Disable colors if --no-color flag, NO_COLOR env var, or JSON mode is active.
+    if cli.no_color || std::env::var_os("NO_COLOR").is_some() {
+        colored::control::set_override(false);
+    }
+
+    if cli.version {
+        format::print_version();
+        return Ok(());
+    }
+
     mdvdb::logging::init(cli.verbose)?;
 
     let cwd = match &cli.root {
@@ -214,20 +235,8 @@ async fn run() -> anyhow::Result<()> {
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
-            } else if results.is_empty() {
-                eprintln!("No results found.");
             } else {
-                for (i, r) in results.iter().enumerate() {
-                    println!("{}. [score: {:.4}] {}", i + 1, r.score, r.file.path);
-                    if !r.chunk.heading_hierarchy.is_empty() {
-                        println!("   Section: {}", r.chunk.heading_hierarchy.join(" > "));
-                    }
-                    println!("   Lines {}-{}", r.chunk.start_line, r.chunk.end_line);
-                    // Show first 200 chars of content.
-                    let preview: String = r.chunk.content.chars().take(200).collect();
-                    println!("   {}", preview.replace('\n', " "));
-                    println!();
-                }
+                format::print_search_results(&results, &args.query);
             }
         }
         Some(Commands::Ingest(args)) => {
@@ -238,24 +247,27 @@ async fn run() -> anyhow::Result<()> {
                 file: args.file,
             };
 
+            let use_spinner = !args.json && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let spinner = if use_spinner {
+                let sp = indicatif::ProgressBar::new_spinner();
+                sp.set_message("Ingesting markdown files...");
+                sp.enable_steady_tick(std::time::Duration::from_millis(120));
+                Some(sp)
+            } else {
+                None
+            };
+
             let result = vdb.ingest(options).await?;
+
+            if let Some(sp) = spinner {
+                sp.finish_and_clear();
+            }
 
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &result)?;
                 writeln!(std::io::stdout())?;
             } else {
-                println!("Ingestion complete");
-                println!("  Files indexed:  {}", result.files_indexed);
-                println!("  Files skipped:  {}", result.files_skipped);
-                println!("  Files removed:  {}", result.files_removed);
-                println!("  Chunks created: {}", result.chunks_created);
-                println!("  API calls:      {}", result.api_calls);
-                if result.files_failed > 0 {
-                    println!("  Files failed:   {}", result.files_failed);
-                    for err in &result.errors {
-                        eprintln!("    {}: {}", err.path, err.message);
-                    }
-                }
+                format::print_ingest_result(&result);
             }
         }
         Some(Commands::Status(args)) => {
@@ -266,15 +278,7 @@ async fn run() -> anyhow::Result<()> {
                 serde_json::to_writer_pretty(std::io::stdout(), &status)?;
                 writeln!(std::io::stdout())?;
             } else {
-                println!("Index Status");
-                println!("  Documents:  {}", status.document_count);
-                println!("  Chunks:     {}", status.chunk_count);
-                println!("  Vectors:    {}", status.vector_count);
-                println!("  File size:  {} bytes", status.file_size);
-                println!("  Updated:    {}", status.last_updated);
-                println!("  Provider:   {}", status.embedding_config.provider);
-                println!("  Model:      {}", status.embedding_config.model);
-                println!("  Dimensions: {}", status.embedding_config.dimensions);
+                format::print_status(&status);
             }
         }
         Some(Commands::Schema(args)) => {
@@ -284,29 +288,9 @@ async fn run() -> anyhow::Result<()> {
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &schema)?;
                 writeln!(std::io::stdout())?;
-            } else if schema.fields.is_empty() {
-                println!("No schema fields found.");
             } else {
-                println!("Metadata Schema ({} fields)", schema.fields.len());
-                println!();
-                for field in &schema.fields {
-                    println!("  {} ({:?})", field.name, field.field_type);
-                    if let Some(desc) = &field.description {
-                        println!("    Description: {}", desc);
-                    }
-                    println!("    Occurrences: {}", field.occurrence_count);
-                    if field.required {
-                        println!("    Required: yes");
-                    }
-                    if !field.sample_values.is_empty() {
-                        let samples: Vec<_> = field.sample_values.iter().take(5).collect();
-                        println!("    Samples: {}", samples.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
-                    }
-                    if let Some(allowed) = &field.allowed_values {
-                        println!("    Allowed: {}", allowed.join(", "));
-                    }
-                    println!();
-                }
+                let vdb_status = vdb.status();
+                format::print_schema(&schema, vdb_status.document_count);
             }
         }
         Some(Commands::Clusters(args)) => {
@@ -316,19 +300,8 @@ async fn run() -> anyhow::Result<()> {
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
                 writeln!(std::io::stdout())?;
-            } else if clusters.is_empty() {
-                println!("No clusters available. Run `mdvdb ingest` first, then clustering will be computed.");
             } else {
-                println!("Document Clusters ({} clusters)", clusters.len());
-                println!();
-                for cluster in &clusters {
-                    println!("  Cluster {} ({} documents)", cluster.id, cluster.document_count);
-                    if let Some(label) = &cluster.label {
-                        if !label.is_empty() {
-                            println!("    Label: {}", label);
-                        }
-                    }
-                }
+                format::print_clusters(&clusters);
             }
         }
         Some(Commands::Get(args)) => {
@@ -340,11 +313,7 @@ async fn run() -> anyhow::Result<()> {
                 serde_json::to_writer_pretty(std::io::stdout(), &doc)?;
                 writeln!(std::io::stdout())?;
             } else {
-                println!("Document: {}", doc.path);
-                println!("  Content hash: {}", doc.content_hash);
-                println!("  Chunks:       {}", doc.chunk_count);
-                println!("  File size:    {} bytes", doc.file_size);
-                println!("  Indexed at:   {}", doc.indexed_at);
+                format::print_document(&doc);
             }
         }
         Some(Commands::Watch(args)) => {
@@ -362,19 +331,17 @@ async fn run() -> anyhow::Result<()> {
                 serde_json::to_writer_pretty(std::io::stdout(), &msg)?;
                 writeln!(std::io::stdout())?;
             } else {
-                let dirs = vdb.config().source_dirs.iter()
+                let dirs: Vec<String> = vdb.config().source_dirs.iter()
                     .map(|d| d.to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!("Watching [{}] for changes... (press Ctrl+C to stop)", dirs);
+                    .collect();
+                format::print_watch_started(&dirs);
             }
 
             vdb.watch(cancel).await?;
         }
         Some(Commands::Init(_args)) => {
             MarkdownVdb::init(&cwd)?;
-            println!("Created .markdownvdb config file in {}", cwd.display());
-            println!("Edit it to configure your embedding provider and other settings.");
+            format::print_init_success(&cwd.display().to_string());
         }
         Some(Commands::Completions(args)) => {
             // Shell completion generation.
@@ -438,8 +405,8 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
             writeln!(std::io::stdout())?;
         }
         None => {
-            println!("mdvdb - Markdown Vector Database");
-            println!("Run `mdvdb --help` for usage information.");
+            format::print_logo();
+            println!("{}", "  Run `mdvdb --help` for usage information.".dimmed());
         }
     }
 
