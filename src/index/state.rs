@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::index::storage;
 use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
 use crate::parser::MarkdownFile;
+use crate::schema::Schema;
 
 /// Internal mutable state protected by the RwLock.
 struct IndexState {
@@ -72,6 +73,7 @@ impl Index {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            schema: None,
         };
 
         let hnsw = storage::create_hnsw(config.dimensions)?;
@@ -288,6 +290,19 @@ impl Index {
         }
 
         Ok(output)
+    }
+
+    /// Get the current schema, if any.
+    pub fn get_schema(&self) -> Option<Schema> {
+        let state = self.state.read();
+        state.metadata.schema.clone()
+    }
+
+    /// Set (or clear) the metadata schema.
+    pub fn set_schema(&self, schema: Option<Schema>) {
+        let mut state = self.state.write();
+        state.metadata.schema = schema;
+        state.dirty = true;
     }
 
     /// Persist the index to disk atomically.

@@ -3,6 +3,7 @@ use std::time::SystemTime;
 
 use crate::chunker::Chunk;
 use crate::parser::MarkdownFile;
+use crate::schema::Schema;
 
 /// A chunk stored in the index, with rkyv derives for zero-copy deserialization.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -68,6 +69,8 @@ pub struct IndexMetadata {
     pub embedding_config: EmbeddingConfig,
     /// Unix timestamp (seconds since epoch) of last save.
     pub last_updated: u64,
+    /// Inferred metadata schema, if available.
+    pub schema: Option<Schema>,
 }
 
 /// Status snapshot returned by `Index::status()`.

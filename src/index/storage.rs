@@ -151,6 +151,7 @@ mod tests {
                 dimensions: 128,
             },
             last_updated: 1234567890,
+            schema: None,
         }
     }
 
