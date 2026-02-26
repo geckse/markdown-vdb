@@ -684,6 +684,89 @@ mod tests {
     }
 
     #[test]
+    fn cluster_all_empty_vectors() {
+        let clusterer = Clusterer::new(&test_config());
+        let vectors = HashMap::new();
+        let documents = HashMap::new();
+        let state = clusterer.cluster_all(&vectors, &documents).unwrap();
+        assert!(state.clusters.is_empty());
+        assert_eq!(state.docs_since_rebalance, 0);
+    }
+
+    #[test]
+    fn cluster_all_single_vector() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut vectors = HashMap::new();
+        vectors.insert("doc#0".to_string(), vec![1.0, 0.0, 0.0]);
+        let mut documents = HashMap::new();
+        documents.insert("doc#0".to_string(), "rust programming language".to_string());
+        let state = clusterer.cluster_all(&vectors, &documents).unwrap();
+        assert_eq!(state.clusters.len(), 1);
+        assert_eq!(state.clusters[0].members, vec!["doc#0".to_string()]);
+        assert_eq!(state.docs_at_last_rebalance, 1);
+    }
+
+    #[test]
+    fn cluster_all_skips_zero_norm_vectors() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut vectors = HashMap::new();
+        vectors.insert("good#0".to_string(), vec![1.0, 0.0, 0.0]);
+        vectors.insert("zero#0".to_string(), vec![0.0, 0.0, 0.0]);
+        let documents = HashMap::new();
+        let state = clusterer.cluster_all(&vectors, &documents).unwrap();
+        assert_eq!(state.clusters.len(), 1);
+        assert!(state.clusters[0].members.contains(&"good#0".to_string()));
+        assert!(!state.clusters[0].members.contains(&"zero#0".to_string()));
+    }
+
+    #[test]
+    fn cluster_all_multiple_vectors() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut vectors = HashMap::new();
+        let mut documents = HashMap::new();
+        for i in 0..10 {
+            let mut v = vec![0.0f32; 8];
+            v[i % 8] = 1.0;
+            vectors.insert(format!("doc#{i}"), v);
+            documents.insert(format!("doc#{i}"), format!("document number {i}"));
+        }
+        let state = clusterer.cluster_all(&vectors, &documents).unwrap();
+        assert!(!state.clusters.is_empty());
+        // All docs should be assigned
+        let total_members: usize = state.clusters.iter().map(|c| c.members.len()).sum();
+        assert_eq!(total_members, 10);
+        // Each cluster should have a non-empty label
+        for c in &state.clusters {
+            assert!(!c.label.is_empty());
+            assert!(!c.centroid.is_empty());
+        }
+    }
+
+    #[test]
+    fn cluster_all_only_zero_vectors() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut vectors = HashMap::new();
+        vectors.insert("z1#0".to_string(), vec![0.0, 0.0, 0.0]);
+        vectors.insert("z2#0".to_string(), vec![0.0, 0.0, 0.0]);
+        let state = clusterer.cluster_all(&vectors, &HashMap::new()).unwrap();
+        assert!(state.clusters.is_empty());
+    }
+
+    #[test]
+    fn rebalance_threshold_returns_config_value() {
+        let config = test_config();
+        let clusterer = Clusterer::new(&config);
+        assert_eq!(clusterer.rebalance_threshold(), 50);
+    }
+
+    #[test]
+    fn is_enabled_returns_config_value() {
+        let config = test_config();
+        let clusterer = Clusterer::new(&config);
+        assert!(clusterer.is_enabled());
+    }
+
+    #[test]
     fn cluster_state_serializes_to_json() {
         let state = ClusterState {
             clusters: vec![],
