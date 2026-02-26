@@ -212,25 +212,84 @@ impl Clusterer {
     }
 
     /// Assign a single new document to the nearest existing cluster.
+    ///
+    /// Finds the cluster whose centroid has the highest cosine similarity to the
+    /// given vector, adds the chunk to that cluster, updates the centroid, and
+    /// increments `docs_since_rebalance`.
+    ///
+    /// Returns the cluster ID the document was assigned to.
     pub fn assign_to_nearest(
         &self,
-        _state: &mut ClusterState,
-        _chunk_id: &str,
-        _vector: &[f32],
+        state: &mut ClusterState,
+        chunk_id: &str,
+        vector: &[f32],
     ) -> crate::Result<usize> {
-        todo!("assign_to_nearest: incremental assignment in Phase 2")
+        if state.clusters.is_empty() {
+            return Err(crate::Error::Clustering(
+                "no clusters exist for assignment".to_string(),
+            ));
+        }
+
+        // Find the cluster with highest cosine similarity to the vector
+        let mut best_idx = 0;
+        let mut best_sim = f32::NEG_INFINITY;
+        for (i, cluster) in state.clusters.iter().enumerate() {
+            let sim = cosine_similarity(vector, &cluster.centroid);
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
+        }
+
+        let cluster = &mut state.clusters[best_idx];
+        let cluster_id = cluster.id;
+
+        // Update centroid incrementally: new_centroid = (old_centroid * n + vector) / (n + 1)
+        let n = cluster.members.len() as f32;
+        for (i, c) in cluster.centroid.iter_mut().enumerate() {
+            *c = (*c * n + vector[i]) / (n + 1.0);
+        }
+
+        cluster.members.push(chunk_id.to_string());
+        state.docs_since_rebalance += 1;
+
+        debug!(
+            "assign_to_nearest: assigned {chunk_id} to cluster {cluster_id} (similarity={best_sim:.4})"
+        );
+
+        Ok(cluster_id)
     }
 
     /// Rebalance clusters if the number of new documents exceeds the threshold.
     ///
+    /// A full re-clustering is triggered when `docs_since_rebalance` exceeds
+    /// the configured `clustering_rebalance_threshold`. After rebalancing,
+    /// the counter is reset.
+    ///
     /// Returns `true` if a rebalance was performed.
     pub fn maybe_rebalance(
         &self,
-        _state: &mut ClusterState,
-        _vectors: &HashMap<String, Vec<f32>>,
-        _documents: &HashMap<String, String>,
+        state: &mut ClusterState,
+        vectors: &HashMap<String, Vec<f32>>,
+        documents: &HashMap<String, String>,
     ) -> crate::Result<bool> {
-        todo!("maybe_rebalance: threshold-based rebalancing in Phase 2")
+        if state.docs_since_rebalance < self.config.clustering_rebalance_threshold {
+            debug!(
+                "maybe_rebalance: {}/{} docs since rebalance, skipping",
+                state.docs_since_rebalance, self.config.clustering_rebalance_threshold
+            );
+            return Ok(false);
+        }
+
+        info!(
+            "maybe_rebalance: threshold reached ({} docs since last rebalance), re-clustering",
+            state.docs_since_rebalance
+        );
+
+        let new_state = self.cluster_all(vectors, documents)?;
+        *state = new_state;
+
+        Ok(true)
     }
 
     /// Extract top-N keywords from a set of documents using TF-IDF.
@@ -510,6 +569,118 @@ mod tests {
         assert!(tokens.contains(&"big".to_string()));
         assert!(tokens.contains(&"cat".to_string()));
         assert!(tokens.contains(&"mat".to_string()));
+    }
+
+    #[test]
+    fn assign_to_nearest_picks_closest_cluster() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = ClusterState {
+            clusters: vec![
+                ClusterInfo {
+                    id: 0,
+                    label: "A".to_string(),
+                    centroid: vec![1.0, 0.0, 0.0],
+                    members: vec!["a#0".to_string()],
+                    keywords: vec![],
+                },
+                ClusterInfo {
+                    id: 1,
+                    label: "B".to_string(),
+                    centroid: vec![0.0, 1.0, 0.0],
+                    members: vec!["b#0".to_string()],
+                    keywords: vec![],
+                },
+            ],
+            docs_since_rebalance: 0,
+            docs_at_last_rebalance: 2,
+        };
+
+        // Vector close to cluster 0
+        let assigned = clusterer
+            .assign_to_nearest(&mut state, "new#0", &[0.9, 0.1, 0.0])
+            .unwrap();
+        assert_eq!(assigned, 0);
+        assert!(state.clusters[0].members.contains(&"new#0".to_string()));
+        assert_eq!(state.docs_since_rebalance, 1);
+    }
+
+    #[test]
+    fn assign_to_nearest_updates_centroid() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = ClusterState {
+            clusters: vec![ClusterInfo {
+                id: 0,
+                label: "A".to_string(),
+                centroid: vec![1.0, 0.0, 0.0],
+                members: vec!["a#0".to_string()],
+                keywords: vec![],
+            }],
+            docs_since_rebalance: 0,
+            docs_at_last_rebalance: 1,
+        };
+
+        clusterer
+            .assign_to_nearest(&mut state, "b#0", &[0.0, 1.0, 0.0])
+            .unwrap();
+
+        // Centroid should be average: (1+0)/2, (0+1)/2, 0
+        let c = &state.clusters[0].centroid;
+        assert!((c[0] - 0.5).abs() < 1e-6);
+        assert!((c[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn assign_to_nearest_empty_clusters_errors() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = ClusterState {
+            clusters: vec![],
+            docs_since_rebalance: 0,
+            docs_at_last_rebalance: 0,
+        };
+        let result = clusterer.assign_to_nearest(&mut state, "x#0", &[1.0, 0.0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn maybe_rebalance_below_threshold() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = ClusterState {
+            clusters: vec![],
+            docs_since_rebalance: 5,
+            docs_at_last_rebalance: 10,
+        };
+        let vectors = HashMap::new();
+        let documents = HashMap::new();
+        let rebalanced = clusterer.maybe_rebalance(&mut state, &vectors, &documents).unwrap();
+        assert!(!rebalanced);
+    }
+
+    #[test]
+    fn maybe_rebalance_above_threshold() {
+        let mut config = test_config();
+        config.clustering_rebalance_threshold = 2;
+        let clusterer = Clusterer::new(&config);
+
+        let mut vectors = HashMap::new();
+        vectors.insert("a#0".to_string(), vec![1.0, 0.0, 0.0]);
+        vectors.insert("b#0".to_string(), vec![0.0, 1.0, 0.0]);
+        vectors.insert("c#0".to_string(), vec![0.0, 0.0, 1.0]);
+
+        let mut documents = HashMap::new();
+        documents.insert("a#0".to_string(), "alpha docs".to_string());
+        documents.insert("b#0".to_string(), "beta docs".to_string());
+        documents.insert("c#0".to_string(), "gamma docs".to_string());
+
+        let mut state = ClusterState {
+            clusters: vec![],
+            docs_since_rebalance: 3,
+            docs_at_last_rebalance: 0,
+        };
+
+        let rebalanced = clusterer.maybe_rebalance(&mut state, &vectors, &documents).unwrap();
+        assert!(rebalanced);
+        assert!(!state.clusters.is_empty());
+        assert_eq!(state.docs_since_rebalance, 0);
     }
 
     #[test]
