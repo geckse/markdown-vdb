@@ -32,6 +32,9 @@ pub enum Error {
 
     #[error("logging initialization failed: {0}")]
     Logging(String),
+
+    #[error("clustering error: {0}")]
+    Clustering(String),
 }
 
 /// Convenience alias used throughout the crate.
@@ -103,6 +106,12 @@ mod tests {
     fn lock_timeout_variant_formats() {
         let err = Error::LockTimeout;
         assert_eq!(err.to_string(), "lock acquisition timed out");
+    }
+
+    #[test]
+    fn clustering_variant_formats() {
+        let err = Error::Clustering("too few points".into());
+        assert_eq!(err.to_string(), "clustering error: too few points");
     }
 
     #[test]
