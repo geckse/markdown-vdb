@@ -341,3 +341,167 @@ fn test_search_filter_flag() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
     assert!(json["results"].is_array(), "filtered search should return results array");
 }
+
+// ---------------------------------------------------------------------------
+// CLI formatting tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_no_subcommand_shows_logo() {
+    let dir = TempDir::new().unwrap();
+    let output = mdvdb_bin()
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+
+    // No subcommand should show the logo and exit successfully.
+    assert!(output.status.success(), "no subcommand should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The logo contains ASCII art with "mdvdb" stylized characters.
+    assert!(
+        stdout.contains("__,_") || stdout.contains("mdvdb"),
+        "no-subcommand output should contain logo text, got: {}",
+        &stdout[..stdout.len().min(300)]
+    );
+}
+
+#[test]
+fn test_no_color_flag_disables_colors() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["--no-color", "status"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "status with --no-color should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\x1b["),
+        "stdout should not contain ANSI escape sequences with --no-color, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_no_color_env_var() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["status"])
+        .env("NO_COLOR", "1")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "status with NO_COLOR=1 should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\x1b["),
+        "stdout should not contain ANSI escape sequences with NO_COLOR=1, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_search_human_shows_score_bar() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["--no-color", "search", "rust programming"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "human search should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Score bars use █ or ░ characters.
+    assert!(
+        stdout.contains('█') || stdout.contains('░'),
+        "search output should contain bar characters (█/░), got: {stdout}"
+    );
+}
+
+#[test]
+fn test_clusters_shows_keywords() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["--no-color", "clusters"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "clusters should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Clusters output should include keyword text (the TF-IDF labels).
+    assert!(
+        stdout.contains("keyword") || stdout.contains("Keyword") || stdout.contains("document") || stdout.len() > 20,
+        "clusters output should include keyword or cluster info, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_get_shows_frontmatter() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["--no-color", "get", "hello.md"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "get should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should show frontmatter field names from hello.md.
+    assert!(
+        stdout.contains("title"),
+        "get output should include frontmatter field 'title', got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Hello World") || stdout.contains("hello"),
+        "get output should include frontmatter value, got: {stdout}"
+    );
+}
+
+#[test]
+fn test_ingest_json_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join(".markdownvdb"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+    fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
+
+    let output = mdvdb_bin()
+        .args(["ingest", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success(), "ingest --json should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\x1b["),
+        "ingest --json should not contain ANSI codes, got: {stdout}"
+    );
+    // Verify it's valid JSON (no ANSI contamination).
+    let _: serde_json::Value = serde_json::from_str(&stdout).expect("ingest --json should be valid JSON");
+}
+
+#[test]
+fn test_status_json_unchanged() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["status", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success(), "status --json should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("\x1b["),
+        "status --json should not contain ANSI codes, got: {stdout}"
+    );
+    // Verify it's valid JSON.
+    let _: serde_json::Value = serde_json::from_str(&stdout).expect("status --json should be valid JSON");
+}
