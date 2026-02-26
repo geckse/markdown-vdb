@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
@@ -223,24 +223,98 @@ impl Schema {
 
     /// Load an optional overlay from `.markdownvdb.schema.yml` in the project root.
     pub fn load_overlay(
-        _project_root: &Path,
+        project_root: &Path,
     ) -> crate::Result<Option<HashMap<String, OverlayField>>> {
-        todo!()
+        let path = project_root.join(".markdownvdb.schema.yml");
+        if !path.exists() {
+            debug!("no schema overlay file found at {}", path.display());
+            return Ok(None);
+        }
+
+        let contents = std::fs::read_to_string(&path)?;
+        let overlay: OverlaySchema = serde_yaml::from_str(&contents).map_err(|e| {
+            crate::error::Error::Config(format!(
+                "failed to parse {}: {e}",
+                path.display()
+            ))
+        })?;
+
+        debug!(field_count = overlay.fields.len(), "loaded schema overlay");
+        Ok(Some(overlay.fields))
     }
 
     /// Merge an inferred schema with an optional overlay.
-    pub fn merge(_inferred: Self, _overlay: Option<HashMap<String, OverlayField>>) -> Self {
-        todo!()
+    pub fn merge(inferred: Self, overlay: Option<HashMap<String, OverlayField>>) -> Self {
+        let overlay = match overlay {
+            Some(o) => o,
+            None => return inferred,
+        };
+
+        // Start with inferred fields in a BTreeMap for alphabetical ordering
+        let mut merged: BTreeMap<String, SchemaField> = BTreeMap::new();
+        for field in inferred.fields {
+            merged.insert(field.name.clone(), field);
+        }
+
+        // Apply overlay
+        for (name, ov) in &overlay {
+            if let Some(field) = merged.get_mut(name) {
+                // Apply overlay to existing inferred field
+                if let Some(desc) = &ov.description {
+                    field.description = Some(desc.clone());
+                }
+                if let Some(type_str) = &ov.field_type {
+                    if let Some(ft) = parse_field_type_str(type_str) {
+                        field.field_type = ft;
+                    }
+                }
+                if let Some(av) = &ov.allowed_values {
+                    field.allowed_values = Some(av.clone());
+                }
+                if let Some(req) = ov.required {
+                    field.required = req;
+                }
+            } else {
+                // Overlay-only field: not seen in any file
+                let field_type = ov
+                    .field_type
+                    .as_deref()
+                    .and_then(parse_field_type_str)
+                    .unwrap_or(FieldType::String);
+
+                merged.insert(
+                    name.clone(),
+                    SchemaField {
+                        name: name.clone(),
+                        field_type,
+                        description: ov.description.clone(),
+                        occurrence_count: 0,
+                        sample_values: vec![],
+                        allowed_values: ov.allowed_values.clone(),
+                        required: ov.required.unwrap_or(false),
+                    },
+                );
+            }
+        }
+
+        let fields: Vec<SchemaField> = merged.into_values().collect();
+
+        debug!(field_count = fields.len(), "schema merged with overlay");
+
+        Schema {
+            fields,
+            last_updated: inferred.last_updated,
+        }
     }
 
     /// Look up a field by name.
-    pub fn get_field(&self, _name: &str) -> Option<&SchemaField> {
-        todo!()
+    pub fn get_field(&self, name: &str) -> Option<&SchemaField> {
+        self.fields.iter().find(|f| f.name == name)
     }
 
     /// Return all field names in the schema.
     pub fn field_names(&self) -> Vec<&str> {
-        todo!()
+        self.fields.iter().map(|f| f.name.as_str()).collect()
     }
 }
 
@@ -404,5 +478,116 @@ mod tests {
         let schema = Schema::infer(&files);
         assert_eq!(schema.fields[0].name, "meta");
         assert_eq!(schema.fields[0].field_type, FieldType::String);
+    }
+
+    #[test]
+    fn load_overlay_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = Schema::load_overlay(dir.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_overlay_valid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+fields:
+  title:
+    description: "The document title"
+    field_type: string
+    required: true
+  status:
+    allowed_values: ["draft", "published"]
+"#;
+        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+        let result = Schema::load_overlay(dir.path()).unwrap().unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result["title"].description.as_deref(), Some("The document title"));
+        assert_eq!(result["title"].required, Some(true));
+        assert!(result["status"].allowed_values.is_some());
+    }
+
+    #[test]
+    fn load_overlay_invalid_yaml_returns_config_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), "not: [valid: yaml: !!").unwrap();
+        let err = Schema::load_overlay(dir.path()).unwrap_err();
+        assert!(matches!(err, crate::error::Error::Config(_)));
+    }
+
+    #[test]
+    fn merge_without_overlay_returns_inferred() {
+        let files = vec![make_file(serde_json::json!({"title": "Hello"}))];
+        let inferred = Schema::infer(&files);
+        let merged = Schema::merge(inferred.clone(), None);
+        assert_eq!(merged.fields.len(), 1);
+        assert_eq!(merged.fields[0].name, "title");
+    }
+
+    #[test]
+    fn merge_applies_overlay_to_existing_field() {
+        let files = vec![make_file(serde_json::json!({"title": "Hello"}))];
+        let inferred = Schema::infer(&files);
+        let mut overlay = HashMap::new();
+        overlay.insert("title".to_string(), OverlayField {
+            description: Some("Doc title".to_string()),
+            field_type: None,
+            allowed_values: None,
+            required: Some(true),
+        });
+        let merged = Schema::merge(inferred, Some(overlay));
+        assert_eq!(merged.fields[0].description.as_deref(), Some("Doc title"));
+        assert!(merged.fields[0].required);
+    }
+
+    #[test]
+    fn merge_adds_overlay_only_fields() {
+        let files = vec![make_file(serde_json::json!({"title": "Hello"}))];
+        let inferred = Schema::infer(&files);
+        let mut overlay = HashMap::new();
+        overlay.insert("category".to_string(), OverlayField {
+            description: Some("Content category".to_string()),
+            field_type: Some("string".to_string()),
+            allowed_values: Some(vec!["blog".to_string(), "docs".to_string()]),
+            required: Some(false),
+        });
+        let merged = Schema::merge(inferred, Some(overlay));
+        assert_eq!(merged.fields.len(), 2);
+        // alphabetical: category before title
+        assert_eq!(merged.fields[0].name, "category");
+        assert_eq!(merged.fields[0].occurrence_count, 0);
+        assert_eq!(merged.fields[1].name, "title");
+    }
+
+    #[test]
+    fn merge_type_override() {
+        let files = vec![make_file(serde_json::json!({"count": "42"}))];
+        let inferred = Schema::infer(&files);
+        assert_eq!(inferred.fields[0].field_type, FieldType::String);
+        let mut overlay = HashMap::new();
+        overlay.insert("count".to_string(), OverlayField {
+            description: None,
+            field_type: Some("number".to_string()),
+            allowed_values: None,
+            required: None,
+        });
+        let merged = Schema::merge(inferred, Some(overlay));
+        assert_eq!(merged.fields[0].field_type, FieldType::Number);
+    }
+
+    #[test]
+    fn get_field_found_and_not_found() {
+        let files = vec![make_file(serde_json::json!({"title": "Hello", "tags": ["a"]}))];
+        let schema = Schema::infer(&files);
+        assert!(schema.get_field("title").is_some());
+        assert!(schema.get_field("nonexistent").is_none());
+    }
+
+    #[test]
+    fn field_names_returns_all() {
+        let files = vec![make_file(serde_json::json!({"b": 1, "a": 2}))];
+        let schema = Schema::infer(&files);
+        let names = schema.field_names();
+        assert_eq!(names, vec!["a", "b"]);
     }
 }
