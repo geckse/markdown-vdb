@@ -11,6 +11,12 @@ pub mod search;
 
 pub use error::Error;
 
+// Re-export key public types for convenience.
+pub use config::Config;
+pub use index::types::IndexStatus;
+pub use schema::{FieldType, Schema, SchemaField};
+pub use search::{MetadataFilter, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
+
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -390,6 +396,72 @@ impl MarkdownVdb {
             }
         }
         Ok(schema::Schema::infer(&parsed))
+    }
+
+    /// Initialize a new markdown-vdb project by creating a `.markdownvdb` config file
+    /// with default/example values.
+    ///
+    /// Returns `Error::ConfigAlreadyExists` if the file already exists.
+    pub fn init(root: &Path) -> Result<()> {
+        let config_path = root.join(".markdownvdb");
+        if config_path.exists() {
+            return Err(Error::ConfigAlreadyExists {
+                path: config_path,
+            });
+        }
+
+        let default_config = "\
+# markdown-vdb configuration
+# See https://github.com/example/markdown-vdb for documentation
+
+# Embedding provider: openai, ollama, or custom
+MDVDB_EMBEDDING_PROVIDER=openai
+MDVDB_EMBEDDING_MODEL=text-embedding-3-small
+MDVDB_EMBEDDING_DIMENSIONS=1536
+MDVDB_EMBEDDING_BATCH_SIZE=100
+
+# Source directories (comma-separated)
+MDVDB_SOURCE_DIRS=.
+
+# Index file location
+MDVDB_INDEX_FILE=.markdownvdb.index
+
+# Chunking
+MDVDB_CHUNK_MAX_TOKENS=512
+MDVDB_CHUNK_OVERLAP_TOKENS=50
+
+# Search defaults
+MDVDB_SEARCH_DEFAULT_LIMIT=10
+MDVDB_SEARCH_MIN_SCORE=0.0
+
+# File watching
+MDVDB_WATCH=true
+MDVDB_WATCH_DEBOUNCE_MS=300
+
+# Clustering
+MDVDB_CLUSTERING_ENABLED=true
+MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
+";
+
+        std::fs::write(&config_path, default_config)?;
+        info!(path = %config_path.display(), "created default config file");
+        Ok(())
+    }
+
+    /// Start watching for file changes and re-index incrementally.
+    ///
+    /// This is a stub that returns an error until the watcher module is fully integrated.
+    pub fn watch(&self) -> Result<()> {
+        Err(Error::Watch(
+            "watch is not yet implemented; use `ingest` for manual indexing".into(),
+        ))
+    }
+
+    /// Return cluster summaries for the indexed documents.
+    ///
+    /// This is a stub that returns an empty list until clustering is fully integrated.
+    pub fn clusters(&self) -> Result<Vec<ClusterSummary>> {
+        Ok(Vec::new())
     }
 
     /// Get information about an indexed document by its relative path.
