@@ -14,25 +14,39 @@ pub use error::Error;
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::embedding::provider::{create_provider, EmbeddingProvider};
 use crate::index::state::Index;
 use crate::index::types::EmbeddingConfig;
 
+/// Options controlling the ingestion pipeline.
+#[derive(Debug, Clone, Default)]
+pub struct IngestOptions {
+    /// Force re-embedding of all files, ignoring content hashes.
+    pub full: bool,
+    /// Ingest only a single file (relative path).
+    pub file: Option<PathBuf>,
+}
+
 /// Result of an ingestion operation.
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestResult {
-    /// Number of files ingested.
-    pub files_ingested: usize,
-    /// Number of chunks created.
-    pub chunks_created: usize,
+    /// Number of files indexed (new or changed).
+    pub files_indexed: usize,
     /// Number of files skipped (unchanged).
     pub files_skipped: usize,
+    /// Number of files removed from index (deleted from disk).
+    pub files_removed: usize,
+    /// Number of chunks created.
+    pub chunks_created: usize,
+    /// Number of API calls made to the embedding provider.
+    pub api_calls: usize,
     /// Number of files that failed to ingest.
     pub files_failed: usize,
     /// Errors encountered during ingestion.
@@ -171,6 +185,178 @@ impl MarkdownVdb {
     /// Get a reference to the embedding provider.
     pub fn provider(&self) -> &dyn EmbeddingProvider {
         self.provider.as_ref()
+    }
+
+    /// Ingest markdown files into the index.
+    ///
+    /// Pipeline: discover → parse → hash-compare → chunk → embed → upsert → remove deleted → save.
+    pub async fn ingest(&self, options: IngestOptions) -> Result<IngestResult> {
+        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+
+        // Discover files to process.
+        let discovered = if let Some(ref single_file) = options.file {
+            // Verify the file exists.
+            let full = self.root.join(single_file);
+            if !full.is_file() {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("file not found: {}", single_file.display()),
+                )));
+            }
+            vec![single_file.clone()]
+        } else {
+            disco.discover()?
+        };
+
+        info!(files = discovered.len(), "discovered markdown files");
+
+        // Get existing hashes from index for skip detection.
+        let existing_hashes = self.index.get_file_hashes();
+        let existing_paths: std::collections::HashSet<String> =
+            existing_hashes.keys().cloned().collect();
+
+        let mut result = IngestResult {
+            files_indexed: 0,
+            files_skipped: 0,
+            files_removed: 0,
+            chunks_created: 0,
+            api_calls: 0,
+            files_failed: 0,
+            errors: Vec::new(),
+        };
+
+        // Parse all files and collect chunks + hashes.
+        let mut all_batch_chunks: Vec<embedding::batch::Chunk> = Vec::new();
+        let mut current_hashes: HashMap<PathBuf, String> = HashMap::new();
+        let mut parsed_files: HashMap<PathBuf, (parser::MarkdownFile, Vec<chunker::Chunk>)> =
+            HashMap::new();
+        let mut discovered_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for path in &discovered {
+            let path_str = path.to_string_lossy().to_string();
+            discovered_paths.insert(path_str.clone());
+
+            // Parse the file.
+            let md = match parser::parse_markdown_file(&self.root, path) {
+                Ok(md) => md,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to parse");
+                    result.files_failed += 1;
+                    result.errors.push(IngestError {
+                        path: path_str,
+                        message: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            // Check content hash for skip (unless --full).
+            if !options.full {
+                if let Some(existing) = existing_hashes.get(&path_str) {
+                    if *existing == md.content_hash {
+                        debug!(path = %path.display(), "unchanged, skipping");
+                        result.files_skipped += 1;
+                        current_hashes.insert(path.clone(), md.content_hash.clone());
+                        continue;
+                    }
+                }
+            }
+
+            current_hashes.insert(path.clone(), md.content_hash.clone());
+
+            // Chunk the document.
+            let chunks = match chunker::chunk_document(
+                &md,
+                self.config.chunk_max_tokens,
+                self.config.chunk_overlap_tokens,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to chunk");
+                    result.files_failed += 1;
+                    result.errors.push(IngestError {
+                        path: path_str,
+                        message: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            // Convert to batch chunks for embedding.
+            for chunk in &chunks {
+                all_batch_chunks.push(embedding::batch::Chunk {
+                    id: chunk.id.clone(),
+                    source_path: chunk.source_path.clone(),
+                    content: chunk.content.clone(),
+                });
+            }
+
+            parsed_files.insert(path.clone(), (md, chunks));
+        }
+
+        // Embed all changed chunks.
+        // For files we're re-embedding, we pass empty existing hashes so nothing is skipped.
+        let embed_existing: HashMap<PathBuf, String> = HashMap::new();
+        let embed_current: HashMap<PathBuf, String> = all_batch_chunks
+            .iter()
+            .map(|c| (c.source_path.clone(), "changed".to_string()))
+            .collect();
+
+        let embed_result = embedding::batch::embed_chunks(
+            self.provider.as_ref(),
+            &all_batch_chunks,
+            &embed_existing,
+            &embed_current,
+            self.config.embedding_batch_size,
+        )
+        .await?;
+
+        result.api_calls = embed_result.api_calls;
+
+        // Upsert files with their embeddings.
+        for (path, (md, chunks)) in &parsed_files {
+            let embeddings: Vec<Vec<f32>> = chunks
+                .iter()
+                .map(|chunk| {
+                    embed_result
+                        .embeddings
+                        .get(&chunk.id)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+
+            self.index.upsert(md, chunks, &embeddings)?;
+            result.files_indexed += 1;
+            result.chunks_created += chunks.len();
+            debug!(path = %path.display(), chunks = chunks.len(), "indexed");
+        }
+
+        // Remove files that no longer exist on disk (only for full discovery, not single file).
+        if options.file.is_none() {
+            for path_str in &existing_paths {
+                if !discovered_paths.contains(path_str) {
+                    self.index.remove_file(path_str)?;
+                    result.files_removed += 1;
+                    debug!(path = %path_str, "removed deleted file from index");
+                }
+            }
+        }
+
+        // Save the index to disk.
+        self.index.save()?;
+
+        info!(
+            files_indexed = result.files_indexed,
+            files_skipped = result.files_skipped,
+            files_removed = result.files_removed,
+            chunks_created = result.chunks_created,
+            api_calls = result.api_calls,
+            "ingestion complete"
+        );
+
+        Ok(result)
     }
 
     /// Execute a semantic search query against the index.
