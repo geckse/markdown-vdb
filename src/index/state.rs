@@ -10,6 +10,7 @@ use tracing::debug;
 use crate::chunker::Chunk;
 use crate::error::{Error, Result};
 use crate::index::storage;
+use crate::clustering::ClusterState;
 use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
@@ -74,6 +75,7 @@ impl Index {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             schema: None,
+            cluster_state: None,
         };
 
         let hnsw = storage::create_hnsw(config.dimensions)?;
@@ -296,6 +298,19 @@ impl Index {
     pub fn get_schema(&self) -> Option<Schema> {
         let state = self.state.read();
         state.metadata.schema.clone()
+    }
+
+    /// Get the current cluster state, if any.
+    pub fn get_clusters(&self) -> Option<ClusterState> {
+        let state = self.state.read();
+        state.metadata.cluster_state.clone()
+    }
+
+    /// Update (or clear) the cluster state.
+    pub fn update_clusters(&self, cluster_state: Option<ClusterState>) {
+        let mut state = self.state.write();
+        state.metadata.cluster_state = cluster_state;
+        state.dirty = true;
     }
 
     /// Set (or clear) the metadata schema.
