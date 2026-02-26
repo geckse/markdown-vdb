@@ -279,29 +279,9 @@ async fn run() -> anyhow::Result<()> {
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &schema)?;
                 writeln!(std::io::stdout())?;
-            } else if schema.fields.is_empty() {
-                println!("No schema fields found.");
             } else {
-                println!("Metadata Schema ({} fields)", schema.fields.len());
-                println!();
-                for field in &schema.fields {
-                    println!("  {} ({:?})", field.name, field.field_type);
-                    if let Some(desc) = &field.description {
-                        println!("    Description: {}", desc);
-                    }
-                    println!("    Occurrences: {}", field.occurrence_count);
-                    if field.required {
-                        println!("    Required: yes");
-                    }
-                    if !field.sample_values.is_empty() {
-                        let samples: Vec<_> = field.sample_values.iter().take(5).collect();
-                        println!("    Samples: {}", samples.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
-                    }
-                    if let Some(allowed) = &field.allowed_values {
-                        println!("    Allowed: {}", allowed.join(", "));
-                    }
-                    println!();
-                }
+                let vdb_status = vdb.status();
+                format::print_schema(&schema, vdb_status.document_count);
             }
         }
         Some(Commands::Clusters(args)) => {
@@ -311,19 +291,8 @@ async fn run() -> anyhow::Result<()> {
             if args.json {
                 serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
                 writeln!(std::io::stdout())?;
-            } else if clusters.is_empty() {
-                println!("No clusters available. Run `mdvdb ingest` first, then clustering will be computed.");
             } else {
-                println!("Document Clusters ({} clusters)", clusters.len());
-                println!();
-                for cluster in &clusters {
-                    println!("  Cluster {} ({} documents)", cluster.id, cluster.document_count);
-                    if let Some(label) = &cluster.label {
-                        if !label.is_empty() {
-                            println!("    Label: {}", label);
-                        }
-                    }
-                }
+                format::print_clusters(&clusters);
             }
         }
         Some(Commands::Get(args)) => {

@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::time::SystemTime;
 
 use mdvdb::search::SearchResult;
+use mdvdb::schema::{FieldType, Schema};
+use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
 use mdvdb::DocumentInfo;
 use mdvdb::IngestResult;
@@ -332,6 +334,136 @@ pub fn print_document(doc: &DocumentInfo) {
         }
     }
     println!();
+}
+
+/// Print the metadata schema with occurrence bars and field details.
+pub fn print_schema(schema: &Schema, total_docs: usize) {
+    if schema.fields.is_empty() {
+        println!(
+            "  {} No schema fields found. Run {} first.",
+            "✗".red().bold(),
+            "mdvdb ingest".yellow()
+        );
+        return;
+    }
+
+    println!(
+        "\n  {} {} {}\n",
+        "●".cyan().bold(),
+        "Metadata Schema".bold(),
+        format!("({} fields)", schema.fields.len()).dimmed()
+    );
+
+    for field in &schema.fields {
+        // Field type display
+        let type_str = match &field.field_type {
+            FieldType::String => "string",
+            FieldType::Number => "number",
+            FieldType::Boolean => "boolean",
+            FieldType::List => "list",
+            FieldType::Date => "date",
+            FieldType::Mixed => "mixed",
+        };
+
+        // Occurrence bar: 20-char width, proportional to total_docs
+        let filled = if total_docs > 0 {
+            ((field.occurrence_count as f64 / total_docs as f64) * 20.0).round() as usize
+        } else {
+            0
+        };
+        let bar = render_bar(filled, 20);
+
+        // Required tag
+        let required_tag = if field.required {
+            format!(" {}", "[required]".yellow())
+        } else {
+            String::new()
+        };
+
+        println!(
+            "  {} {} {} {}{}",
+            field.name.bold(),
+            format!("({})", type_str).dimmed(),
+            bar,
+            format!("{}/{}", field.occurrence_count, total_docs).dimmed(),
+            required_tag
+        );
+
+        // Description
+        if let Some(desc) = &field.description {
+            println!("    {}", desc.dimmed());
+        }
+
+        // Sample values (dimmed)
+        if !field.sample_values.is_empty() {
+            let samples: Vec<&str> = field.sample_values.iter().take(5).map(|s| s.as_str()).collect();
+            println!("    {} {}", "Samples:".dimmed(), samples.join(", ").dimmed());
+        }
+
+        // Allowed values
+        if let Some(allowed) = &field.allowed_values {
+            if !allowed.is_empty() {
+                println!("    {} {}", "Allowed:".dimmed(), allowed.join(", ").cyan());
+            }
+        }
+
+        println!();
+    }
+}
+
+/// Print cluster summaries with distribution bars and keywords.
+pub fn print_clusters(clusters: &[ClusterSummary]) {
+    if clusters.is_empty() {
+        println!(
+            "  {} No clusters available. Run {} first.",
+            "✗".red().bold(),
+            "mdvdb ingest".yellow()
+        );
+        return;
+    }
+
+    let total_docs: usize = clusters.iter().map(|c| c.document_count).sum();
+    let max_size = clusters.iter().map(|c| c.document_count).max().unwrap_or(1);
+
+    println!(
+        "\n  {} {} {}\n",
+        "●".cyan().bold(),
+        "Document Clusters".bold(),
+        format!("({} clusters, {} documents)", clusters.len(), total_docs).dimmed()
+    );
+
+    for cluster in clusters {
+        // Distribution bar: 20-char, proportional to max cluster size
+        let filled = if max_size > 0 {
+            ((cluster.document_count as f64 / max_size as f64) * 20.0).round() as usize
+        } else {
+            0
+        };
+        let bar = render_bar(filled, 20);
+
+        // Label
+        let label = cluster
+            .label
+            .as_deref()
+            .filter(|l| !l.is_empty())
+            .unwrap_or("(unlabeled)");
+
+        println!(
+            "  {} {} {} {}",
+            format!("Cluster {}:", cluster.id).bold(),
+            bar,
+            format!("{} docs", cluster.document_count).yellow(),
+            label
+        );
+
+        // Keywords (blue)
+        if !cluster.keywords.is_empty() {
+            let kw: Vec<String> = cluster.keywords.iter().map(|k| format!("{}", k.blue())).collect();
+            println!("    {} {}", "Keywords:".dimmed(), kw.join(", "));
+        }
+
+        println!();
+    }
 }
 
 #[cfg(test)]
