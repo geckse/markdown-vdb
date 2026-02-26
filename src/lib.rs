@@ -10,6 +10,7 @@ pub mod parser;
 pub mod ingest;
 pub mod schema;
 pub mod search;
+pub mod tree;
 pub mod watcher;
 
 pub use error::Error;
