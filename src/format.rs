@@ -466,6 +466,41 @@ pub fn print_clusters(clusters: &[ClusterSummary]) {
     }
 }
 
+/// Print watch startup message with green text and directory list.
+pub fn print_watch_started(dirs: &[String]) {
+    println!(
+        "\n  {} {}\n",
+        "●".green().bold(),
+        "Watching for changes".bold()
+    );
+    for dir in dirs {
+        println!("  {}  {}", "→".green(), dir);
+    }
+    println!(
+        "\n  {}",
+        "Press Ctrl+C to stop".dimmed()
+    );
+}
+
+/// Print init success message with green checkmark.
+pub fn print_init_success(path: &str) {
+    println!(
+        "\n  {} {}\n",
+        "✓".green().bold(),
+        "Initialized".bold()
+    );
+    println!(
+        "  {} {}",
+        "Config:".dimmed(),
+        format!("{}/.markdownvdb", path).bold()
+    );
+    println!(
+        "  {}",
+        "Edit it to configure your embedding provider and other settings.".dimmed()
+    );
+    println!();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

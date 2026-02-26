@@ -322,19 +322,17 @@ async fn run() -> anyhow::Result<()> {
                 serde_json::to_writer_pretty(std::io::stdout(), &msg)?;
                 writeln!(std::io::stdout())?;
             } else {
-                let dirs = vdb.config().source_dirs.iter()
+                let dirs: Vec<String> = vdb.config().source_dirs.iter()
                     .map(|d| d.to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                println!("Watching [{}] for changes... (press Ctrl+C to stop)", dirs);
+                    .collect();
+                format::print_watch_started(&dirs);
             }
 
             vdb.watch(cancel).await?;
         }
         Some(Commands::Init(_args)) => {
             MarkdownVdb::init(&cwd)?;
-            println!("Created .markdownvdb config file in {}", cwd.display());
-            println!("Edit it to configure your embedding provider and other settings.");
+            format::print_init_success(&cwd.display().to_string());
         }
         Some(Commands::Completions(args)) => {
             // Shell completion generation.
