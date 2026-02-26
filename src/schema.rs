@@ -369,4 +369,40 @@ mod tests {
         let schema = Schema::infer(&[file]);
         assert!(schema.fields.is_empty());
     }
+
+    #[test]
+    fn infer_sample_values_deduplicated() {
+        let files = vec![
+            make_file(serde_json::json!({"status": "draft"})),
+            make_file(serde_json::json!({"status": "draft"})),
+            make_file(serde_json::json!({"status": "published"})),
+        ];
+        let schema = Schema::infer(&files);
+        let field = &schema.fields[0];
+        assert_eq!(field.occurrence_count, 3);
+        assert_eq!(field.sample_values.len(), 2);
+        assert!(field.sample_values.contains(&"draft".to_string()));
+        assert!(field.sample_values.contains(&"published".to_string()));
+    }
+
+    #[test]
+    fn infer_null_values_skipped() {
+        let files = vec![
+            make_file(serde_json::json!({"title": "Hello", "opt": null})),
+        ];
+        let schema = Schema::infer(&files);
+        // "opt" field has null value, which is skipped entirely
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields[0].name, "title");
+    }
+
+    #[test]
+    fn infer_nested_objects_as_string() {
+        let files = vec![
+            make_file(serde_json::json!({"meta": {"nested": "value"}})),
+        ];
+        let schema = Schema::infer(&files);
+        assert_eq!(schema.fields[0].name, "meta");
+        assert_eq!(schema.fields[0].field_type, FieldType::String);
+    }
 }
