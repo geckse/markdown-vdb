@@ -44,6 +44,9 @@ pub enum Error {
 
     #[error("clustering error: {0}")]
     Clustering(String),
+
+    #[error("link graph not built: run `mdvdb links` first")]
+    LinkGraphNotBuilt,
 }
 
 /// Convenience alias used throughout the crate.
@@ -145,6 +148,15 @@ mod tests {
     fn clustering_variant_formats() {
         let err = Error::Clustering("too few points".into());
         assert_eq!(err.to_string(), "clustering error: too few points");
+    }
+
+    #[test]
+    fn link_graph_not_built_variant_formats() {
+        let err = Error::LinkGraphNotBuilt;
+        assert_eq!(
+            err.to_string(),
+            "link graph not built: run `mdvdb links` first"
+        );
     }
 
     #[test]
