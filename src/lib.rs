@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::embedding::provider::{create_provider, EmbeddingProvider};
+use crate::fts::FtsIndex;
 use crate::index::state::Index;
 use crate::index::types::EmbeddingConfig;
 
@@ -115,6 +116,8 @@ pub struct MarkdownVdb {
     provider: Arc<dyn EmbeddingProvider>,
     /// Vector index (Arc for sharing with watcher).
     index: Arc<Index>,
+    /// Full-text search index (Arc for sharing with watcher).
+    fts_index: Arc<FtsIndex>,
 }
 
 impl MarkdownVdb {
@@ -160,6 +163,9 @@ impl MarkdownVdb {
         let index_path = root.join(&config.index_file);
         let index = Arc::new(Index::open_or_create(&index_path, &embedding_config)?);
 
+        let fts_path = root.join(&config.fts_index_dir);
+        let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
+
         // Check config compatibility: dimensions must match.
         let status = index.status();
         if status.embedding_config.dimensions != config.embedding_dimensions {
@@ -181,6 +187,7 @@ impl MarkdownVdb {
             config,
             provider,
             index,
+            fts_index,
         })
     }
 
@@ -212,6 +219,16 @@ impl MarkdownVdb {
     /// Get a shared reference to the embedding provider (for watcher integration).
     pub fn provider_arc(&self) -> Arc<dyn EmbeddingProvider> {
         Arc::clone(&self.provider)
+    }
+
+    /// Get a reference to the full-text search index.
+    pub fn fts_index(&self) -> &FtsIndex {
+        &self.fts_index
+    }
+
+    /// Get a shared reference to the FTS index (for watcher integration).
+    pub fn fts_index_arc(&self) -> Arc<FtsIndex> {
+        Arc::clone(&self.fts_index)
     }
 
     /// Ingest markdown files into the index.
@@ -355,6 +372,20 @@ impl MarkdownVdb {
                 .collect();
 
             self.index.upsert(md, chunks, &embeddings)?;
+
+            // Upsert into FTS index.
+            let fts_chunks: Vec<fts::FtsChunkData> = chunks
+                .iter()
+                .map(|c| fts::FtsChunkData {
+                    chunk_id: c.id.clone(),
+                    source_path: c.source_path.to_string_lossy().to_string(),
+                    content: c.content.clone(),
+                    heading_hierarchy: c.heading_hierarchy.join(" > "),
+                })
+                .collect();
+            let path_str_fts = path.to_string_lossy().to_string();
+            self.fts_index.upsert_chunks(&path_str_fts, &fts_chunks)?;
+
             result.files_indexed += 1;
             result.chunks_created += chunks.len();
             debug!(path = %path.display(), chunks = chunks.len(), "indexed");
@@ -365,13 +396,15 @@ impl MarkdownVdb {
             for path_str in &existing_paths {
                 if !discovered_paths.contains(path_str) {
                     self.index.remove_file(path_str)?;
+                    self.fts_index.remove_file(path_str)?;
                     result.files_removed += 1;
                     debug!(path = %path_str, "removed deleted file from index");
                 }
             }
         }
 
-        // Save the index to disk.
+        // Commit FTS changes and save the vector index to disk.
+        self.fts_index.commit()?;
         self.index.save()?;
 
         // Run clustering if enabled.
@@ -441,7 +474,7 @@ impl MarkdownVdb {
             &query,
             &self.index,
             self.provider.as_ref(),
-            None, // FTS index integration handled in separate subtask
+            Some(&self.fts_index),
             self.config.search_rrf_k,
         )
         .await
