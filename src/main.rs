@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use serde_json::Value;
 
+use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink};
 use mdvdb::search::{MetadataFilter, SearchQuery, SearchResult};
 use mdvdb::MarkdownVdb;
 
@@ -17,6 +18,28 @@ struct SearchOutput {
     results: Vec<SearchResult>,
     query: String,
     total_results: usize,
+}
+
+/// Wrapped links output for JSON mode.
+#[derive(serde::Serialize)]
+struct LinksOutput {
+    file: String,
+    links: LinkQueryResult,
+}
+
+/// Wrapped backlinks output for JSON mode.
+#[derive(serde::Serialize)]
+struct BacklinksOutput {
+    file: String,
+    backlinks: Vec<ResolvedLink>,
+    total_backlinks: usize,
+}
+
+/// Wrapped orphans output for JSON mode.
+#[derive(serde::Serialize)]
+struct OrphansOutput {
+    orphans: Vec<OrphanFile>,
+    total_orphans: usize,
 }
 
 /// mdvdb — Markdown Vector Database
@@ -69,6 +92,15 @@ enum Commands {
     /// Initialize a new .markdownvdb config file
     Init(InitArgs),
 
+    /// Show links originating from a file
+    Links(LinksArgs),
+
+    /// Show backlinks pointing to a file
+    Backlinks(BacklinksArgs),
+
+    /// Find orphan files with no links
+    Orphans(OrphansArgs),
+
     /// Generate shell completions
     #[command(hide = true)]
     Completions(CompletionsArgs),
@@ -90,6 +122,10 @@ struct SearchArgs {
     /// Metadata filter expression (KEY=VALUE)
     #[arg(short, long)]
     filter: Vec<String>,
+
+    /// Boost results that are linked to/from the query matches
+    #[arg(long)]
+    boost_links: bool,
 
     /// Output results as JSON
     #[arg(long)]
@@ -144,6 +180,33 @@ struct GetArgs {
 
 #[derive(Parser)]
 struct WatchArgs {
+    /// Output results as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct LinksArgs {
+    /// Path to the markdown file
+    file_path: PathBuf,
+
+    /// Output results as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct BacklinksArgs {
+    /// Path to the markdown file
+    file_path: PathBuf,
+
+    /// Output results as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct OrphansArgs {
     /// Output results as JSON
     #[arg(long)]
     json: bool,
@@ -223,6 +286,9 @@ async fn run() -> anyhow::Result<()> {
             }
             for f in &args.filter {
                 query = query.with_filter(parse_filter(f)?);
+            }
+            if args.boost_links {
+                query = query.with_boost_links(true);
             }
 
             let results = vdb.search(query).await?;
@@ -314,6 +380,54 @@ async fn run() -> anyhow::Result<()> {
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_document(&doc);
+            }
+        }
+        Some(Commands::Links(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let path_str = args.file_path.to_string_lossy().to_string();
+            let result = vdb.links(&path_str)?;
+
+            if args.json {
+                let output = LinksOutput {
+                    file: path_str,
+                    links: result,
+                };
+                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_links(&result);
+            }
+        }
+        Some(Commands::Backlinks(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let path_str = args.file_path.to_string_lossy().to_string();
+            let result = vdb.backlinks(&path_str)?;
+
+            if args.json {
+                let output = BacklinksOutput {
+                    total_backlinks: result.len(),
+                    file: path_str,
+                    backlinks: result,
+                };
+                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_backlinks(&path_str, &result);
+            }
+        }
+        Some(Commands::Orphans(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let result = vdb.orphans()?;
+
+            if args.json {
+                let output = OrphansOutput {
+                    total_orphans: result.len(),
+                    orphans: result,
+                };
+                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_orphans(&result);
             }
         }
         Some(Commands::Watch(args)) => {
