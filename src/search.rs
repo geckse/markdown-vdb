@@ -1,10 +1,55 @@
+use std::str::FromStr;
+
 use serde::Serialize;
 use serde_json::Value;
 use tracing::{debug, info};
 
 use crate::embedding::provider::EmbeddingProvider;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::index::state::Index;
+
+/// Search mode controlling which retrieval signals are used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    /// Both semantic (HNSW) and lexical (BM25) search, fused via RRF.
+    Hybrid,
+    /// Semantic search only (embedding + HNSW).
+    Semantic,
+    /// Lexical search only (BM25 via Tantivy). No embedding API call needed.
+    Lexical,
+}
+
+impl Default for SearchMode {
+    fn default() -> Self {
+        Self::Hybrid
+    }
+}
+
+impl FromStr for SearchMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "hybrid" => Ok(Self::Hybrid),
+            "semantic" => Ok(Self::Semantic),
+            "lexical" => Ok(Self::Lexical),
+            other => Err(Error::Config(format!(
+                "unknown search mode '{other}': expected hybrid, semantic, or lexical"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SearchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hybrid => write!(f, "hybrid"),
+            Self::Semantic => write!(f, "semantic"),
+            Self::Lexical => write!(f, "lexical"),
+        }
+    }
+}
 
 /// Builder-pattern query for semantic search.
 #[derive(Debug, Clone)]
@@ -17,6 +62,8 @@ pub struct SearchQuery {
     pub min_score: f64,
     /// Metadata filters applied with AND logic.
     pub filters: Vec<MetadataFilter>,
+    /// Search mode: hybrid, semantic, or lexical.
+    pub mode: SearchMode,
 }
 
 impl SearchQuery {
@@ -27,6 +74,7 @@ impl SearchQuery {
             limit: 10,
             min_score: 0.0,
             filters: Vec::new(),
+            mode: SearchMode::default(),
         }
     }
 
@@ -45,6 +93,12 @@ impl SearchQuery {
     /// Add a metadata filter (multiple filters use AND logic).
     pub fn with_filter(mut self, filter: MetadataFilter) -> Self {
         self.filters.push(filter);
+        self
+    }
+
+    /// Set the search mode (hybrid, semantic, or lexical).
+    pub fn with_mode(mut self, mode: SearchMode) -> Self {
+        self.mode = mode;
         self
     }
 }
@@ -295,6 +349,43 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // --- SearchMode tests ---
+
+    #[test]
+    fn test_search_mode_default_is_hybrid() {
+        assert_eq!(SearchMode::default(), SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn test_search_mode_from_str() {
+        assert_eq!("hybrid".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+        assert_eq!("semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
+        assert_eq!("lexical".parse::<SearchMode>().unwrap(), SearchMode::Lexical);
+        // Case-insensitive
+        assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+        assert_eq!("Semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
+    }
+
+    #[test]
+    fn test_search_mode_from_str_invalid() {
+        let err = "invalid".parse::<SearchMode>().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown search mode"));
+    }
+
+    #[test]
+    fn test_search_mode_display() {
+        assert_eq!(SearchMode::Hybrid.to_string(), "hybrid");
+        assert_eq!(SearchMode::Semantic.to_string(), "semantic");
+        assert_eq!(SearchMode::Lexical.to_string(), "lexical");
+    }
+
+    #[test]
+    fn test_search_mode_serialize() {
+        assert_eq!(serde_json::to_string(&SearchMode::Hybrid).unwrap(), "\"hybrid\"");
+        assert_eq!(serde_json::to_string(&SearchMode::Lexical).unwrap(), "\"lexical\"");
+    }
+
     // --- SearchQuery builder tests ---
 
     #[test]
@@ -304,6 +395,7 @@ mod tests {
         assert_eq!(q.limit, 10);
         assert_eq!(q.min_score, 0.0);
         assert!(q.filters.is_empty());
+        assert_eq!(q.mode, SearchMode::Hybrid);
     }
 
     #[test]
@@ -317,6 +409,15 @@ mod tests {
         assert_eq!(q.limit, 5);
         assert_eq!(q.min_score, 0.7);
         assert_eq!(q.filters.len(), 1);
+    }
+
+    #[test]
+    fn test_search_query_with_mode() {
+        let q = SearchQuery::new("test").with_mode(SearchMode::Lexical);
+        assert_eq!(q.mode, SearchMode::Lexical);
+
+        let q2 = SearchQuery::new("test").with_mode(SearchMode::Semantic);
+        assert_eq!(q2.mode, SearchMode::Semantic);
     }
 
     // --- Filter evaluation tests ---
