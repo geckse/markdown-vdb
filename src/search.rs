@@ -6,6 +6,7 @@ use tracing::{debug, info};
 
 use crate::embedding::provider::EmbeddingProvider;
 use crate::error::{Error, Result};
+use crate::fts::FtsIndex;
 use crate::index::state::Index;
 
 /// Search mode controlling which retrieval signals are used.
@@ -160,13 +161,20 @@ pub struct SearchResultFile {
     pub file_size: u64,
 }
 
-/// Execute a semantic search query against the index.
+/// Execute a search query against the index, supporting hybrid, semantic, and lexical modes.
 ///
-/// Pipeline: validate → embed → HNSW search (3x over-fetch) → filter → assemble → sort → truncate.
+/// Pipeline varies by mode:
+/// - **Semantic**: embed → HNSW search → filter → assemble → truncate
+/// - **Lexical**: BM25 search → filter → assemble → truncate (no embedding API call)
+/// - **Hybrid**: semantic + lexical in parallel → RRF fusion → filter → assemble → truncate
+///
+/// When `fts_index` is `None` and mode is Hybrid or Lexical, falls back to semantic-only.
 pub async fn search(
     query: &SearchQuery,
     index: &Index,
     provider: &dyn EmbeddingProvider,
+    fts_index: Option<&FtsIndex>,
+    rrf_k: f64,
 ) -> Result<Vec<SearchResult>> {
     // Validate: empty query is a no-op.
     if query.query.trim().is_empty() {
@@ -174,23 +182,104 @@ pub async fn search(
         return Ok(Vec::new());
     }
 
-    // Embed the query text.
-    let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
-    let query_vector = &embeddings[0];
+    // Determine effective mode: fall back to semantic if no FTS index available.
+    let effective_mode = match query.mode {
+        SearchMode::Hybrid | SearchMode::Lexical if fts_index.is_none() => {
+            debug!(
+                requested = %query.mode,
+                "FTS index not available, falling back to semantic mode"
+            );
+            SearchMode::Semantic
+        }
+        mode => mode,
+    };
 
     // Over-fetch 3x to account for filtering.
     let over_fetch = query.limit * 3;
-    let candidates = index.search_vectors(query_vector, over_fetch)?;
+
+    // Get ranked candidates based on mode.
+    let ranked_candidates: Vec<(String, f64)> = match effective_mode {
+        SearchMode::Semantic => {
+            semantic_search(query, index, provider, over_fetch).await?
+        }
+        SearchMode::Lexical => {
+            let fts = fts_index.unwrap(); // safe: checked above
+            lexical_search(query, fts, over_fetch)?
+        }
+        SearchMode::Hybrid => {
+            let fts = fts_index.unwrap(); // safe: checked above
+            let (semantic_results, lexical_results) = tokio::join!(
+                semantic_search(query, index, provider, over_fetch),
+                async { lexical_search(query, fts, over_fetch) }
+            );
+            let semantic = semantic_results?;
+            let lexical = lexical_results?;
+
+            debug!(
+                semantic_count = semantic.len(),
+                lexical_count = lexical.len(),
+                rrf_k = rrf_k,
+                "fusing semantic and lexical results via RRF"
+            );
+
+            reciprocal_rank_fusion(&semantic, &lexical, rrf_k)
+        }
+    };
 
     debug!(
-        candidates = candidates.len(),
+        candidates = ranked_candidates.len(),
         limit = query.limit,
-        "HNSW search returned candidates"
+        mode = %effective_mode,
+        "search returned candidates"
     );
 
     // Filter, assemble results, and apply min_score.
+    let results = assemble_results(query, index, &ranked_candidates)?;
+
+    info!(
+        query = %query.query,
+        results = results.len(),
+        mode = %effective_mode,
+        "search complete"
+    );
+
+    Ok(results)
+}
+
+/// Run semantic (HNSW) search and return ranked (chunk_id, score) pairs.
+async fn semantic_search(
+    query: &SearchQuery,
+    index: &Index,
+    provider: &dyn EmbeddingProvider,
+    limit: usize,
+) -> Result<Vec<(String, f64)>> {
+    let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
+    let query_vector = &embeddings[0];
+    let candidates = index.search_vectors(query_vector, limit)?;
+    Ok(candidates)
+}
+
+/// Run lexical (BM25) search and return ranked (chunk_id, score) pairs.
+fn lexical_search(
+    query: &SearchQuery,
+    fts_index: &FtsIndex,
+    limit: usize,
+) -> Result<Vec<(String, f64)>> {
+    let fts_results = fts_index.search(&query.query, limit)?;
+    Ok(fts_results
+        .into_iter()
+        .map(|r| (r.chunk_id, r.score as f64))
+        .collect())
+}
+
+/// Assemble SearchResult objects from ranked candidates, applying filters and min_score.
+fn assemble_results(
+    query: &SearchQuery,
+    index: &Index,
+    candidates: &[(String, f64)],
+) -> Result<Vec<SearchResult>> {
     let mut results = Vec::new();
-    for (chunk_id, score) in &candidates {
+    for (chunk_id, score) in candidates {
         // Apply min_score threshold.
         if *score < query.min_score {
             continue;
@@ -238,14 +327,6 @@ pub async fn search(
             break;
         }
     }
-
-    // Results are already sorted by score descending from search_vectors.
-    info!(
-        query = %query.query,
-        results = results.len(),
-        "search complete"
-    );
-
     Ok(results)
 }
 

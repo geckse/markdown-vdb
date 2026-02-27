@@ -437,7 +437,14 @@ impl MarkdownVdb {
         &self,
         query: search::SearchQuery,
     ) -> Result<Vec<search::SearchResult>> {
-        search::search(&query, &self.index, self.provider.as_ref()).await
+        search::search(
+            &query,
+            &self.index,
+            self.provider.as_ref(),
+            None, // FTS index integration handled in separate subtask
+            self.config.search_rrf_k,
+        )
+        .await
     }
 
     /// Return a status snapshot of the index.
