@@ -563,6 +563,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             self.config.clone(),
             &self.root,
             Arc::clone(&self.index),
+            Arc::clone(&self.fts_index),
             Arc::clone(&self.provider),
         );
         w.watch(cancel).await
