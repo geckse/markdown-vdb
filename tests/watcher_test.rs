@@ -35,6 +35,9 @@ fn test_config(source_dir: &str) -> Config {
         clustering_rebalance_threshold: 50,
         search_default_limit: 10,
         search_min_score: 0.0,
+        fts_index_dir: PathBuf::from(".markdownvdb.fts"),
+        search_default_mode: mdvdb::SearchMode::Hybrid,
+        search_rrf_k: 60.0,
     }
 }
 

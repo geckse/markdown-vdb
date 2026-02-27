@@ -18,7 +18,7 @@ pub use error::Error;
 pub use config::Config;
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{MetadataFilter, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
+pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 
