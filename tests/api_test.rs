@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::error::Error;
 use mdvdb::search::SearchQuery;
-use mdvdb::{IngestOptions, MarkdownVdb};
+use mdvdb::{IngestOptions, MarkdownVdb, SearchMode};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -230,4 +230,64 @@ async fn test_get_document_returns_frontmatter() {
     let fm = doc.frontmatter.unwrap();
     assert_eq!(fm["title"], "Hello World");
     assert_eq!(fm["status"], "published");
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid / FTS search API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_search_hybrid_mode_via_api() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("rust programming").with_mode(SearchMode::Hybrid);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "hybrid search should return results");
+    assert!(results[0].score > 0.0, "results should have positive scores");
+}
+
+#[tokio::test]
+async fn test_search_semantic_mode_via_api() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("rust").with_mode(SearchMode::Semantic);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "semantic search should return results");
+}
+
+#[tokio::test]
+async fn test_search_lexical_mode_via_api() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("systems programming language").with_mode(SearchMode::Lexical);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "lexical search should return results for matching terms");
+}
+
+#[tokio::test]
+async fn test_fts_index_populated_after_ingest() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let fts = vdb.fts_index();
+    let num = fts.num_docs().unwrap();
+    assert!(num > 0, "FTS index should have documents after ingest, got {num}");
+}
+
+#[tokio::test]
+async fn test_search_default_mode_is_hybrid() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Default SearchQuery should use hybrid (from config)
+    let query = SearchQuery::new("rust");
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "default mode search should return results");
 }
