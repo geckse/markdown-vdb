@@ -169,6 +169,78 @@ async fn test_schema_returns_fields_after_ingest() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Link graph API tests
+// ---------------------------------------------------------------------------
+
+/// Setup project with files that link to each other.
+fn setup_project_with_links() -> (TempDir, MarkdownVdb) {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join(".markdownvdb"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("alpha.md"),
+        "---\ntitle: Alpha\n---\n\n# Alpha\n\nLinks to [Beta](beta.md) and [Gamma](gamma.md).\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("beta.md"),
+        "---\ntitle: Beta\n---\n\n# Beta\n\nLinks back to [Alpha](alpha.md).\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("gamma.md"),
+        "---\ntitle: Gamma\n---\n\n# Gamma\n\nNo outgoing links here.\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("orphan.md"),
+        "---\ntitle: Orphan\n---\n\n# Orphan\n\nThis file has no links at all.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    (dir, vdb)
+}
+
+#[tokio::test]
+async fn test_links_api() {
+    let (_dir, vdb) = setup_project_with_links();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let result = vdb.links("alpha.md").unwrap();
+    assert_eq!(result.file, "alpha.md");
+    assert!(result.outgoing.len() >= 2, "alpha.md should have at least 2 outgoing links");
+
+    // Check that beta.md and gamma.md are among targets
+    let targets: Vec<&str> = result.outgoing.iter().map(|l| l.entry.target.as_str()).collect();
+    assert!(targets.contains(&"beta.md"), "should link to beta.md, got: {targets:?}");
+    assert!(targets.contains(&"gamma.md"), "should link to gamma.md, got: {targets:?}");
+}
+
+#[tokio::test]
+async fn test_orphans_api() {
+    let (_dir, vdb) = setup_project_with_links();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let orphans = vdb.orphans().unwrap();
+    let paths: Vec<&str> = orphans.iter().map(|o| o.path.as_str()).collect();
+    assert!(paths.contains(&"orphan.md"), "orphan.md should be in orphans list, got: {paths:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Clustering tests
+// ---------------------------------------------------------------------------
+
 /// Setup project with clustering enabled.
 fn setup_project_with_clustering() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
