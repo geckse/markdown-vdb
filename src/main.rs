@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use serde_json::Value;
 
-use mdvdb::search::{MetadataFilter, SearchQuery, SearchResult};
+use mdvdb::search::{MetadataFilter, SearchMode, SearchQuery, SearchResult};
 use mdvdb::MarkdownVdb;
 
 /// Wrapped search output for JSON mode.
@@ -17,6 +17,7 @@ struct SearchOutput {
     results: Vec<SearchResult>,
     query: String,
     total_results: usize,
+    mode: SearchMode,
 }
 
 /// mdvdb — Markdown Vector Database
@@ -90,6 +91,18 @@ struct SearchArgs {
     /// Metadata filter expression (KEY=VALUE)
     #[arg(short, long)]
     filter: Vec<String>,
+
+    /// Search mode: hybrid, semantic, or lexical
+    #[arg(long, value_name = "MODE")]
+    mode: Option<SearchMode>,
+
+    /// Shorthand for --mode=semantic
+    #[arg(long, conflicts_with = "lexical")]
+    semantic: bool,
+
+    /// Shorthand for --mode=lexical
+    #[arg(long, conflicts_with = "semantic")]
+    lexical: bool,
 
     /// Output results as JSON
     #[arg(long)]
@@ -212,6 +225,17 @@ async fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Some(Commands::Search(args)) => {
+            // Determine search mode: explicit --mode takes priority, then shorthand flags, then config default.
+            let mode = if let Some(m) = args.mode {
+                m
+            } else if args.semantic {
+                SearchMode::Semantic
+            } else if args.lexical {
+                SearchMode::Lexical
+            } else {
+                config.search_default_mode
+            };
+
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
 
             let mut query = SearchQuery::new(&args.query);
@@ -224,7 +248,9 @@ async fn run() -> anyhow::Result<()> {
             for f in &args.filter {
                 query = query.with_filter(parse_filter(f)?);
             }
+            query = query.with_mode(mode);
 
+            let effective_mode = query.mode;
             let results = vdb.search(query).await?;
 
             if args.json {
@@ -232,6 +258,7 @@ async fn run() -> anyhow::Result<()> {
                     total_results: results.len(),
                     query: args.query.clone(),
                     results,
+                    mode: effective_mode,
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
