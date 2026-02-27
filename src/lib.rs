@@ -8,6 +8,7 @@ pub mod index;
 pub mod logging;
 pub mod parser;
 pub mod ingest;
+pub mod links;
 pub mod schema;
 pub mod search;
 pub mod watcher;
