@@ -249,6 +249,35 @@ pub async fn search(
     Ok(results)
 }
 
+/// Reciprocal Rank Fusion: merges two ranked lists into a single scored list.
+///
+/// Each item's fused score is `Σ 1/(k + rank)` where rank is 1-indexed.
+/// Items appearing in both lists accumulate scores from each.
+/// Returns a list of `(chunk_id, fused_score)` sorted by score descending.
+pub fn reciprocal_rank_fusion(
+    list_a: &[(String, f64)],
+    list_b: &[(String, f64)],
+    k: f64,
+) -> Vec<(String, f64)> {
+    use std::collections::HashMap;
+
+    let mut scores: HashMap<String, f64> = HashMap::new();
+
+    for (rank, (id, _score)) in list_a.iter().enumerate() {
+        let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
+        *scores.entry(id.clone()).or_default() += rrf_score;
+    }
+
+    for (rank, (id, _score)) in list_b.iter().enumerate() {
+        let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
+        *scores.entry(id.clone()).or_default() += rrf_score;
+    }
+
+    let mut results: Vec<(String, f64)> = scores.into_iter().collect();
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results
+}
+
 /// Evaluate all metadata filters against parsed frontmatter. Returns `true` if all pass.
 ///
 /// - Empty filters → always `true`
@@ -596,5 +625,86 @@ mod tests {
             },
         ];
         assert!(!evaluate_filters(&filters_fail, Some(&fm)));
+    }
+
+    // --- RRF tests ---
+
+    #[test]
+    fn test_rrf_overlapping_lists() {
+        let list_a = vec![
+            ("a".to_string(), 0.9),
+            ("b".to_string(), 0.8),
+            ("c".to_string(), 0.7),
+        ];
+        let list_b = vec![
+            ("b".to_string(), 5.0),
+            ("c".to_string(), 4.0),
+            ("d".to_string(), 3.0),
+        ];
+        let results = reciprocal_rank_fusion(&list_a, &list_b, 60.0);
+
+        // "b" appears in both lists (rank 2 in A, rank 1 in B)
+        let b_score: f64 = results.iter().find(|(id, _)| id == "b").unwrap().1;
+        let expected_b = 1.0 / (60.0 + 2.0) + 1.0 / (60.0 + 1.0);
+        assert!((b_score - expected_b).abs() < 1e-10);
+
+        // "a" only in list_a rank 1
+        let a_score = results.iter().find(|(id, _)| id == "a").unwrap().1;
+        let expected_a = 1.0 / (60.0 + 1.0);
+        assert!((a_score - expected_a).abs() < 1e-10);
+
+        // Results sorted descending by score
+        for w in results.windows(2) {
+            assert!(w[0].1 >= w[1].1);
+        }
+    }
+
+    #[test]
+    fn test_rrf_disjoint_lists() {
+        let list_a = vec![("a".to_string(), 1.0), ("b".to_string(), 0.5)];
+        let list_b = vec![("c".to_string(), 1.0), ("d".to_string(), 0.5)];
+        let results = reciprocal_rank_fusion(&list_a, &list_b, 60.0);
+
+        assert_eq!(results.len(), 4);
+        // All items have single-list scores: 1/(60+rank)
+        let a_score = results.iter().find(|(id, _)| id == "a").unwrap().1;
+        assert!((a_score - 1.0 / 61.0).abs() < 1e-10);
+        let c_score = results.iter().find(|(id, _)| id == "c").unwrap().1;
+        assert!((c_score - 1.0 / 61.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rrf_single_list_with_empty() {
+        let list_a = vec![("x".to_string(), 1.0), ("y".to_string(), 0.5)];
+        let empty: Vec<(String, f64)> = vec![];
+        let results = reciprocal_rank_fusion(&list_a, &empty, 60.0);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "x");
+        assert!((results[0].1 - 1.0 / 61.0).abs() < 1e-10);
+        assert_eq!(results[1].0, "y");
+        assert!((results[1].1 - 1.0 / 62.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rrf_k_parameter_effect() {
+        let list_a = vec![("a".to_string(), 1.0), ("b".to_string(), 0.5)];
+        let list_b = vec![("a".to_string(), 1.0), ("b".to_string(), 0.5)];
+
+        // Smaller k → larger scores and bigger spread between ranks
+        let results_k1 = reciprocal_rank_fusion(&list_a, &list_b, 1.0);
+        let results_k60 = reciprocal_rank_fusion(&list_a, &list_b, 60.0);
+
+        let a_k1 = results_k1.iter().find(|(id, _)| id == "a").unwrap().1;
+        let a_k60 = results_k60.iter().find(|(id, _)| id == "a").unwrap().1;
+        // k=1: score = 2 * 1/(1+1) = 1.0; k=60: score = 2 * 1/(60+1) ≈ 0.0328
+        assert!(a_k1 > a_k60);
+    }
+
+    #[test]
+    fn test_rrf_empty_inputs() {
+        let empty: Vec<(String, f64)> = vec![];
+        let results = reciprocal_rank_fusion(&empty, &empty, 60.0);
+        assert!(results.is_empty());
     }
 }
