@@ -345,6 +345,7 @@ mod tests {
             body: body.to_string(),
             content_hash: "abc".to_string(),
             file_size: body.len() as u64,
+            links: Vec::new(),
         }
     }
 

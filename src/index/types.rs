@@ -167,6 +167,7 @@ mod tests {
             body: "Some body text".to_string(),
             content_hash: "abc123".to_string(),
             file_size: 1024,
+            links: Vec::new(),
         };
 
         let stored = StoredFile::from(&file);
@@ -189,6 +190,7 @@ mod tests {
             body: String::new(),
             content_hash: "def456".to_string(),
             file_size: 0,
+            links: Vec::new(),
         };
 
         let stored = StoredFile::from(&file);

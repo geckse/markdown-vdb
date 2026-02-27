@@ -33,6 +33,7 @@ fn fake_markdown_file(path: &str, hash: &str) -> MarkdownFile {
         body: "Test body content".to_string(),
         content_hash: hash.to_string(),
         file_size: 100,
+        links: Vec::new(),
     }
 }
 

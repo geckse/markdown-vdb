@@ -20,6 +20,21 @@ pub struct MarkdownFile {
     pub content_hash: String,
     /// File size in bytes.
     pub file_size: u64,
+    /// Links extracted from the document body.
+    pub links: Vec<RawLink>,
+}
+
+/// A raw link extracted from a markdown document.
+#[derive(Debug, Clone, Serialize)]
+pub struct RawLink {
+    /// The target path of the link (relative to the markdown file or project root).
+    pub target: String,
+    /// The display text of the link.
+    pub text: String,
+    /// 1-based line number where the link appears.
+    pub line_number: usize,
+    /// Whether this is a wikilink (`[[...]]`) or standard markdown link.
+    pub is_wikilink: bool,
 }
 
 /// Parse a markdown file from disk into a [`MarkdownFile`].
@@ -43,6 +58,7 @@ pub fn parse_markdown_file(
     let content_hash = compute_content_hash(&content);
     let (frontmatter, body) = extract_frontmatter(&content);
     let headings = extract_headings(body);
+    let links = extract_links(body);
 
     Ok(MarkdownFile {
         path: relative_path.to_path_buf(),
@@ -51,6 +67,7 @@ pub fn parse_markdown_file(
         body: body.to_string(),
         content_hash,
         file_size,
+        links,
     })
 }
 
@@ -228,6 +245,83 @@ pub fn extract_headings(content: &str) -> Vec<Heading> {
     headings
 }
 
+/// Extract internal links from markdown content.
+///
+/// Finds standard markdown links `[text](target)` using pulldown_cmark and
+/// wikilinks `[[target]]` or `[[target|text]]` using regex. Filters out
+/// external URLs (http://, https://, mailto:) and anchor-only links (#heading).
+pub fn extract_links(content: &str) -> Vec<RawLink> {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    let mut links = Vec::new();
+
+    // Pre-scan for wikilinks using regex (pulldown_cmark doesn't parse these)
+    let wikilink_re = regex::Regex::new(r"\[\[([^\]]+)\]\]").expect("valid regex");
+    for mat in wikilink_re.find_iter(content) {
+        let line_number = content[..mat.start()].matches('\n').count() + 1;
+        let inner = &content[mat.start() + 2..mat.end() - 2];
+        let (target, text) = if let Some(pipe_pos) = inner.find('|') {
+            (&inner[..pipe_pos], &inner[pipe_pos + 1..])
+        } else {
+            (inner, inner)
+        };
+        let target = target.trim();
+        let text = text.trim();
+        if !target.is_empty() && !is_external_or_anchor(target) {
+            links.push(RawLink {
+                target: target.to_string(),
+                text: text.to_string(),
+                line_number,
+                is_wikilink: true,
+            });
+        }
+    }
+
+    // Standard markdown links via pulldown_cmark
+    let parser = Parser::new_ext(content, Options::all());
+    let mut current_link: Option<(String, usize)> = None; // (target, byte_offset)
+    let mut link_text = String::new();
+
+    for (event, range) in parser.into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                let url = dest_url.to_string();
+                if !is_external_or_anchor(&url) {
+                    current_link = Some((url, range.start));
+                    link_text.clear();
+                }
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some((target, byte_offset)) = current_link.take() {
+                    let line_number = content[..byte_offset].matches('\n').count() + 1;
+                    links.push(RawLink {
+                        target,
+                        text: link_text.trim().to_string(),
+                        line_number,
+                        is_wikilink: false,
+                    });
+                    link_text.clear();
+                }
+            }
+            Event::Text(text) | Event::Code(text) if current_link.is_some() => {
+                link_text.push_str(&text);
+            }
+            _ => {}
+        }
+    }
+
+    links
+}
+
+/// Check if a URL is external (http/https/mailto) or anchor-only (#heading).
+fn is_external_or_anchor(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || (url.starts_with('#') && !url.contains('/'))
+}
+
 /// Compute a SHA-256 hex digest of the given content.
 pub fn compute_content_hash(content: &str) -> String {
     let mut hasher = Sha256::new();
@@ -353,6 +447,78 @@ mod tests {
         assert_eq!(headings.len(), 2);
         assert_eq!(headings[0].text, "First Heading");
         assert_eq!(headings[1].text, "Second");
+    }
+
+    // --- content_hash tests ---
+
+    // --- extract_links tests ---
+
+    #[test]
+    fn extract_links_standard_markdown() {
+        let content = "Check [this doc](other.md) for details.";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "other.md");
+        assert_eq!(links[0].text, "this doc");
+        assert_eq!(links[0].line_number, 1);
+        assert!(!links[0].is_wikilink);
+    }
+
+    #[test]
+    fn extract_links_wikilink() {
+        let content = "See [[other-note]] for more.";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "other-note");
+        assert_eq!(links[0].text, "other-note");
+        assert!(links[0].is_wikilink);
+    }
+
+    #[test]
+    fn extract_links_wikilink_with_alias() {
+        let content = "See [[path/to/note|display text]] here.";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "path/to/note");
+        assert_eq!(links[0].text, "display text");
+        assert!(links[0].is_wikilink);
+    }
+
+    #[test]
+    fn extract_links_filters_external() {
+        let content = "[Google](https://google.com) and [local](notes.md) and [mail](mailto:x@y.com)";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "notes.md");
+    }
+
+    #[test]
+    fn extract_links_filters_anchors() {
+        let content = "[section](#heading) and [file](other.md#section)";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "other.md#section");
+    }
+
+    #[test]
+    fn extract_links_line_numbers() {
+        let content = "Line 1\n[link1](a.md)\nLine 3\n[[b]]";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].line_number, 4); // wikilinks come first (pre-scan)
+        assert_eq!(links[1].line_number, 2);
+    }
+
+    #[test]
+    fn extract_links_empty_content() {
+        let links = extract_links("");
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn extract_links_no_links() {
+        let links = extract_links("Just plain text without any links.");
+        assert!(links.is_empty());
     }
 
     // --- content_hash tests ---
