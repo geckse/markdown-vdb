@@ -4,6 +4,7 @@ pub mod config;
 pub mod discovery;
 pub mod embedding;
 pub mod error;
+pub mod fts;
 pub mod index;
 pub mod logging;
 pub mod parser;
@@ -11,6 +12,7 @@ pub mod ingest;
 pub mod links;
 pub mod schema;
 pub mod search;
+pub mod tree;
 pub mod watcher;
 
 pub use error::Error;
@@ -19,10 +21,11 @@ pub use error::Error;
 pub use config::Config;
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{MetadataFilter, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
+pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
+pub use tree::{FileState, FileTree, FileTreeNode};
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -36,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::embedding::provider::{create_provider, EmbeddingProvider};
+use crate::fts::FtsIndex;
 use crate::index::state::Index;
 use crate::index::types::EmbeddingConfig;
 
@@ -116,6 +120,8 @@ pub struct MarkdownVdb {
     provider: Arc<dyn EmbeddingProvider>,
     /// Vector index (Arc for sharing with watcher).
     index: Arc<Index>,
+    /// Full-text search index (Arc for sharing with watcher).
+    fts_index: Arc<FtsIndex>,
 }
 
 impl MarkdownVdb {
@@ -158,8 +164,38 @@ impl MarkdownVdb {
             dimensions: config.embedding_dimensions,
         };
 
-        let index_path = root.join(&config.index_file);
+        // Ensure the unified .markdownvdb directory exists.
+        // If it's a legacy flat config file, migrate it first.
+        let index_dir = root.join(".markdownvdb");
+        if index_dir.is_file() {
+            // Legacy: .markdownvdb was a flat config file. Move it aside,
+            // create the directory, then move the config inside as .config.
+            let tmp_config = root.join(".markdownvdb.migrating");
+            std::fs::rename(&index_dir, &tmp_config)?;
+            std::fs::create_dir_all(&index_dir)?;
+            std::fs::rename(&tmp_config, index_dir.join(".config"))?;
+            info!("migrated legacy .markdownvdb config file → .markdownvdb/.config");
+        } else if !index_dir.exists() {
+            std::fs::create_dir_all(&index_dir)?;
+        }
+
+        // Auto-migrate from old split layout (.markdownvdb.index file + .markdownvdb.fts/ dir).
+        let legacy_index_file = root.join(".markdownvdb.index");
+        let legacy_fts_dir = root.join(".markdownvdb.fts");
+        if legacy_index_file.is_file() && !index_dir.join("index").exists() {
+            info!("migrating legacy .markdownvdb.index → .markdownvdb/index");
+            std::fs::rename(&legacy_index_file, index_dir.join("index"))?;
+        }
+        if legacy_fts_dir.is_dir() && !index_dir.join("fts").exists() {
+            info!("migrating legacy .markdownvdb.fts/ → .markdownvdb/fts/");
+            std::fs::rename(&legacy_fts_dir, index_dir.join("fts"))?;
+        }
+
+        let index_path = index_dir.join("index");
         let index = Arc::new(Index::open_or_create(&index_path, &embedding_config)?);
+
+        let fts_path = index_dir.join("fts");
+        let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
 
         // Check config compatibility: dimensions must match.
         let status = index.status();
@@ -182,6 +218,7 @@ impl MarkdownVdb {
             config,
             provider,
             index,
+            fts_index,
         })
     }
 
@@ -215,6 +252,16 @@ impl MarkdownVdb {
         Arc::clone(&self.provider)
     }
 
+    /// Get a reference to the full-text search index.
+    pub fn fts_index(&self) -> &FtsIndex {
+        &self.fts_index
+    }
+
+    /// Get a shared reference to the FTS index (for watcher integration).
+    pub fn fts_index_arc(&self) -> Arc<FtsIndex> {
+        Arc::clone(&self.fts_index)
+    }
+
     /// Ingest markdown files into the index.
     ///
     /// Pipeline: discover → parse → hash-compare → chunk → embed → upsert → remove deleted → save.
@@ -237,6 +284,25 @@ impl MarkdownVdb {
         };
 
         info!(files = discovered.len(), "discovered markdown files");
+
+        // Full ingest: clear FTS index for a clean rebuild.
+        if options.full {
+            debug!("full ingest: clearing FTS index for rebuild");
+            self.fts_index.delete_all()?;
+            self.fts_index.commit()?;
+        }
+
+        // Consistency guard: if FTS has 0 docs but vector index has docs,
+        // force re-indexing of all files into FTS.
+        let fts_doc_count = self.fts_index.num_docs().unwrap_or(0);
+        let vector_doc_count = self.index.status().document_count;
+        let fts_needs_rebuild = !options.full && fts_doc_count == 0 && vector_doc_count > 0;
+        if fts_needs_rebuild {
+            info!(
+                vector_docs = vector_doc_count,
+                "FTS index empty but vector index has documents — will rebuild FTS"
+            );
+        }
 
         // Get existing hashes from index for skip detection.
         let existing_hashes = self.index.get_file_hashes();
@@ -356,9 +422,54 @@ impl MarkdownVdb {
                 .collect();
 
             self.index.upsert(md, chunks, &embeddings)?;
+
+            // Upsert into FTS index (strip markdown before indexing for clean BM25).
+            let fts_chunks: Vec<fts::FtsChunkData> = chunks
+                .iter()
+                .map(|c| fts::FtsChunkData {
+                    chunk_id: c.id.clone(),
+                    source_path: c.source_path.to_string_lossy().to_string(),
+                    content: fts::strip_markdown(&c.content),
+                    heading_hierarchy: c.heading_hierarchy.join(" > "),
+                })
+                .collect();
+            let path_str_fts = path.to_string_lossy().to_string();
+            self.fts_index.upsert_chunks(&path_str_fts, &fts_chunks)?;
+
             result.files_indexed += 1;
             result.chunks_created += chunks.len();
             debug!(path = %path.display(), chunks = chunks.len(), "indexed");
+        }
+
+        // Consistency guard: rebuild FTS from stored chunks for files that
+        // were skipped (already in vector index but missing from FTS).
+        if fts_needs_rebuild {
+            info!("rebuilding FTS index from stored chunks");
+            let file_hashes = self.index.get_file_hashes();
+            for path_str in file_hashes.keys() {
+                // Skip files we already upserted above.
+                if parsed_files.keys().any(|p| p.to_string_lossy() == *path_str) {
+                    continue;
+                }
+                if let Some(file_entry) = self.index.get_file(path_str) {
+                    let fts_chunks: Vec<fts::FtsChunkData> = file_entry
+                        .chunk_ids
+                        .iter()
+                        .filter_map(|cid| {
+                            self.index.get_chunk(cid).map(|sc| fts::FtsChunkData {
+                                chunk_id: cid.clone(),
+                                source_path: sc.source_path.clone(),
+                                content: fts::strip_markdown(&sc.content),
+                                heading_hierarchy: sc.heading_hierarchy.join(" > "),
+                            })
+                        })
+                        .collect();
+                    if !fts_chunks.is_empty() {
+                        self.fts_index.upsert_chunks(path_str, &fts_chunks)?;
+                    }
+                }
+            }
+            debug!("FTS rebuild complete");
         }
 
         // Remove files that no longer exist on disk (only for full discovery, not single file).
@@ -367,6 +478,7 @@ impl MarkdownVdb {
             for path_str in &existing_paths {
                 if !discovered_paths.contains(path_str) {
                     self.index.remove_file(path_str)?;
+                    self.fts_index.remove_file(path_str)?;
                     result.files_removed += 1;
                     removed_paths.push(path_str.clone());
                     debug!(path = %path_str, "removed deleted file from index");
@@ -417,8 +529,10 @@ impl MarkdownVdb {
             }
         }
 
-        // Save the index to disk.
+        // Save vector index first (atomic write-rename), then commit FTS.
+        // If vector save fails, FTS stays uncommitted — consistent on next ingest.
         self.index.save()?;
+        self.fts_index.commit()?;
 
         // Run clustering if enabled.
         if self.config.clustering_enabled {
@@ -483,7 +597,15 @@ impl MarkdownVdb {
         &self,
         query: search::SearchQuery,
     ) -> Result<Vec<search::SearchResult>> {
-        search::search(&query, &self.index, self.provider.as_ref()).await
+        search::search(
+            &query,
+            &self.index,
+            self.provider.as_ref(),
+            Some(&self.fts_index),
+            self.config.search_rrf_k,
+            self.config.bm25_norm_k,
+        )
+        .await
     }
 
     /// Return a status snapshot of the index.
@@ -511,16 +633,30 @@ impl MarkdownVdb {
         Ok(schema::Schema::infer(&parsed))
     }
 
-    /// Initialize a new markdown-vdb project by creating a `.markdownvdb` config file
+    /// Initialize a new markdown-vdb project by creating `.markdownvdb/.config`
     /// with default/example values.
     ///
-    /// Returns `Error::ConfigAlreadyExists` if the file already exists.
+    /// Returns `Error::ConfigAlreadyExists` if the config already exists.
     pub fn init(root: &Path) -> Result<()> {
-        let config_path = root.join(".markdownvdb");
+        let dir_path = root.join(".markdownvdb");
+        let config_path = dir_path.join(".config");
+
+        // Check for both new and legacy config locations.
         if config_path.exists() {
             return Err(Error::ConfigAlreadyExists {
                 path: config_path,
             });
+        }
+        let legacy_path = root.join(".markdownvdb");
+        if legacy_path.is_file() {
+            return Err(Error::ConfigAlreadyExists {
+                path: legacy_path,
+            });
+        }
+
+        // Create the .markdownvdb directory if it doesn't exist.
+        if !dir_path.exists() {
+            std::fs::create_dir_all(&dir_path)?;
         }
 
         let default_config = "\
@@ -536,9 +672,6 @@ MDVDB_EMBEDDING_BATCH_SIZE=100
 # Source directories (comma-separated)
 MDVDB_SOURCE_DIRS=.
 
-# Index file location
-MDVDB_INDEX_FILE=.markdownvdb.index
-
 # Chunking
 MDVDB_CHUNK_MAX_TOKENS=512
 MDVDB_CHUNK_OVERLAP_TOKENS=50
@@ -546,6 +679,8 @@ MDVDB_CHUNK_OVERLAP_TOKENS=50
 # Search defaults
 MDVDB_SEARCH_DEFAULT_LIMIT=10
 MDVDB_SEARCH_MIN_SCORE=0.0
+MDVDB_SEARCH_MODE=hybrid
+MDVDB_SEARCH_RRF_K=60.0
 
 # File watching
 MDVDB_WATCH=true
@@ -569,6 +704,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             self.config.clone(),
             &self.root,
             Arc::clone(&self.index),
+            Arc::clone(&self.fts_index),
             Arc::clone(&self.provider),
         );
         w.watch(cancel).await
@@ -636,6 +772,14 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         let indexed_files: std::collections::HashSet<String> =
             self.index.get_file_hashes().keys().cloned().collect();
         Ok(links::find_orphans(&graph, &indexed_files))
+    }
+
+    /// Build a file tree showing sync state of all discovered files.
+    ///
+    /// Compares files on disk against the index to classify each as
+    /// indexed, modified, new, or deleted.
+    pub fn file_tree(&self) -> Result<tree::FileTree> {
+        tree::build_file_tree(&self.root, &self.config, &self.index)
     }
 
     /// Get information about an indexed document by its relative path.

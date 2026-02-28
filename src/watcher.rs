@@ -13,6 +13,7 @@ use crate::config::Config;
 use crate::discovery::FileDiscovery;
 use crate::embedding::provider::EmbeddingProvider;
 use crate::error::{Error, Result};
+use crate::fts::{FtsChunkData, FtsIndex};
 use crate::index::state::Index;
 
 /// A filesystem event relevant to the index.
@@ -34,6 +35,7 @@ pub struct Watcher {
     config: Config,
     project_root: PathBuf,
     index: Arc<Index>,
+    fts_index: Arc<FtsIndex>,
     provider: Arc<dyn EmbeddingProvider>,
     #[allow(dead_code)]
     discovery: FileDiscovery,
@@ -45,6 +47,7 @@ impl Watcher {
         config: Config,
         project_root: &Path,
         index: Arc<Index>,
+        fts_index: Arc<FtsIndex>,
         provider: Arc<dyn EmbeddingProvider>,
     ) -> Self {
         let discovery = FileDiscovery::new(project_root, &config);
@@ -52,6 +55,7 @@ impl Watcher {
             config,
             project_root: project_root.to_path_buf(),
             index,
+            fts_index,
             provider,
             discovery,
         }
@@ -154,6 +158,8 @@ impl Watcher {
                 crate::links::remove_file_links(&mut graph, &relative);
                 self.index.update_link_graph(Some(graph));
 
+                self.fts_index.remove_file(&relative)?;
+                self.fts_index.commit()?;
                 self.index.save()?;
                 Ok(())
             }
@@ -167,6 +173,7 @@ impl Watcher {
                 crate::links::remove_file_links(&mut graph, &from_str);
                 self.index.update_link_graph(Some(graph));
 
+                self.fts_index.remove_file(&from_str)?;
                 self.process_file(to).await
             }
         }
@@ -182,6 +189,8 @@ impl Watcher {
             let relative = relative_path.to_string_lossy().to_string();
             info!(path = %relative, "file no longer exists, removing from index");
             self.index.remove_file(&relative)?;
+            self.fts_index.remove_file(&relative)?;
+            self.fts_index.commit()?;
             self.index.save()?;
             return Ok(());
         }
@@ -216,7 +225,7 @@ impl Watcher {
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
         let embeddings = self.provider.embed_batch(&texts).await?;
 
-        // Upsert and save.
+        // Upsert vector index and FTS index.
         self.index.upsert(&file, &chunks, &embeddings)?;
 
         // Update link graph with links from this file.
@@ -225,6 +234,18 @@ impl Watcher {
             crate::links::update_file_links(&mut graph, &file);
             self.index.update_link_graph(Some(graph));
         }
+
+        let fts_chunks: Vec<FtsChunkData> = chunks
+            .iter()
+            .map(|c| FtsChunkData {
+                chunk_id: c.id.clone(),
+                source_path: c.source_path.to_string_lossy().to_string(),
+                content: crate::fts::strip_markdown(&c.content),
+                heading_hierarchy: c.heading_hierarchy.join(" > "),
+            })
+            .collect();
+        let path_str_fts = relative_path.to_string_lossy().to_string();
+        self.fts_index.upsert_chunks(&path_str_fts, &fts_chunks)?;
 
         // Update schema inference with the new/changed file's frontmatter.
         if file.frontmatter.is_some() {
@@ -243,6 +264,7 @@ impl Watcher {
             self.index.set_schema(Some(merged));
         }
 
+        self.fts_index.commit()?;
         self.index.save()?;
         info!(
             path = %relative_path.display(),
@@ -360,7 +382,6 @@ mod tests {
             ollama_host: String::new(),
             embedding_endpoint: None,
             source_dirs: vec![PathBuf::from(".")],
-            index_file: PathBuf::from(".markdownvdb.index"),
             ignore_patterns: vec![],
             watch_enabled: true,
             watch_debounce_ms: 300,
@@ -370,6 +391,9 @@ mod tests {
             clustering_rebalance_threshold: 50,
             search_default_limit: 10,
             search_min_score: 0.0,
+            search_default_mode: crate::search::SearchMode::Hybrid,
+            search_rrf_k: 60.0,
+            bm25_norm_k: 1.5,
         };
         FileDiscovery::new(Path::new("/tmp/test"), &config)
     }

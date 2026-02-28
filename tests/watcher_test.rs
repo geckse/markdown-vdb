@@ -6,6 +6,7 @@ use std::time::Duration;
 use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::embedding::mock::MockProvider;
 use mdvdb::embedding::provider::EmbeddingProvider;
+use mdvdb::fts::FtsIndex;
 use mdvdb::index::{EmbeddingConfig, Index};
 use mdvdb::watcher::Watcher;
 use tempfile::TempDir;
@@ -25,7 +26,6 @@ fn test_config(source_dir: &str) -> Config {
         ollama_host: String::new(),
         embedding_endpoint: None,
         source_dirs: vec![PathBuf::from(source_dir)],
-        index_file: PathBuf::from(".markdownvdb.index"),
         ignore_patterns: vec![],
         watch_enabled: true,
         watch_debounce_ms: 200,
@@ -35,13 +35,16 @@ fn test_config(source_dir: &str) -> Config {
         clustering_rebalance_threshold: 50,
         search_default_limit: 10,
         search_min_score: 0.0,
+        search_default_mode: mdvdb::SearchMode::Hybrid,
+        search_rrf_k: 60.0,
+        bm25_norm_k: 1.5,
     }
 }
 
 /// Create a temp directory under the current working directory so that macOS
 /// FSEvents can reliably deliver file-system notifications. Temp dirs under
 /// /private/tmp are problematic in sandboxed environments.
-fn setup() -> (TempDir, PathBuf, Arc<Index>, Arc<dyn EmbeddingProvider>) {
+fn setup() -> (TempDir, PathBuf, Arc<Index>, Arc<FtsIndex>, Arc<dyn EmbeddingProvider>) {
     let dir = TempDir::new_in(".").unwrap();
     let project_root = dir.path().canonicalize().unwrap();
 
@@ -56,9 +59,10 @@ fn setup() -> (TempDir, PathBuf, Arc<Index>, Arc<dyn EmbeddingProvider>) {
         dimensions: 8,
     };
     let index = Arc::new(Index::create(&index_path, &embedding_config).unwrap());
+    let fts_index = Arc::new(FtsIndex::open_or_create(&project_root.join(".markdownvdb").join("fts")).unwrap());
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(MockProvider::new(8));
 
-    (dir, project_root, index, provider)
+    (dir, project_root, index, fts_index, provider)
 }
 
 /// Wait for the watcher to process events. macOS FSEvents can have a latency
@@ -85,11 +89,11 @@ async fn wait_for_condition<F: Fn() -> bool>(check: F, timeout_ms: u64) -> bool 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires OS filesystem event delivery (may fail in sandbox)"]
 async fn watcher_detects_new_file() {
-    let (_dir, project_root, index, provider) = setup();
+    let (_dir, project_root, index, fts_index, provider) = setup();
     let config = test_config("docs");
     let cancel = CancellationToken::new();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), provider);
+    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider);
 
     let cancel_clone = cancel.clone();
     let root_clone = project_root.clone();
@@ -120,7 +124,7 @@ async fn watcher_detects_new_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires OS filesystem event delivery (may fail in sandbox)"]
 async fn watcher_detects_modification() {
-    let (_dir, project_root, index, provider) = setup();
+    let (_dir, project_root, index, fts_index, provider) = setup();
     let config = test_config("docs");
     let cancel = CancellationToken::new();
 
@@ -128,7 +132,7 @@ async fn watcher_detects_modification() {
     let file_path = project_root.join("docs/existing.md");
     fs::write(&file_path, "# Original\n\nOriginal content.").unwrap();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), provider);
+    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider);
 
     let cancel_clone = cancel.clone();
     let watch_handle = tokio::spawn(async move {
@@ -156,7 +160,7 @@ async fn watcher_detects_modification() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires OS filesystem event delivery (may fail in sandbox)"]
 async fn watcher_detects_deletion() {
-    let (_dir, project_root, index, provider) = setup();
+    let (_dir, project_root, index, fts_index, provider) = setup();
     let config = test_config("docs");
     let cancel = CancellationToken::new();
 
@@ -165,7 +169,7 @@ async fn watcher_detects_deletion() {
     let file_path = project_root.join("docs/to_delete.md");
     fs::write(&file_path, "# To Delete\n\nThis will be deleted.").unwrap();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), provider);
+    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider);
 
     let cancel_clone = cancel.clone();
     let watch_handle = tokio::spawn(async move {
@@ -208,11 +212,11 @@ async fn watcher_detects_deletion() {
 
 #[tokio::test]
 async fn watcher_graceful_shutdown_via_cancellation_token() {
-    let (_dir, project_root, index, provider) = setup();
+    let (_dir, project_root, index, fts_index, provider) = setup();
     let config = test_config("docs");
     let cancel = CancellationToken::new();
 
-    let watcher = Watcher::new(config, &project_root, index, provider);
+    let watcher = Watcher::new(config, &project_root, index, fts_index, provider);
 
     let cancel_clone = cancel.clone();
     let watch_handle = tokio::spawn(async move {

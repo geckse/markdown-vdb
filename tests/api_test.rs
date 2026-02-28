@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::error::Error;
 use mdvdb::search::SearchQuery;
-use mdvdb::{IngestOptions, MarkdownVdb};
+use mdvdb::{IngestOptions, MarkdownVdb, SearchMode};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -23,7 +23,6 @@ fn mock_config() -> Config {
         ollama_host: "http://localhost:11434".into(),
         embedding_endpoint: None,
         source_dirs: vec![PathBuf::from(".")],
-        index_file: PathBuf::from(".markdownvdb.index"),
         ignore_patterns: vec![],
         watch_enabled: false,
         watch_debounce_ms: 300,
@@ -33,6 +32,9 @@ fn mock_config() -> Config {
         clustering_rebalance_threshold: 50,
         search_default_limit: 10,
         search_min_score: 0.0,
+        search_default_mode: mdvdb::SearchMode::Hybrid,
+        search_rrf_k: 60.0,
+        bm25_norm_k: 1.5,
     }
 }
 
@@ -41,9 +43,10 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    // Write .markdownvdb config (needed for Config::load to find project root)
+    // Write .markdownvdb/.config (needed for Config::load to find project root)
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -72,7 +75,8 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
 #[test]
 fn test_open_with_mock_config() {
     let dir = TempDir::new().unwrap();
-    fs::write(dir.path().join(".markdownvdb"), "MDVDB_EMBEDDING_PROVIDER=mock\n").unwrap();
+    fs::create_dir_all(dir.path().join(".markdownvdb")).unwrap();
+    fs::write(dir.path().join(".markdownvdb").join(".config"), "MDVDB_EMBEDDING_PROVIDER=mock\n").unwrap();
 
     let vdb = MarkdownVdb::open_with_config(dir.path().to_path_buf(), mock_config());
     assert!(vdb.is_ok(), "should open with mock config: {:?}", vdb.err());
@@ -246,8 +250,9 @@ fn setup_project_with_clustering() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -299,4 +304,192 @@ async fn test_get_document_returns_frontmatter() {
     let fm = doc.frontmatter.unwrap();
     assert_eq!(fm["title"], "Hello World");
     assert_eq!(fm["status"], "published");
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid / FTS search API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_search_hybrid_mode_via_api() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("rust programming").with_mode(SearchMode::Hybrid);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "hybrid search should return results");
+    assert!(results[0].score > 0.0, "results should have positive scores");
+}
+
+#[tokio::test]
+async fn test_search_semantic_mode_via_api() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("rust").with_mode(SearchMode::Semantic);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "semantic search should return results");
+}
+
+#[tokio::test]
+async fn test_search_lexical_mode_via_api() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("systems programming language").with_mode(SearchMode::Lexical);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "lexical search should return results for matching terms");
+}
+
+#[tokio::test]
+async fn test_fts_index_populated_after_ingest() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let fts = vdb.fts_index();
+    let num = fts.num_docs().unwrap();
+    assert!(num > 0, "FTS index should have documents after ingest, got {num}");
+}
+
+#[tokio::test]
+async fn test_search_default_mode_is_hybrid() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Default SearchQuery should use hybrid (from config)
+    let query = SearchQuery::new("rust");
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty(), "default mode search should return results");
+}
+
+#[tokio::test]
+async fn test_fts_auto_rebuild_from_rkyv() {
+    let (_dir, vdb) = setup_project();
+
+    // First ingest: populates both vector and FTS indexes.
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let fts_docs_before = vdb.fts_index().num_docs().unwrap();
+    assert!(fts_docs_before > 0, "FTS should have docs after initial ingest");
+
+    // Simulate a stale FTS index by deleting all FTS docs.
+    vdb.fts_index().delete_all().unwrap();
+    vdb.fts_index().commit().unwrap();
+    assert_eq!(vdb.fts_index().num_docs().unwrap(), 0, "FTS should be empty after delete_all");
+
+    // Re-ingest (incremental — files unchanged, so vector skips them).
+    // Consistency guard should detect FTS=0 + vector>0 and rebuild FTS.
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let fts_docs_after = vdb.fts_index().num_docs().unwrap();
+    assert!(
+        fts_docs_after > 0,
+        "FTS should have been rebuilt from rkyv metadata, got {fts_docs_after}"
+    );
+}
+
+#[tokio::test]
+async fn test_full_ingest_rebuilds_fts() {
+    let (_dir, vdb) = setup_project();
+
+    // Initial ingest.
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let fts_before = vdb.fts_index().num_docs().unwrap();
+    assert!(fts_before > 0, "FTS should have docs after ingest");
+
+    // Full ingest: should clear and rebuild FTS.
+    let opts = IngestOptions { full: true, file: None };
+    vdb.ingest(opts).await.unwrap();
+    let fts_after = vdb.fts_index().num_docs().unwrap();
+    assert!(
+        fts_after > 0,
+        "FTS should have docs after full re-ingest, got {fts_after}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// File tree and path prefix API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_file_tree_returns_structure() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    // Create files in subdirectories
+    fs::create_dir_all(root.join("docs/guides")).unwrap();
+    fs::write(
+        root.join("readme.md"),
+        "---\ntitle: Readme\n---\n\n# Readme\n\nTop-level readme.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/overview.md"),
+        "---\ntitle: Overview\n---\n\n# Overview\n\nDocs overview.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/guides/start.md"),
+        "---\ntitle: Getting Started\n---\n\n# Getting Started\n\nA guide.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let tree = vdb.file_tree().unwrap();
+
+    // Should have entries covering our files
+    assert!(tree.total_files > 0, "file tree should have files");
+    assert!(tree.total_files >= 3, "should have at least 3 files, got {}", tree.total_files);
+}
+
+#[tokio::test]
+async fn test_search_with_path_prefix() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(
+        root.join("top.md"),
+        "---\ntitle: Top\n---\n\n# Top\n\nTop-level content about programming.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/guide.md"),
+        "---\ntitle: Guide\n---\n\n# Guide\n\nA guide about programming.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Search scoped to docs/ directory
+    let query = SearchQuery::new("programming").with_path_prefix("docs/");
+    let results = vdb.search(query).await.unwrap();
+
+    // All results should be within docs/
+    for r in &results {
+        assert!(
+            r.file.path.starts_with("docs/"),
+            "path-scoped result should be under docs/, got: {}",
+            r.file.path
+        );
+    }
 }

@@ -444,6 +444,26 @@ impl Index {
     }
 }
 
+/// Test-only helpers for manipulating index state directly.
+#[cfg(test)]
+impl Index {
+    /// Insert a file entry with just a path and hash (no chunks/vectors).
+    pub fn insert_file_hash_for_test(&self, path: &str, hash: &str) {
+        let mut state = self.state.write();
+        state.metadata.files.insert(
+            path.to_string(),
+            StoredFile {
+                relative_path: path.to_string(),
+                content_hash: hash.to_string(),
+                chunk_ids: Vec::new(),
+                frontmatter: None,
+                file_size: 0,
+                indexed_at: 0,
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
-# .markdownvdb — Configuration for mdvdb
-# Copy this file to .markdownvdb and uncomment the variables you want to change.
-# Priority: shell environment > .markdownvdb > .env file > built-in defaults
+# .markdownvdb/.config — Configuration for mdvdb
+# This file lives inside the .markdownvdb/ directory alongside the index data.
+# Priority: shell environment > .markdownvdb/.config > .env file > built-in defaults
 #
 # Shared secrets like OPENAI_API_KEY can live in a .env file (gitignored)
 # and will be picked up automatically — no need to duplicate them here.
@@ -29,13 +29,10 @@
 # Custom embedding endpoint URL (used when provider is custom)
 # MDVDB_EMBEDDING_ENDPOINT=
 
-# ── Source & Index ───────────────────────────────────────────────────────────
+# ── Source ──────────────────────────────────────────────────────────────────
 
 # Comma-separated list of directories to scan for markdown files
 # MDVDB_SOURCE_DIRS=.
-
-# Path to the index file (relative to project root)
-# MDVDB_INDEX_FILE=.markdownvdb.index
 
 # Comma-separated glob patterns to ignore
 # MDVDB_IGNORE_PATTERNS=
@@ -69,3 +66,13 @@
 
 # Minimum cosine similarity score to include in results (0.0–1.0)
 # MDVDB_SEARCH_MIN_SCORE=0.0
+
+# Search mode: hybrid (semantic+lexical), semantic, or lexical
+# MDVDB_SEARCH_MODE=hybrid
+
+# Reciprocal Rank Fusion smoothing constant (higher = gentler blending)
+# MDVDB_SEARCH_RRF_K=60.0
+
+# BM25 saturation normalization constant (a BM25 score equal to this maps to 0.5)
+# MDVDB_BM25_NORM_K=1.5
+

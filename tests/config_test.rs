@@ -16,7 +16,6 @@ const ALL_ENV_VARS: &[&str] = &[
     "OLLAMA_HOST",
     "MDVDB_EMBEDDING_ENDPOINT",
     "MDVDB_SOURCE_DIRS",
-    "MDVDB_INDEX_FILE",
     "MDVDB_IGNORE_PATTERNS",
     "MDVDB_WATCH",
     "MDVDB_WATCH_DEBOUNCE_MS",
@@ -26,6 +25,9 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
     "MDVDB_SEARCH_DEFAULT_LIMIT",
     "MDVDB_SEARCH_MIN_SCORE",
+    "MDVDB_SEARCH_MODE",
+    "MDVDB_SEARCH_RRF_K",
+    "MDVDB_BM25_NORM_K",
 ];
 
 /// Clear all MDVDB-related env vars to ensure test isolation.
@@ -50,7 +52,6 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.ollama_host, "http://localhost:11434");
     assert_eq!(config.embedding_endpoint, None);
     assert_eq!(config.source_dirs, vec![PathBuf::from(".")]);
-    assert_eq!(config.index_file, PathBuf::from(".markdownvdb.index"));
     assert!(config.ignore_patterns.is_empty());
     assert!(config.watch_enabled);
     assert_eq!(config.watch_debounce_ms, 300);
@@ -60,6 +61,9 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.clustering_rebalance_threshold, 50);
     assert_eq!(config.search_default_limit, 10);
     assert_eq!(config.search_min_score, 0.0);
+    assert_eq!(config.search_default_mode, mdvdb::SearchMode::Hybrid);
+    assert_eq!(config.search_rrf_k, 60.0);
+    assert_eq!(config.bm25_norm_k, 1.5);
 }
 
 #[test]
@@ -337,6 +341,73 @@ fn shell_env_overrides_both_files() {
         config.embedding_dimensions, 1024,
         "shell env should take priority over both files"
     );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn search_config_from_dotenv() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join(".markdownvdb"),
+        "MDVDB_SEARCH_MODE=semantic\n\
+         MDVDB_SEARCH_RRF_K=30.0\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(config.search_default_mode, mdvdb::SearchMode::Semantic);
+    assert_eq!(config.search_rrf_k, 30.0);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn search_mode_case_insensitive() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    for (variant, expected) in [
+        ("hybrid", mdvdb::SearchMode::Hybrid),
+        ("SEMANTIC", mdvdb::SearchMode::Semantic),
+        ("Lexical", mdvdb::SearchMode::Lexical),
+    ] {
+        std::env::set_var("MDVDB_SEARCH_MODE", variant);
+        let config = Config::load(tmp.path()).unwrap();
+        assert_eq!(
+            config.search_default_mode, expected,
+            "Failed for variant: {variant}"
+        );
+    }
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn invalid_search_mode_rejected() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_MODE", "invalid");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "invalid search mode should be rejected");
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn invalid_rrf_k_rejected() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_RRF_K", "not_a_number");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "non-numeric rrf_k should be rejected");
 
     clear_env();
 }

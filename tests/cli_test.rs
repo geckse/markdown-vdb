@@ -21,8 +21,9 @@ fn setup_and_ingest() -> TempDir {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -93,8 +94,8 @@ fn test_init_creates_config_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        dir.path().join(".markdownvdb").exists(),
-        ".markdownvdb file should be created"
+        dir.path().join(".markdownvdb").join(".config").exists(),
+        ".markdownvdb/.config should be created"
     );
 }
 
@@ -183,8 +184,9 @@ fn test_ingest_json_output() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -463,8 +465,9 @@ fn test_ingest_json_unchanged() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -662,4 +665,328 @@ fn test_status_json_unchanged() {
     );
     // Verify it's valid JSON.
     let _: serde_json::Value = serde_json::from_str(&stdout).expect("status --json should be valid JSON");
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid / FTS search CLI tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_search_help_shows_mode_flags() {
+    let output = mdvdb_bin()
+        .args(["search", "--help"])
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "search --help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for flag in ["--mode", "--semantic", "--lexical"] {
+        assert!(
+            stdout.contains(flag),
+            "search --help should mention '{flag}', got: {}",
+            &stdout[..stdout.len().min(500)]
+        );
+    }
+}
+
+#[test]
+fn test_search_with_mode_semantic() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "semantic", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode semantic should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["results"].is_array(), "should have results array");
+}
+
+#[test]
+fn test_search_with_mode_lexical() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust programming", "--mode", "lexical", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode lexical should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["results"].is_array(), "should have results array");
+}
+
+#[test]
+fn test_search_with_mode_hybrid() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "hybrid", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode hybrid should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["results"].is_array(), "should have results array");
+}
+
+#[test]
+fn test_search_semantic_shorthand_flag() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--semantic", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --semantic should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_search_lexical_shorthand_flag() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust programming", "--lexical", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --lexical should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_search_invalid_mode_rejected() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "invalid"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        !output.status.success(),
+        "search --mode invalid should fail"
+    );
+}
+
+#[test]
+fn test_search_json_output_includes_mode() {
+    let dir = setup_and_ingest();
+
+    // Test with explicit lexical mode.
+    let output = mdvdb_bin()
+        .args(["search", "rust programming", "--mode", "lexical", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode lexical --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert_eq!(
+        json["mode"], "lexical",
+        "JSON output should include mode field with value 'lexical'"
+    );
+
+    // Test with hybrid mode (default).
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "hybrid", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert_eq!(
+        json["mode"], "hybrid",
+        "JSON output should include mode field with value 'hybrid'"
+    );
+}
+
+#[test]
+fn test_search_semantic_lexical_flags_conflict() {
+    let dir = setup_and_ingest();
+
+    // Using both --semantic and --lexical should fail (clap conflict).
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--semantic", "--lexical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        !output.status.success(),
+        "--semantic and --lexical together should fail"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tree command tests
+// ---------------------------------------------------------------------------
+
+fn setup_and_ingest_with_subdirs() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::create_dir_all(root.join("notes")).unwrap();
+
+    fs::write(
+        root.join("readme.md"),
+        "---\ntitle: Readme\n---\n\n# Readme\n\nTop-level readme.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/guide.md"),
+        "---\ntitle: Guide\n---\n\n# Guide\n\nA guide document.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("notes/todo.md"),
+        "---\ntitle: Todo\n---\n\n# Todo\n\nThings to do.\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .arg("ingest")
+        .current_dir(root)
+        .output()
+        .expect("failed to run ingest");
+    assert!(
+        output.status.success(),
+        "ingest should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    dir
+}
+
+#[test]
+fn test_tree_json_output() {
+    let dir = setup_and_ingest_with_subdirs();
+
+    let output = mdvdb_bin()
+        .args(["tree", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "tree --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    // Should have a root node with children
+    assert!(json["root"].is_object(), "tree should have 'root' object");
+    assert!(
+        json["root"]["children"].is_array(),
+        "root should have 'children' array"
+    );
+}
+
+#[test]
+fn test_tree_path_filter() {
+    let dir = setup_and_ingest_with_subdirs();
+
+    let output = mdvdb_bin()
+        .args(["tree", "--path", "docs", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "tree --path docs --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    // The filtered tree should contain docs content
+    let tree_str = serde_json::to_string(&json).unwrap();
+    assert!(
+        tree_str.contains("guide.md") || tree_str.contains("docs"),
+        "filtered tree should contain docs content, got: {tree_str}"
+    );
+}
+
+#[test]
+fn test_search_path_flag() {
+    let dir = setup_and_ingest_with_subdirs();
+
+    // Search with --path restricting to docs/
+    let output = mdvdb_bin()
+        .args(["search", "document", "--path", "docs", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --path should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    assert!(json["results"].is_array(), "should have 'results' array");
+    // With mock embeddings all vectors are similar, but any returned results
+    // must be scoped to the docs/ prefix.
+    let results = json["results"].as_array().unwrap();
+    for result in results {
+        if let Some(path) = result["path"].as_str() {
+            if !path.is_empty() {
+                assert!(
+                    path.starts_with("docs/"),
+                    "search --path docs should only return docs/ files, got: {path}"
+                );
+            }
+        }
+    }
 }

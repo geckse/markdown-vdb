@@ -47,6 +47,9 @@ pub enum Error {
 
     #[error("link graph not built: run `mdvdb links` first")]
     LinkGraphNotBuilt,
+
+    #[error("full-text search error: {0}")]
+    Fts(String),
 }
 
 /// Convenience alias used throughout the crate.
@@ -157,6 +160,12 @@ mod tests {
             err.to_string(),
             "link graph not built: run `mdvdb links` first"
         );
+    }
+
+    #[test]
+    fn fts_variant_formats() {
+        let err = Error::Fts("tokenization failed".into());
+        assert_eq!(err.to_string(), "full-text search error: tokenization failed");
     }
 
     #[test]

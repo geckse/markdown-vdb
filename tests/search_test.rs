@@ -4,7 +4,8 @@ use mdvdb::chunker::Chunk;
 use mdvdb::embedding::mock::MockProvider;
 use mdvdb::index::{EmbeddingConfig, Index};
 use mdvdb::parser::MarkdownFile;
-use mdvdb::search::{search, MetadataFilter, SearchQuery};
+use mdvdb::fts::FtsIndex;
+use mdvdb::search::{search, MetadataFilter, SearchMode, SearchQuery};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -96,7 +97,7 @@ async fn test_basic_search() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     assert!(!results.is_empty(), "should return results");
     assert!(results.len() <= 10, "default limit is 10");
@@ -118,7 +119,7 @@ async fn test_min_score_filtering() {
 
     // Very high min_score should filter out everything
     let query = SearchQuery::new("test query").with_min_score(0.9999);
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     // All results (if any) must meet the threshold
     for r in &results {
@@ -137,7 +138,7 @@ async fn test_limit_capping() {
     populate_index(&index, "b.md", "h2", Some(json!({"title": "B"})), 5);
 
     let query = SearchQuery::new("test").with_limit(3);
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     assert!(results.len() <= 3, "should respect limit of 3, got {}", results.len());
 }
@@ -156,7 +157,7 @@ async fn test_metadata_filter_equals() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -179,7 +180,7 @@ async fn test_metadata_filter_in() {
             field: "category".into(),
             values: vec![json!("rust"), json!("go")],
         });
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     for r in &results {
         let cat = r.file.frontmatter.as_ref().unwrap()["category"].as_str().unwrap();
@@ -202,7 +203,7 @@ async fn test_metadata_filter_range() {
             min: Some(json!(2023)),
             max: Some(json!(2025)),
         });
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     for r in &results {
         let year = r.file.frontmatter.as_ref().unwrap()["year"].as_i64().unwrap();
@@ -223,7 +224,7 @@ async fn test_metadata_filter_exists() {
         .with_filter(MetadataFilter::Exists {
             field: "author".into(),
         });
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -251,7 +252,7 @@ async fn test_combined_and_filters() {
             min: Some(json!(2023)),
             max: Some(json!(2025)),
         });
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -268,7 +269,7 @@ async fn test_empty_index_returns_no_results() {
     let provider = mock_provider();
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     assert!(results.is_empty(), "empty index should return no results");
 }
@@ -282,7 +283,318 @@ async fn test_empty_query_returns_no_results() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("");
-    let results = search(&query, &index, &provider).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
 
     assert!(results.is_empty(), "empty query should return no results");
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid / FTS search tests
+// ---------------------------------------------------------------------------
+
+/// Helper: populate both vector index and FTS index for a file.
+fn populate_both(
+    index: &Index,
+    fts: &FtsIndex,
+    path: &str,
+    hash: &str,
+    frontmatter: Option<serde_json::Value>,
+    chunks: &[Chunk],
+    embeddings: &[Vec<f32>],
+) {
+    let file = fake_markdown_file(path, hash, frontmatter);
+    index.upsert(&file, chunks, embeddings).unwrap();
+    let fts_chunks: Vec<mdvdb::fts::FtsChunkData> = chunks
+        .iter()
+        .map(|c| mdvdb::fts::FtsChunkData {
+            chunk_id: c.id.clone(),
+            source_path: path.to_string(),
+            content: c.content.clone(),
+            heading_hierarchy: c.heading_hierarchy.join(" > "),
+        })
+        .collect();
+    fts.upsert_chunks(path, &fts_chunks).unwrap();
+    fts.commit().unwrap();
+}
+
+#[tokio::test]
+async fn test_search_with_fts_hybrid_mode() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let fts_dir = _dir.path().join("fts");
+    let fts = FtsIndex::open_or_create(&fts_dir).unwrap();
+
+    let chunks = fake_chunks("doc.md", 3);
+    let embs = fake_embeddings(3);
+    populate_both(
+        &index,
+        &fts,
+        "doc.md",
+        "h1",
+        Some(json!({"title": "Test"})),
+        &chunks,
+        &embs,
+    );
+
+    let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Hybrid);
+    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+
+    assert!(!results.is_empty(), "hybrid search should return results");
+}
+
+#[tokio::test]
+async fn test_search_lexical_mode() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let fts_dir = _dir.path().join("fts");
+    let fts = FtsIndex::open_or_create(&fts_dir).unwrap();
+
+    let chunks = fake_chunks("doc.md", 3);
+    let embs = fake_embeddings(3);
+    populate_both(
+        &index,
+        &fts,
+        "doc.md",
+        "h1",
+        Some(json!({"title": "Test"})),
+        &chunks,
+        &embs,
+    );
+
+    let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
+    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+
+    assert!(!results.is_empty(), "lexical search should return results");
+}
+
+#[tokio::test]
+async fn test_search_semantic_mode_explicit() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
+
+    let query = SearchQuery::new("test query").with_mode(SearchMode::Semantic);
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+
+    assert!(!results.is_empty(), "semantic search should return results");
+}
+
+#[tokio::test]
+async fn test_search_hybrid_fallback_without_fts() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
+
+    // Hybrid mode without FTS index should fall back to semantic
+    let query = SearchQuery::new("test query").with_mode(SearchMode::Hybrid);
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+
+    assert!(!results.is_empty(), "hybrid without fts should fall back to semantic");
+}
+
+#[tokio::test]
+async fn test_search_mode_with_filter() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let fts_dir = _dir.path().join("fts");
+    let fts = FtsIndex::open_or_create(&fts_dir).unwrap();
+
+    let chunks_a = fake_chunks("a.md", 2);
+    let embs_a = fake_embeddings(2);
+    populate_both(&index, &fts, "a.md", "h1", Some(json!({"status": "draft"})), &chunks_a, &embs_a);
+
+    let chunks_b = fake_chunks("b.md", 2);
+    let embs_b = fake_embeddings(2);
+    populate_both(&index, &fts, "b.md", "h2", Some(json!({"status": "published"})), &chunks_b, &embs_b);
+
+    let query = SearchQuery::new("Chunk content")
+        .with_mode(SearchMode::Hybrid)
+        .with_filter(MetadataFilter::Equals {
+            field: "status".into(),
+            value: json!("draft"),
+        });
+    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+
+    for r in &results {
+        let fm = r.file.frontmatter.as_ref().unwrap();
+        assert_eq!(fm["status"], "draft", "hybrid + filter should respect metadata filter");
+    }
+}
+
+/// Verify that lexical mode does NOT call the embedding provider at all.
+#[tokio::test]
+async fn test_lexical_search_no_embedding_call() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let fts_dir = _dir.path().join("fts");
+    let fts = FtsIndex::open_or_create(&fts_dir).unwrap();
+
+    let chunks = fake_chunks("doc.md", 3);
+    let embs = fake_embeddings(3);
+    populate_both(
+        &index,
+        &fts,
+        "doc.md",
+        "h1",
+        Some(json!({"title": "Test"})),
+        &chunks,
+        &embs,
+    );
+
+    let initial_calls = provider.call_count();
+
+    let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
+    let _results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+
+    assert_eq!(
+        provider.call_count(),
+        initial_calls,
+        "lexical search must NOT call the embedding provider"
+    );
+}
+
+/// Verify that hybrid mode produces results that combine signals from both
+/// semantic and lexical searches (chunks appearing in both lists get boosted).
+#[tokio::test]
+async fn test_hybrid_combines_both_signals() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let fts_dir = _dir.path().join("fts");
+    let fts = FtsIndex::open_or_create(&fts_dir).unwrap();
+
+    // Create chunks with distinctive content so BM25 can differentiate.
+    let chunks = vec![
+        Chunk {
+            id: "doc.md#0".into(),
+            source_path: PathBuf::from("doc.md"),
+            heading_hierarchy: vec!["Heading".to_string()],
+            content: "Rust programming language is fast and safe for systems development".into(),
+            start_line: 1,
+            end_line: 10,
+            chunk_index: 0,
+            is_sub_split: false,
+        },
+        Chunk {
+            id: "doc.md#1".into(),
+            source_path: PathBuf::from("doc.md"),
+            heading_hierarchy: vec!["Heading".to_string()],
+            content: "Python is great for data science and machine learning tasks".into(),
+            start_line: 11,
+            end_line: 20,
+            chunk_index: 1,
+            is_sub_split: false,
+        },
+    ];
+    let embs = fake_embeddings(2);
+    populate_both(
+        &index,
+        &fts,
+        "doc.md",
+        "h1",
+        Some(json!({"title": "Test"})),
+        &chunks,
+        &embs,
+    );
+
+    // Hybrid search for "Rust programming" — should find results from both signals.
+    let query_hybrid = SearchQuery::new("Rust programming").with_mode(SearchMode::Hybrid);
+    let hybrid_results = search(&query_hybrid, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+
+    // Lexical search for the same query.
+    let query_lexical = SearchQuery::new("Rust programming").with_mode(SearchMode::Lexical);
+    let lexical_results = search(&query_lexical, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+
+    // Both should return results.
+    assert!(!hybrid_results.is_empty(), "hybrid should return results");
+    assert!(!lexical_results.is_empty(), "lexical should return results");
+
+    // Hybrid mode should have positive RRF scores from fusing both signal lists.
+    assert!(
+        hybrid_results[0].score > 0.0,
+        "hybrid results should have positive RRF scores"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Path prefix search tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_path_prefix_filters_results() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
+    populate_index(&index, "docs/api.md", "h2", Some(json!({"title": "API"})), 2);
+    populate_index(&index, "notes/todo.md", "h3", Some(json!({"title": "Todo"})), 2);
+
+    let query = SearchQuery::new("test").with_path_prefix("docs/");
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+
+    assert!(!results.is_empty(), "should return results from docs/");
+    for r in &results {
+        assert!(
+            r.file.path.starts_with("docs/"),
+            "expected docs/ prefix, got: {}",
+            r.file.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_path_prefix_no_match() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
+
+    let query = SearchQuery::new("test").with_path_prefix("nonexistent/");
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+
+    assert!(results.is_empty(), "nonexistent prefix should return no results");
+}
+
+#[tokio::test]
+async fn test_path_prefix_combined_with_metadata_filter() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "docs/draft.md", "h1", Some(json!({"status": "draft"})), 2);
+    populate_index(&index, "docs/published.md", "h2", Some(json!({"status": "published"})), 2);
+    populate_index(&index, "notes/draft.md", "h3", Some(json!({"status": "draft"})), 2);
+
+    let query = SearchQuery::new("test")
+        .with_path_prefix("docs/")
+        .with_filter(MetadataFilter::Equals {
+            field: "status".into(),
+            value: json!("draft"),
+        });
+    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+
+    for r in &results {
+        assert!(
+            r.file.path.starts_with("docs/"),
+            "expected docs/ prefix, got: {}",
+            r.file.path
+        );
+        let fm = r.file.frontmatter.as_ref().unwrap();
+        assert_eq!(fm["status"], "draft", "should only return draft docs");
+    }
 }
