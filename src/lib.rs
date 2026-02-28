@@ -794,6 +794,112 @@ impl MarkdownVdb {
         .await
     }
 
+    /// Preview what an ingestion would do, without making any API calls or modifying the index.
+    ///
+    /// This is intentionally synchronous because it performs no network requests.
+    /// It discovers, parses, and chunks files, then compares hashes with the existing index.
+    pub fn preview(&self, reindex: bool, file: Option<PathBuf>) -> Result<IngestPreview> {
+        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+
+        // Discover files to process.
+        let discovered = if let Some(ref single_file) = file {
+            let full = self.root.join(single_file);
+            if !full.is_file() {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("file not found: {}", single_file.display()),
+                )));
+            }
+            vec![single_file.clone()]
+        } else {
+            disco.discover()?
+        };
+
+        // Get existing hashes from index for skip detection.
+        let existing_hashes = self.index.get_file_hashes();
+
+        let mut files = Vec::new();
+        let mut total_chunks: usize = 0;
+        let mut estimated_tokens: usize = 0;
+        let mut files_to_process: usize = 0;
+        let mut files_unchanged: usize = 0;
+
+        for path in &discovered {
+            let path_str = path.to_string_lossy().to_string();
+
+            // Parse the file.
+            let md = match parser::parse_markdown_file(&self.root, path) {
+                Ok(md) => md,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to parse during preview");
+                    continue;
+                }
+            };
+
+            // Determine file status.
+            let status = if reindex {
+                PreviewFileStatus::Changed
+            } else if let Some(existing) = existing_hashes.get(&path_str) {
+                if *existing == md.content_hash {
+                    PreviewFileStatus::Unchanged
+                } else {
+                    PreviewFileStatus::Changed
+                }
+            } else {
+                PreviewFileStatus::New
+            };
+
+            // Chunk the document.
+            let chunks = match chunker::chunk_document(
+                &md,
+                self.config.chunk_max_tokens,
+                self.config.chunk_overlap_tokens,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to chunk during preview");
+                    continue;
+                }
+            };
+
+            let chunk_count = chunks.len();
+            let file_tokens: usize = chunks.iter().map(|c| chunker::count_tokens(&c.content)).sum();
+
+            if status != PreviewFileStatus::Unchanged {
+                files_to_process += 1;
+                total_chunks += chunk_count;
+                estimated_tokens += file_tokens;
+            } else {
+                files_unchanged += 1;
+            }
+
+            files.push(PreviewFileInfo {
+                path: path_str,
+                status,
+                chunks: chunk_count,
+                estimated_tokens: file_tokens,
+            });
+        }
+
+        // Estimate API calls: chunks are sent in batches.
+        let batch_size = self.config.embedding_batch_size.max(1);
+        let estimated_api_calls = if total_chunks == 0 {
+            0
+        } else {
+            (total_chunks + batch_size - 1) / batch_size
+        };
+
+        Ok(IngestPreview {
+            total_files: discovered.len(),
+            files_to_process,
+            files_unchanged,
+            total_chunks,
+            estimated_tokens,
+            estimated_api_calls,
+            files,
+        })
+    }
+
     /// Return a status snapshot of the index.
     pub fn status(&self) -> index::types::IndexStatus {
         self.index.status()
