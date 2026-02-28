@@ -383,6 +383,22 @@ impl MarkdownVdb {
     ///
     /// Pipeline: discover → parse → hash-compare → chunk → embed → upsert → remove deleted → save.
     pub async fn ingest(&self, options: IngestOptions) -> Result<IngestResult> {
+        let start_time = std::time::Instant::now();
+
+        // Helper: emit progress if callback is set.
+        let emit = |phase: &IngestPhase| {
+            if let Some(ref cb) = options.progress {
+                cb(phase);
+            }
+        };
+
+        // Helper: check if cancellation has been requested.
+        let is_cancelled = || {
+            options.cancel.as_ref().map_or(false, |c| c.is_cancelled())
+        };
+
+        emit(&IngestPhase::Discovering);
+
         let disco = discovery::FileDiscovery::new(&self.root, &self.config);
 
         // Discover files to process.
@@ -401,6 +417,18 @@ impl MarkdownVdb {
         };
 
         info!(files = discovered.len(), "discovered markdown files");
+
+        // Check cancellation after discovery.
+        if is_cancelled() {
+            self.index.save()?;
+            self.fts_index.commit()?;
+            return Ok(IngestResult {
+                files_indexed: 0, files_skipped: 0, files_removed: 0,
+                chunks_created: 0, api_calls: 0, files_failed: 0,
+                errors: Vec::new(), duration_secs: start_time.elapsed().as_secs_f64(),
+                cancelled: true,
+            });
+        }
 
         // Full ingest: clear FTS index for a clean rebuild.
         if options.full {
@@ -446,9 +474,16 @@ impl MarkdownVdb {
         let mut discovered_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for path in &discovered {
+        let total_files = discovered.len();
+        for (file_idx, path) in discovered.iter().enumerate() {
             let path_str = path.to_string_lossy().to_string();
             discovered_paths.insert(path_str.clone());
+
+            emit(&IngestPhase::Parsing {
+                current: file_idx + 1,
+                total: total_files,
+                path: path_str.clone(),
+            });
 
             // Parse the file.
             let md = match parser::parse_markdown_file(&self.root, path) {
@@ -469,6 +504,11 @@ impl MarkdownVdb {
                 if let Some(existing) = existing_hashes.get(&path_str) {
                     if *existing == md.content_hash {
                         debug!(path = %path.display(), "unchanged, skipping");
+                        emit(&IngestPhase::Skipped {
+                            current: file_idx + 1,
+                            total: total_files,
+                            path: path_str.clone(),
+                        });
                         result.files_skipped += 1;
                         current_hashes.insert(path.clone(), md.content_hash.clone());
                         continue;
@@ -508,6 +548,17 @@ impl MarkdownVdb {
             parsed_files.insert(path.clone(), (md, chunks));
         }
 
+        // Check cancellation after parsing.
+        if is_cancelled() {
+            result.cancelled = true;
+            result.duration_secs = start_time.elapsed().as_secs_f64();
+            self.index.save()?;
+            self.fts_index.commit()?;
+            return Ok(result);
+        }
+
+        emit(&IngestPhase::Embedding { batch: 0, total_batches: 0 });
+
         // Embed all changed chunks.
         // For files we're re-embedding, we pass empty existing hashes so nothing is skipped.
         let embed_existing: HashMap<PathBuf, String> = HashMap::new();
@@ -526,6 +577,15 @@ impl MarkdownVdb {
         .await?;
 
         result.api_calls = embed_result.api_calls;
+
+        // Check cancellation after embedding.
+        if is_cancelled() {
+            result.cancelled = true;
+            result.duration_secs = start_time.elapsed().as_secs_f64();
+            self.index.save()?;
+            self.fts_index.commit()?;
+            return Ok(result);
+        }
 
         // Upsert files with their embeddings.
         for (path, (md, chunks)) in &parsed_files {
@@ -592,6 +652,7 @@ impl MarkdownVdb {
         }
 
         // Remove files that no longer exist on disk (only for full discovery, not single file).
+        emit(&IngestPhase::Cleaning);
         let mut removed_paths: Vec<String> = Vec::new();
         if options.file.is_none() {
             for path_str in &existing_paths {
@@ -649,12 +710,13 @@ impl MarkdownVdb {
         }
 
         // Save vector index first (atomic write-rename), then commit FTS.
-        // If vector save fails, FTS stays uncommitted — consistent on next ingest.
+        emit(&IngestPhase::Saving);
         self.index.save()?;
         self.fts_index.commit()?;
 
         // Run clustering if enabled.
         if self.config.clustering_enabled {
+            emit(&IngestPhase::Clustering);
             let clusterer = clustering::Clusterer::new(&self.config);
             let doc_vectors = self.index.get_document_vectors();
             let doc_contents = self.index.get_document_contents();
@@ -699,12 +761,17 @@ impl MarkdownVdb {
             }
         }
 
+        result.duration_secs = start_time.elapsed().as_secs_f64();
+
+        emit(&IngestPhase::Done);
+
         info!(
             files_indexed = result.files_indexed,
             files_skipped = result.files_skipped,
             files_removed = result.files_removed,
             chunks_created = result.chunks_created,
             api_calls = result.api_calls,
+            duration_secs = result.duration_secs,
             "ingestion complete"
         );
 
