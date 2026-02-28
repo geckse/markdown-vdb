@@ -35,6 +35,8 @@ fn mock_config() -> Config {
         search_default_mode: mdvdb::SearchMode::Hybrid,
         search_rrf_k: 60.0,
         bm25_norm_k: 1.5,
+        search_decay_enabled: false,
+        search_decay_half_life: 90.0,
     }
 }
 
@@ -757,4 +759,89 @@ async fn test_multiple_reindex_cycles() {
         let results = vdb.search(query).await.unwrap();
         assert!(!results.is_empty(), "cycle {cycle}: search should return results");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Time Decay API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_search_with_decay_enabled() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("test document").with_decay(true);
+    let results = vdb.search(query).await.unwrap();
+
+    // Decay should not break search.
+    assert!(!results.is_empty(), "search with decay should return results");
+    for r in &results {
+        assert!(r.score >= 0.0, "score should be non-negative");
+        assert!(r.score <= 1.0, "score should be <= 1");
+        assert!(r.file.modified_at.is_some(), "modified_at should be populated");
+    }
+}
+
+#[tokio::test]
+async fn test_search_with_decay_disabled() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("test document").with_decay(false);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty());
+    for r in &results {
+        assert!(r.file.modified_at.is_some(), "modified_at should still be populated");
+    }
+}
+
+#[tokio::test]
+async fn test_get_document_includes_modified_at() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let doc = vdb.get_document("hello.md").unwrap();
+    assert!(doc.modified_at.is_some(), "modified_at should be populated after ingest");
+    assert!(doc.modified_at.unwrap() > 0, "modified_at should be non-zero");
+}
+
+#[tokio::test]
+async fn test_search_decay_with_custom_half_life() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("test document")
+        .with_decay(true)
+        .with_decay_half_life(7.0);
+    let results = vdb.search(query).await.unwrap();
+
+    assert!(!results.is_empty());
+    for r in &results {
+        assert!(r.score >= 0.0);
+    }
+}
+
+#[tokio::test]
+async fn test_decay_config_enabled_via_config() {
+    let (_dir, root_dir) = {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+        fs::write(root.join(".markdownvdb").join(".config"), "").unwrap();
+        fs::write(root.join("doc.md"), "# Doc\n\nContent.\n").unwrap();
+        (dir, root)
+    };
+
+    let mut config = mock_config();
+    config.search_decay_enabled = true;
+    config.search_decay_half_life = 30.0;
+
+    let vdb = MarkdownVdb::open_with_config(root_dir, config).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Without per-query override, should use config's decay.
+    let query = SearchQuery::new("doc");
+    let results = vdb.search(query).await.unwrap();
+    assert!(!results.is_empty());
 }

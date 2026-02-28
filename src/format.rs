@@ -426,6 +426,13 @@ pub fn print_document(doc: &DocumentInfo) {
         "Indexed at:".cyan(),
         format_timestamp(unix_to_system_time(doc.indexed_at))
     );
+    if let Some(mtime) = doc.modified_at {
+        println!(
+            "  {} {}",
+            "Modified at:".cyan(),
+            format_timestamp(unix_to_system_time(mtime))
+        );
+    }
     println!(
         "  {}     {}",
         "Hash:".cyan(),

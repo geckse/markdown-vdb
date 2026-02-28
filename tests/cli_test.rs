@@ -1329,3 +1329,172 @@ fn test_cli_completions() {
         "completions output should contain completion-related keywords"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Time Decay CLI tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_search_help_shows_decay_flags() {
+    let output = mdvdb_bin()
+        .args(["search", "--help"])
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for flag in ["--decay", "--no-decay", "--decay-half-life"] {
+        assert!(
+            stdout.contains(flag),
+            "search --help should mention '{flag}'"
+        );
+    }
+}
+
+#[test]
+fn test_search_decay_flag_accepted() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "test", "--decay", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --decay should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_search_no_decay_flag_accepted() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "test", "--no-decay", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --no-decay should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_search_decay_half_life_flag_accepted() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "test", "--decay", "--decay-half-life", "30", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --decay-half-life should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_search_decay_and_no_decay_conflict() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "test", "--decay", "--no-decay"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        !output.status.success(),
+        "--decay and --no-decay should conflict"
+    );
+}
+
+#[test]
+fn test_search_json_includes_modified_at() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    let results = json["results"].as_array().expect("should have results array");
+    assert!(!results.is_empty(), "should have search results");
+    // Check that modified_at is present in the file metadata.
+    for result in results {
+        assert!(
+            result["file"]["modified_at"].is_number(),
+            "modified_at should be a number in JSON output, got: {}",
+            result["file"]
+        );
+    }
+}
+
+#[test]
+fn test_get_json_includes_modified_at() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["get", "rust.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "get --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    assert!(
+        json["modified_at"].is_number(),
+        "modified_at should be present in get --json output, got: {}",
+        json
+    );
+}
+
+#[test]
+fn test_completions_include_decay_flags() {
+    // Bash completions
+    let output = mdvdb_bin()
+        .args(["completions", "bash"])
+        .output()
+        .expect("failed to execute mdvdb");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--decay"), "bash completions should include --decay");
+    assert!(stdout.contains("--no-decay"), "bash completions should include --no-decay");
+    assert!(stdout.contains("--decay-half-life"), "bash completions should include --decay-half-life");
+
+    // Zsh completions
+    let output = mdvdb_bin()
+        .args(["completions", "zsh"])
+        .output()
+        .expect("failed to execute mdvdb");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--decay"), "zsh completions should include --decay");
+
+    // Fish completions
+    let output = mdvdb_bin()
+        .args(["completions", "fish"])
+        .output()
+        .expect("failed to execute mdvdb");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("decay"), "fish completions should include decay");
+}

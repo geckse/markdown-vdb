@@ -317,6 +317,7 @@ mod tests {
             content_hash: String::new(),
             file_size: 0,
             links,
+            modified_at: 0,
         }
     }
 

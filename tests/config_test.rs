@@ -28,6 +28,8 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_SEARCH_MODE",
     "MDVDB_SEARCH_RRF_K",
     "MDVDB_BM25_NORM_K",
+    "MDVDB_SEARCH_DECAY",
+    "MDVDB_SEARCH_DECAY_HALF_LIFE",
     "MDVDB_CONFIG_HOME",
     "MDVDB_NO_USER_CONFIG",
 ];
@@ -66,6 +68,8 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.search_default_mode, mdvdb::SearchMode::Hybrid);
     assert_eq!(config.search_rrf_k, 60.0);
     assert_eq!(config.bm25_norm_k, 1.5);
+    assert!(!config.search_decay_enabled, "decay should be disabled by default");
+    assert_eq!(config.search_decay_half_life, 90.0, "default half-life should be 90 days");
 }
 
 #[test]
@@ -621,6 +625,77 @@ fn full_four_level_cascade() {
     assert_eq!(config.embedding_dimensions, 512, "project config should win over .env and user");
     // .env wins for model (over user config).
     assert_eq!(config.embedding_model, "dotenv-model", ".env should win over user config");
+
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// Time decay config tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn decay_env_vars_override_defaults() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    std::env::set_var("MDVDB_SEARCH_DECAY", "true");
+    std::env::set_var("MDVDB_SEARCH_DECAY_HALF_LIFE", "30.0");
+
+    let config = Config::load(tmp.path()).unwrap();
+
+    assert!(config.search_decay_enabled, "decay should be enabled via env");
+    assert_eq!(config.search_decay_half_life, 30.0, "half-life should be 30 from env");
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn decay_half_life_zero_rejected() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    std::env::set_var("MDVDB_SEARCH_DECAY_HALF_LIFE", "0");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "half-life of 0 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("half_life"), "error should mention half_life: {}", err_msg);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn decay_half_life_negative_rejected() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    std::env::set_var("MDVDB_SEARCH_DECAY_HALF_LIFE", "-10");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "negative half-life should be rejected");
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn decay_in_dotenv_file() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    let dotenv_path = tmp.path().join(".markdownvdb");
+    fs::write(
+        &dotenv_path,
+        "MDVDB_SEARCH_DECAY=true\nMDVDB_SEARCH_DECAY_HALF_LIFE=45.5\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path()).unwrap();
+
+    assert!(config.search_decay_enabled);
+    assert_eq!(config.search_decay_half_life, 45.5);
 
     clear_env();
 }

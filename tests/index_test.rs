@@ -26,6 +26,10 @@ fn test_embedding_config() -> EmbeddingConfig {
 }
 
 fn fake_markdown_file(path: &str, hash: &str) -> MarkdownFile {
+    fake_markdown_file_with_mtime(path, hash, 0)
+}
+
+fn fake_markdown_file_with_mtime(path: &str, hash: &str, modified_at: u64) -> MarkdownFile {
     MarkdownFile {
         path: PathBuf::from(path),
         frontmatter: Some(serde_json::json!({"title": "Test"})),
@@ -34,6 +38,7 @@ fn fake_markdown_file(path: &str, hash: &str) -> MarkdownFile {
         content_hash: hash.to_string(),
         file_size: 100,
         links: Vec::new(),
+        modified_at,
     }
 }
 
@@ -493,4 +498,97 @@ fn test_hnsw_key_compaction_on_save() {
     let query = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let results = reopened.search(&query, 7).unwrap();
     assert_eq!(results.len(), 7, "search should find all chunks after key compaction");
+}
+
+// ---------------------------------------------------------------------------
+// File mtime storage tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mtime_stored_on_upsert() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    let file = fake_markdown_file_with_mtime("doc.md", "hash1", 1_700_000_000);
+    let chunks = fake_chunks("doc.md", 1);
+    let embs = fake_embeddings(1, 8);
+    index.upsert(&file, &chunks, &embs).unwrap();
+
+    assert_eq!(index.get_file_mtime("doc.md"), Some(1_700_000_000));
+}
+
+#[test]
+fn test_mtime_returns_none_for_missing_file() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    assert_eq!(index.get_file_mtime("nonexistent.md"), None);
+}
+
+#[test]
+fn test_mtime_updated_on_re_upsert() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    let file1 = fake_markdown_file_with_mtime("doc.md", "hash1", 1_700_000_000);
+    let chunks = fake_chunks("doc.md", 1);
+    let embs = fake_embeddings(1, 8);
+    index.upsert(&file1, &chunks, &embs).unwrap();
+
+    // Update with new mtime.
+    let file2 = fake_markdown_file_with_mtime("doc.md", "hash2", 1_700_100_000);
+    index.upsert(&file2, &chunks, &embs).unwrap();
+
+    assert_eq!(index.get_file_mtime("doc.md"), Some(1_700_100_000));
+}
+
+#[test]
+fn test_mtime_removed_on_file_removal() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    let file = fake_markdown_file_with_mtime("doc.md", "hash1", 1_700_000_000);
+    let chunks = fake_chunks("doc.md", 1);
+    let embs = fake_embeddings(1, 8);
+    index.upsert(&file, &chunks, &embs).unwrap();
+
+    assert!(index.get_file_mtime("doc.md").is_some());
+
+    let _ = index.remove_file("doc.md");
+
+    assert_eq!(index.get_file_mtime("doc.md"), None);
+}
+
+#[test]
+fn test_mtime_persists_across_save_reopen() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    let file = fake_markdown_file_with_mtime("doc.md", "hash1", 1_700_000_000);
+    let chunks = fake_chunks("doc.md", 1);
+    let embs = fake_embeddings(1, 8);
+    index.upsert(&file, &chunks, &embs).unwrap();
+    index.save().unwrap();
+
+    let reopened = Index::open(&path).unwrap();
+    assert_eq!(reopened.get_file_mtime("doc.md"), Some(1_700_000_000));
+}
+
+#[test]
+fn test_get_file_mtimes_returns_all() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    let f1 = fake_markdown_file_with_mtime("a.md", "h1", 100);
+    let f2 = fake_markdown_file_with_mtime("b.md", "h2", 200);
+    let chunks1 = fake_chunks("a.md", 1);
+    let chunks2 = fake_chunks("b.md", 1);
+    let embs = fake_embeddings(1, 8);
+    index.upsert(&f1, &chunks1, &embs).unwrap();
+    index.upsert(&f2, &chunks2, &embs).unwrap();
+
+    let mtimes = index.get_file_mtimes();
+    assert_eq!(mtimes.len(), 2);
+    assert_eq!(mtimes.get("a.md"), Some(&100));
+    assert_eq!(mtimes.get("b.md"), Some(&200));
 }

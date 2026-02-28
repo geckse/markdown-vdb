@@ -2,7 +2,7 @@
 
 A filesystem-native vector database built around Markdown files. Rust, zero infrastructure, optimized for AI agents.
 
-All 10 implementation phases are complete and passing (306 tests, clippy clean).
+All 18 implementation phases are complete and passing (567 tests, clippy clean).
 
 ## Architecture
 
@@ -39,13 +39,17 @@ All 10 implementation phases are complete and passing (306 tests, clippy clean).
 src/
 ├── main.rs              # CLI entry point (clap + anyhow)
 ├── lib.rs               # Public library API (MarkdownVdb)
-├── config.rs            # Config loading: shell env → .markdownvdb → defaults
+├── config.rs            # Config loading: shell env → project → .env → user → defaults
+├── format.rs            # Human-readable output formatting (colors, bars, timestamps)
 ├── error.rs             # Error enum (thiserror)
 ├── logging.rs           # Tracing subscriber setup
 ├── discovery.rs         # File scanning with ignore patterns
 ├── parser.rs            # Markdown parsing: frontmatter, headings, body
 ├── chunker.rs           # Heading-based chunking + token size guard
-├── search.rs            # Query pipeline, metadata filtering, results
+├── search.rs            # Query pipeline, metadata filtering, time decay, results
+├── fts.rs               # Full-text search (Tantivy BM25 wrapper)
+├── links.rs             # Link graph extraction, backlinks, orphan detection
+├── tree.rs              # File tree with sync status indicators
 ├── schema.rs            # Auto-infer + overlay schema system
 ├── clustering.rs        # K-means, nearest-centroid, rebalancing, TF-IDF labels
 ├── watcher.rs           # Filesystem watcher (notify + debouncer)
@@ -64,26 +68,28 @@ src/
     └── state.rs         # Runtime operations with RwLock concurrency
 
 tests/
-├── api_test.rs          # Library API integration tests (9 tests)
-├── cli_test.rs          # CLI binary integration tests (14 tests)
+├── api_test.rs          # Library API integration tests
+├── cli_test.rs          # CLI binary integration tests
 ├── chunker_test.rs      # Chunking pipeline tests
 ├── clustering_test.rs   # K-means clustering tests
 ├── config_test.rs       # Configuration loading tests
 ├── discovery_test.rs    # File discovery tests
 ├── embedding_test.rs    # Embedding provider tests
-├── index_test.rs        # Index storage tests
+├── index_test.rs        # Index storage + mtime tests
 ├── ingest_test.rs       # Ingestion pipeline tests
+├── links_test.rs        # Link graph + backlinks tests
 ├── parser_test.rs       # Markdown parsing tests
 ├── schema_test.rs       # Schema inference tests
-├── search_test.rs       # Search engine tests
+├── search_test.rs       # Search engine + time decay tests
+├── tree_test.rs         # File tree tests
 └── watcher_test.rs      # File watcher tests
 
-docs/prds/               # PRD specifications for all 10 phases (reference)
+docs/prds/               # PRD specifications for all 18 phases (reference)
 ```
 
 ## Core Design Decisions
 
-- **Config:** Dotenv-style `.markdownvdb` file, NOT TOML/YAML. Resolution: shell env > file > defaults
+- **Config:** Dotenv-style files, NOT TOML/YAML. Resolution: shell env > `.markdownvdb/.config` > `.markdownvdb` (legacy) > `.env` > `~/.mdvdb/config` (user) > defaults
 - **Index directory:** `.markdownvdb/` contains `index` (binary: `[64B header][rkyv metadata][usearch HNSW]`) + `fts/` (Tantivy BM25 segments). Configured via `MDVDB_INDEX_DIR`.
 - **Paths:** ALL file paths in the index are relative to project root. Never absolute.
 - **Errors:** `thiserror` for typed library errors, `anyhow` only at CLI boundary in `main.rs`
@@ -129,21 +135,26 @@ MarkdownVdb::open_with_config(root, cfg)   // Open with explicit config
 MarkdownVdb::init(path)                    // Create .markdownvdb config file
 
 vdb.ingest(options)     // Index markdown files (full or incremental)
-vdb.search(query)       // Semantic search with filters
+vdb.search(query)       // Search with filters, decay, mode selection
+vdb.preview(reindex, file) // Dry-run: what would ingest do
 vdb.status()            // Index stats (doc/chunk/vector counts)
 vdb.schema()            // Inferred metadata schema
 vdb.clusters()          // Document clusters with labels
-vdb.get_document(path)  // Single document info + frontmatter
+vdb.file_tree()         // File tree with sync status
+vdb.get_document(path)  // Single document info + frontmatter + modified_at
+vdb.links(path)         // Outgoing + incoming links for a file
+vdb.orphans()           // Files with no links
+vdb.doctor()            // Diagnostic checks
 vdb.watch(cancel)       // File watcher with CancellationToken
 vdb.config()            // Access current config
 ```
 
-Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`.
+Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`.
 
 ## Development Workflow
 
 ```bash
-cargo test               # Run all 306 tests
+cargo test               # Run all 567 tests
 cargo clippy --all-targets  # Lint (must be clean)
 cargo build --release    # Release build
 cargo run -- ingest      # Test ingest locally
@@ -156,11 +167,13 @@ cargo run -- search "query" --json  # Test search
 |---|---|---|
 | Runtime | `tokio` | Async I/O for embeddings, file watching |
 | CLI | `clap` | Derive-based subcommands, completions |
-| Markdown | `pulldown-cmark` | Streaming heading-aware parsing |
+| CLI output | `colored` + `indicatif` | Colored terminal output, progress spinners |
+| Markdown | `pulldown-cmark` | Streaming heading-aware parsing + link extraction |
 | Frontmatter | `serde_yaml` | Dynamic YAML → JSON metadata |
 | Tokenizer | `tiktoken-rs` | Accurate token counting for chunks |
 | Embeddings | `reqwest` | HTTP client for OpenAI/Ollama APIs |
 | Vectors | `usearch` | Sub-ms HNSW nearest neighbor search |
+| Full-text search | `tantivy` | BM25 lexical search engine |
 | Serialization | `rkyv` | Zero-copy deserialization from mmap |
 | Memory mapping | `memmap2` | On-demand index loading via OS page cache |
 | File watching | `notify` + `notify-debouncer-full` | Cross-platform FS events + debouncing |
@@ -176,7 +189,7 @@ cargo run -- search "query" --json  # Test search
 
 ## PRD Reference
 
-Full specifications for all 10 phases live in `docs/prds/`. These document the design intent and acceptance criteria for each subsystem.
+Full specifications for all 18 phases live in `docs/prds/`. These document the design intent and acceptance criteria for each subsystem.
 
 | Phase | PRD | Summary |
 |---|---|---|
@@ -190,3 +203,11 @@ Full specifications for all 10 phases live in `docs/prds/`. These document the d
 | 8 | `phase-8-file-watching.md` | FS watcher, debounce, incremental re-index, ingest pipeline |
 | 9 | `phase-9-clustering.md` | K-means, nearest-centroid, rebalance, keyword labels |
 | 10 | `phase-10-cli-library.md` | CLI subcommands, JSON output, MarkdownVdb library API |
+| 11 | `phase-11-environment-vars-and-config.md` | `.env` fallback config, priority chain |
+| 12 | `phase-12-cli-great.md` | CLI polish: colors, score bars, spinners, humanized output |
+| 13 | `phase-13-file-tree-path-scoped-search.md` | `mdvdb tree` command, `--path` scoped search |
+| 14 | `phase-14-hybrid-search.md` | BM25 lexical search (Tantivy), RRF fusion, hybrid/semantic/lexical modes |
+| 15 | `phase-15-link-graph.md` | Link extraction, backlinks, orphans, link-aware search boost |
+| 16 | `phase-16-settings-in-user-location.md` | User-level config at `~/.mdvdb/config` |
+| 17 | `phase-17-interactive-ingest-progress.md` | Rich progress display, `--preview`, `--reindex`, Ctrl+C cancellation |
+| 18 | `phase-18-time-decay.md` | Optional time-based decay for search scores (exponential half-life) |

@@ -12,6 +12,19 @@ Zero infrastructure — no servers, no containers, everything lives on disk.
 
 Designed for AI agents that need fast semantic search over local knowledge bases.
 
+## Built For
+
+| Use Case | What mdvdb gives you | Workflow |
+|---|---|---|
+| **Knowledge Bases** | Semantic search across docs, wikis, and runbooks. Section-level results link straight to the relevant heading — not just the file. Frontmatter filters let you scope queries by tag, status, or any custom field. | `mdvdb ingest` → `mdvdb search "deploy" --filter status=published` |
+| **Agent Memory** | Two-layer memory model: daily logs (append-only) + curated topic files, connected by wikilinks and standard links. Frontmatter fields (`type`, `tags`, `status`, `confidence`, `source`) make memories filterable. Link graph lets agents traverse context chains via `links` / `backlinks`, and `orphans` surfaces disconnected notes. `--boost-links` re-ranks results using the agent's own cross-references. `--decay` applies exponential recency weighting — old logs fade naturally while actively maintained notes stay prominent, no manual archiving needed. Single-file ingest (`--file`) for near-instant indexing after writes. See the full [Agent Memory Graph guide](docs/guides/agent-memory-graph.md). | `mdvdb ingest` → `mdvdb search "auth" --decay --boost-links --filter type=topic` → `mdvdb links topics/auth.md` → `mdvdb orphans` |
+| **Documentation Sites** | Index your docs repo and expose search via the library API. Auto-clustering surfaces topic groups without manual tagging. File watching keeps the index current as writers push changes. | `mdvdb watch` → `mdvdb clusters --json` → `mdvdb search "getting started"` |
+| **Personal Zettelkasten** | Search your slip-box by meaning instead of exact keywords. Works with Obsidian vaults, Logseq graphs, or plain folders — anything that's `.md` files on disk. Non-destructive: never touches your notes. | `mdvdb ingest` → `mdvdb search "emergence in complex systems"` → `mdvdb links slip/note.md` |
+| **RAG Pipelines** | Drop-in retrieval layer for retrieval-augmented generation. JSON output (`--json`) pipes directly into your LLM toolchain. Pluggable embeddings let you match the same model your generator uses. | `mdvdb ingest` → `mdvdb search "context" --json \| jq` |
+| **Research & Literature Notes** | Filter by frontmatter fields like `author`, `year`, or `topic` while searching semantically. Clusters reveal thematic groupings across hundreds of papers or reading notes without manual curation. | `mdvdb ingest` → `mdvdb search "attention mechanism" --filter year=2024` → `mdvdb clusters` |
+
+**Guides:** [Agent Memory](docs/guides/agent-memory.md) · [Agent Memory Graph](docs/guides/agent-memory-graph.md)
+
 ## Features
 
 - **Markdown-first** — `.md` files are the source of truth
@@ -48,7 +61,14 @@ mdvdb watch
 
 ## Installation
 
-> Coming soon — project is under active development.
+```bash
+# Build from source
+git clone https://github.com/gecko/markdown-vdb.git
+cd markdown-vdb
+cargo install --path .
+```
+
+Requires Rust 1.70+.
 
 ## Configuration
 
@@ -115,10 +135,22 @@ for result in results {
 5. **Index** — store in a single memory-mapped file (usearch HNSW + rkyv metadata)
 6. **Search** — embed query → nearest neighbors → metadata filter → ranked results
 
+## Architecture
+
+```
+Markdown files → Discovery → Parsing → Chunking → Embedding → Index
+                                                                 ↓
+                                        Query → Embed → HNSW search → Filter → Results
+```
+
+**Index format:** single binary file — `[64B header][rkyv metadata][usearch HNSW]` — memory-mapped for instant loads.
+
+**Key dependencies:** `usearch` (HNSW vectors), `rkyv` (zero-copy serde), `memmap2` (memory mapping), `tiktoken-rs` (tokenization), `pulldown-cmark` (markdown parsing), `linfa` (clustering).
+
 ## Project Status
 
-🚧 **Under development** — 
+All core subsystems implemented and tested. Active development continues on advanced features (link graph analysis, full-text search hybrid mode, interactive progress display).
 
 ## License
 
-TBD
+MIT

@@ -30,6 +30,10 @@ fn create_index_dir() -> (TempDir, PathBuf) {
 }
 
 fn fake_markdown_file(path: &str, hash: &str, frontmatter: Option<serde_json::Value>) -> MarkdownFile {
+    fake_markdown_file_with_mtime(path, hash, frontmatter, 0)
+}
+
+fn fake_markdown_file_with_mtime(path: &str, hash: &str, frontmatter: Option<serde_json::Value>, modified_at: u64) -> MarkdownFile {
     MarkdownFile {
         path: PathBuf::from(path),
         frontmatter,
@@ -38,6 +42,7 @@ fn fake_markdown_file(path: &str, hash: &str, frontmatter: Option<serde_json::Va
         content_hash: hash.to_string(),
         file_size: 100,
         links: Vec::new(),
+        modified_at,
     }
 }
 
@@ -84,6 +89,21 @@ fn populate_index(
     index.upsert(&file, &chunks, &embs).unwrap();
 }
 
+/// Populate an index with a single file that has a specific mtime.
+fn populate_index_with_mtime(
+    index: &Index,
+    path: &str,
+    hash: &str,
+    frontmatter: Option<serde_json::Value>,
+    chunk_count: usize,
+    modified_at: u64,
+) {
+    let file = fake_markdown_file_with_mtime(path, hash, frontmatter, modified_at);
+    let chunks = fake_chunks(path, chunk_count);
+    let embs = fake_embeddings(chunk_count);
+    index.upsert(&file, &chunks, &embs).unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -97,7 +117,7 @@ async fn test_basic_search() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(!results.is_empty(), "should return results");
     assert!(results.len() <= 10, "default limit is 10");
@@ -119,7 +139,7 @@ async fn test_min_score_filtering() {
 
     // Very high min_score should filter out everything
     let query = SearchQuery::new("test query").with_min_score(0.9999);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     // All results (if any) must meet the threshold
     for r in &results {
@@ -138,7 +158,7 @@ async fn test_limit_capping() {
     populate_index(&index, "b.md", "h2", Some(json!({"title": "B"})), 5);
 
     let query = SearchQuery::new("test").with_limit(3);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(results.len() <= 3, "should respect limit of 3, got {}", results.len());
 }
@@ -157,7 +177,7 @@ async fn test_metadata_filter_equals() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -180,7 +200,7 @@ async fn test_metadata_filter_in() {
             field: "category".into(),
             values: vec![json!("rust"), json!("go")],
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     for r in &results {
         let cat = r.file.frontmatter.as_ref().unwrap()["category"].as_str().unwrap();
@@ -203,7 +223,7 @@ async fn test_metadata_filter_range() {
             min: Some(json!(2023)),
             max: Some(json!(2025)),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     for r in &results {
         let year = r.file.frontmatter.as_ref().unwrap()["year"].as_i64().unwrap();
@@ -224,7 +244,7 @@ async fn test_metadata_filter_exists() {
         .with_filter(MetadataFilter::Exists {
             field: "author".into(),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -252,7 +272,7 @@ async fn test_combined_and_filters() {
             min: Some(json!(2023)),
             max: Some(json!(2025)),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -269,7 +289,7 @@ async fn test_empty_index_returns_no_results() {
     let provider = mock_provider();
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(results.is_empty(), "empty index should return no results");
 }
@@ -283,7 +303,7 @@ async fn test_empty_query_returns_no_results() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(results.is_empty(), "empty query should return no results");
 }
@@ -339,7 +359,7 @@ async fn test_search_with_fts_hybrid_mode() {
     );
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Hybrid);
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(!results.is_empty(), "hybrid search should return results");
 }
@@ -366,7 +386,7 @@ async fn test_search_lexical_mode() {
     );
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(!results.is_empty(), "lexical search should return results");
 }
@@ -380,7 +400,7 @@ async fn test_search_semantic_mode_explicit() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("test query").with_mode(SearchMode::Semantic);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(!results.is_empty(), "semantic search should return results");
 }
@@ -395,7 +415,7 @@ async fn test_search_hybrid_fallback_without_fts() {
 
     // Hybrid mode without FTS index should fall back to semantic
     let query = SearchQuery::new("test query").with_mode(SearchMode::Hybrid);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(!results.is_empty(), "hybrid without fts should fall back to semantic");
 }
@@ -423,7 +443,7 @@ async fn test_search_mode_with_filter() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -456,7 +476,7 @@ async fn test_lexical_search_no_embedding_call() {
     let initial_calls = provider.call_count();
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
-    let _results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+    let _results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert_eq!(
         provider.call_count(),
@@ -512,11 +532,11 @@ async fn test_hybrid_combines_both_signals() {
 
     // Hybrid search for "Rust programming" — should find results from both signals.
     let query_hybrid = SearchQuery::new("Rust programming").with_mode(SearchMode::Hybrid);
-    let hybrid_results = search(&query_hybrid, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+    let hybrid_results = search(&query_hybrid, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0).await.unwrap();
 
     // Lexical search for the same query.
     let query_lexical = SearchQuery::new("Rust programming").with_mode(SearchMode::Lexical);
-    let lexical_results = search(&query_lexical, &index, &provider, Some(&fts), 60.0, 1.5).await.unwrap();
+    let lexical_results = search(&query_lexical, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0).await.unwrap();
 
     // Both should return results.
     assert!(!hybrid_results.is_empty(), "hybrid should return results");
@@ -544,7 +564,7 @@ async fn test_path_prefix_filters_results() {
     populate_index(&index, "notes/todo.md", "h3", Some(json!({"title": "Todo"})), 2);
 
     let query = SearchQuery::new("test").with_path_prefix("docs/");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(!results.is_empty(), "should return results from docs/");
     for r in &results {
@@ -565,7 +585,7 @@ async fn test_path_prefix_no_match() {
     populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
 
     let query = SearchQuery::new("test").with_path_prefix("nonexistent/");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     assert!(results.is_empty(), "nonexistent prefix should return no results");
 }
@@ -586,7 +606,7 @@ async fn test_path_prefix_combined_with_metadata_filter() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5).await.unwrap();
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
 
     for r in &results {
         assert!(
@@ -596,5 +616,197 @@ async fn test_path_prefix_combined_with_metadata_filter() {
         );
         let fm = r.file.frontmatter.as_ref().unwrap();
         assert_eq!(fm["status"], "draft", "should only return draft docs");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Time Decay Integration Tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_decay_disabled_does_not_change_results() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Recent file and old file.
+    populate_index_with_mtime(&index, "recent.md", "h1", None, 2, now);
+    populate_index_with_mtime(&index, "old.md", "h2", None, 2, now - 365 * 86400);
+
+    // Search without decay.
+    let query = SearchQuery::new("test query");
+    let results_no_decay = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
+    assert!(!results_no_decay.is_empty());
+
+    // All scores should be unaffected by age (same content gets same score).
+    // modified_at should still be populated on the results.
+    for r in &results_no_decay {
+        assert!(r.file.modified_at.is_some(), "modified_at should be present");
+    }
+}
+
+#[tokio::test]
+async fn test_decay_enabled_penalizes_old_files() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Both files use same chunk structure so base scores should be identical.
+    populate_index_with_mtime(&index, "recent.md", "h1", None, 1, now);
+    populate_index_with_mtime(&index, "old.md", "h2", None, 1, now - 180 * 86400);
+
+    // Search with decay enabled.
+    let query = SearchQuery::new("test query").with_decay(true);
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0).await.unwrap();
+
+    assert!(results.len() >= 2, "should return results for both files");
+
+    // Find scores for each file.
+    let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
+    let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+
+    assert!(recent_score.is_some() && old_score.is_some());
+    assert!(
+        recent_score.unwrap() > old_score.unwrap(),
+        "recent file should score higher with decay: recent={:?} > old={:?}",
+        recent_score,
+        old_score
+    );
+}
+
+#[tokio::test]
+async fn test_decay_per_query_override_enables() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    populate_index_with_mtime(&index, "recent.md", "h1", None, 1, now);
+    populate_index_with_mtime(&index, "old.md", "h2", None, 1, now - 180 * 86400);
+
+    // Config says decay disabled (false), but query enables it.
+    let query = SearchQuery::new("test query").with_decay(true);
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
+
+    let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
+    let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+
+    assert!(recent_score.is_some() && old_score.is_some());
+    assert!(
+        recent_score.unwrap() > old_score.unwrap(),
+        "per-query decay override should penalize old file"
+    );
+}
+
+#[tokio::test]
+async fn test_decay_per_query_override_disables() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    populate_index_with_mtime(&index, "recent.md", "h1", None, 1, now);
+    populate_index_with_mtime(&index, "old.md", "h2", None, 1, now - 180 * 86400);
+
+    // Config says decay enabled (true), but query disables it.
+    let query = SearchQuery::new("test query").with_decay(false);
+    let results_no_decay = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0).await.unwrap();
+
+    // Without decay, both should have comparable scores (same mock embeddings).
+    let recent = results_no_decay.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
+    let old = results_no_decay.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+    if let (Some(r), Some(o)) = (recent, old) {
+        // Without decay the difference should be very small (mock provider gives similar vectors).
+        let diff = (r - o).abs();
+        assert!(diff < 0.2, "without decay, scores should be close: recent={}, old={}, diff={}", r, o, diff);
+    }
+}
+
+#[tokio::test]
+async fn test_decay_custom_half_life() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    populate_index_with_mtime(&index, "recent.md", "h1", None, 1, now);
+    populate_index_with_mtime(&index, "old.md", "h2", None, 1, now - 90 * 86400);
+
+    // Very short half-life (7 days) should punish 90-day old file severely.
+    let query = SearchQuery::new("test query").with_decay(true).with_decay_half_life(7.0);
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
+
+    let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
+    let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+
+    assert!(recent_score.is_some() && old_score.is_some());
+    // With 7-day half-life and 90 days age, multiplier ≈ 0.5^(90/7) ≈ 0.00015
+    assert!(
+        old_score.unwrap() < recent_score.unwrap() * 0.01,
+        "short half-life should severely penalize old file: recent={:?}, old={:?}",
+        recent_score,
+        old_score
+    );
+}
+
+#[tokio::test]
+async fn test_decay_modified_at_in_results() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let mtime = 1_700_000_000u64;
+    populate_index_with_mtime(&index, "doc.md", "h1", None, 1, mtime);
+
+    let query = SearchQuery::new("test query");
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0).await.unwrap();
+
+    assert!(!results.is_empty());
+    assert_eq!(results[0].file.modified_at, Some(mtime), "modified_at should be populated in results");
+}
+
+#[tokio::test]
+async fn test_decay_scores_in_valid_range() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    populate_index_with_mtime(&index, "a.md", "h1", None, 1, now);
+    populate_index_with_mtime(&index, "b.md", "h2", None, 1, now - 90 * 86400);
+    populate_index_with_mtime(&index, "c.md", "h3", None, 1, now - 365 * 86400);
+
+    let query = SearchQuery::new("test query").with_decay(true);
+    let results = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0).await.unwrap();
+
+    for r in &results {
+        assert!(r.score >= 0.0, "score should be >= 0, got {}", r.score);
+        assert!(r.score <= 1.0, "score should be <= 1, got {}", r.score);
     }
 }

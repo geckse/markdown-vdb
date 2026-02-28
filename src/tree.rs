@@ -328,6 +328,8 @@ mod tests {
             search_default_mode: crate::search::SearchMode::Hybrid,
             search_rrf_k: 60.0,
             bm25_norm_k: 1.5,
+            search_decay_enabled: false,
+            search_decay_half_life: 90.0,
         }
     }
 

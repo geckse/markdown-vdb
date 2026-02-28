@@ -77,6 +77,9 @@ pub struct IndexMetadata {
     pub cluster_state: Option<ClusterState>,
     /// Link graph from link extraction, if available.
     pub link_graph: Option<LinkGraph>,
+    /// File modification timestamps (path → mtime as Unix seconds).
+    /// `None` for indices created before Phase 18.
+    pub file_mtimes: Option<HashMap<String, u64>>,
 }
 
 /// Status snapshot returned by `Index::status()`.
@@ -171,6 +174,7 @@ mod tests {
             content_hash: "abc123".to_string(),
             file_size: 1024,
             links: Vec::new(),
+            modified_at: 1700000000,
         };
 
         let stored = StoredFile::from(&file);
@@ -194,6 +198,7 @@ mod tests {
             content_hash: "def456".to_string(),
             file_size: 0,
             links: Vec::new(),
+            modified_at: 0,
         };
 
         let stored = StoredFile::from(&file);

@@ -78,6 +78,7 @@ impl Index {
             schema: None,
             cluster_state: None,
             link_graph: None,
+            file_mtimes: Some(HashMap::new()),
         };
 
         let hnsw = storage::create_hnsw(config.dimensions)?;
@@ -160,6 +161,11 @@ impl Index {
             stored_file.chunk_ids.push(chunk.id.clone());
         }
 
+        // Store file modification time in the mtime map.
+        state.metadata.file_mtimes
+            .get_or_insert_with(HashMap::new)
+            .insert(relative_path.clone(), file.modified_at);
+
         state.metadata.files.insert(relative_path, stored_file);
         state.dirty = true;
         Ok(())
@@ -183,6 +189,11 @@ impl Index {
                 let _ = state.hnsw.remove(key);
             }
             state.metadata.chunks.remove(chunk_id);
+        }
+
+        // Remove mtime entry.
+        if let Some(ref mut mtimes) = state.metadata.file_mtimes {
+            mtimes.remove(relative_path);
         }
 
         state.dirty = true;
@@ -265,6 +276,18 @@ impl Index {
     pub fn get_file_metadata(&self, path: &str) -> Option<StoredFile> {
         let state = self.state.read();
         state.metadata.files.get(path).cloned()
+    }
+
+    /// Get the filesystem modification time for a file, if available.
+    pub fn get_file_mtime(&self, path: &str) -> Option<u64> {
+        let state = self.state.read();
+        state.metadata.file_mtimes.as_ref()?.get(path).copied()
+    }
+
+    /// Get all file modification times as a cloned HashMap.
+    pub fn get_file_mtimes(&self) -> HashMap<String, u64> {
+        let state = self.state.read();
+        state.metadata.file_mtimes.clone().unwrap_or_default()
     }
 
     /// Search the HNSW index for the nearest neighbors to the query vector.

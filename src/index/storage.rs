@@ -154,6 +154,7 @@ mod tests {
             schema: None,
             cluster_state: None,
             link_graph: None,
+            file_mtimes: Some(HashMap::new()),
         }
     }
 

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -22,6 +23,8 @@ pub struct MarkdownFile {
     pub file_size: u64,
     /// Links extracted from the document body.
     pub links: Vec<RawLink>,
+    /// Filesystem modification time as Unix timestamp (seconds since epoch).
+    pub modified_at: u64,
 }
 
 /// A raw link extracted from a markdown document.
@@ -50,6 +53,14 @@ pub fn parse_markdown_file(
     let raw_bytes = std::fs::read(&full_path)?;
     let file_size = raw_bytes.len() as u64;
 
+    // Capture filesystem modification time.
+    let modified_at = std::fs::metadata(&full_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     let content = String::from_utf8(raw_bytes).map_err(|_| Error::MarkdownParse {
         path: relative_path.to_path_buf(),
         message: "file is not valid UTF-8".into(),
@@ -68,6 +79,7 @@ pub fn parse_markdown_file(
         content_hash,
         file_size,
         links,
+        modified_at,
     })
 }
 

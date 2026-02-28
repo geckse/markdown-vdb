@@ -501,6 +501,35 @@ mdvdb search "authentication" --boost-links
 
 This is powerful for agent memory because linked documents are explicitly related by the agent. If the top result is `topics/auth.md` and it links to `topics/middleware.md`, and `topics/middleware.md` also appears in the results, its score gets boosted — documents the agent explicitly connected are more likely to be relevant.
 
+### Recency Decay
+
+Agent memory accumulates over time — old notes become less relevant as the project evolves. The `--decay` flag applies an exponential time-decay multiplier based on each file's last modification time:
+
+```
+score * 0.5 ^ (days_since_modified / half_life_days)
+```
+
+A file edited today scores at full strength. A file untouched for 90 days (the default half-life) scores at 50%. Older files fade further but are never fully excluded.
+
+```bash
+# Prefer recent memory (default 90-day half-life):
+mdvdb search "deployment process" --decay
+
+# Shorter half-life for fast-moving projects:
+mdvdb search "deployment process" --decay --decay-half-life 30
+
+# Combine with link boosting and filters:
+mdvdb search "auth" --decay --boost-links --filter type=topic
+```
+
+This is especially useful for agent memory because:
+- **Daily logs** naturally decay — last week's session is more relevant than last quarter's
+- **Active topic files** that the agent keeps updating stay ranked high
+- **Superseded decisions** fade without needing manual `status: archived` updates
+- **Curated MEMORY.md** stays prominent as long as the agent keeps editing it
+
+Decay is disabled by default. Enable it globally via `MDVDB_SEARCH_DECAY=true` in `.markdownvdb`, or per-query with `--decay` / `--no-decay`.
+
 ## Practical Workflows
 
 ### Session Start: Loading Context

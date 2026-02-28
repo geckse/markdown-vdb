@@ -66,6 +66,10 @@ pub struct SearchQuery {
     pub mode: SearchMode,
     /// Optional path prefix to restrict results to a directory subtree.
     pub path_prefix: Option<String>,
+    /// Per-query override for time decay (None = use config default).
+    pub decay: Option<bool>,
+    /// Per-query override for decay half-life in days (None = use config default).
+    pub decay_half_life: Option<f64>,
 }
 
 impl SearchQuery {
@@ -79,6 +83,8 @@ impl SearchQuery {
             boost_links: false,
             mode: SearchMode::default(),
             path_prefix: None,
+            decay: None,
+            decay_half_life: None,
         }
     }
 
@@ -115,6 +121,18 @@ impl SearchQuery {
     /// Set the search mode (hybrid, semantic, or lexical).
     pub fn with_mode(mut self, mode: SearchMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    /// Enable or disable time decay for this query.
+    pub fn with_decay(mut self, decay: bool) -> Self {
+        self.decay = Some(decay);
+        self
+    }
+
+    /// Set the time decay half-life in days for this query.
+    pub fn with_decay_half_life(mut self, days: f64) -> Self {
+        self.decay_half_life = Some(days);
         self
     }
 }
@@ -180,6 +198,19 @@ pub struct SearchResultFile {
     pub file_size: u64,
     /// Path split into components (e.g., `["docs", "api", "auth.md"]`).
     pub path_components: Vec<String>,
+    /// Filesystem modification time as Unix timestamp, if available.
+    pub modified_at: Option<u64>,
+}
+
+/// Apply exponential time decay to a score based on file age.
+///
+/// Returns `score * 0.5^(elapsed_days / half_life_days)`.
+/// The multiplier is always in (0, 1], so the result is <= the input score.
+pub fn apply_time_decay(score: f64, modified_at: u64, half_life_days: f64, now: u64) -> f64 {
+    let elapsed_secs = now.saturating_sub(modified_at) as f64;
+    let elapsed_days = elapsed_secs / 86400.0;
+    let multiplier = 0.5_f64.powf(elapsed_days / half_life_days);
+    score * multiplier
 }
 
 /// Execute a search query against the index, supporting hybrid, semantic, and lexical modes.
@@ -190,6 +221,7 @@ pub struct SearchResultFile {
 /// - **Hybrid**: semantic + lexical in parallel → RRF fusion → normalize → filter → assemble → truncate
 ///
 /// When `fts_index` is `None` and mode is Hybrid or Lexical, falls back to semantic-only.
+#[allow(clippy::too_many_arguments)]
 pub async fn search(
     query: &SearchQuery,
     index: &Index,
@@ -197,6 +229,8 @@ pub async fn search(
     fts_index: Option<&FtsIndex>,
     rrf_k: f64,
     bm25_norm_k: f64,
+    decay_enabled: bool,
+    decay_half_life: f64,
 ) -> Result<Vec<SearchResult>> {
     // Validate: empty query is a no-op.
     if query.query.trim().is_empty() {
@@ -265,8 +299,23 @@ pub async fn search(
         "search returned candidates"
     );
 
+    // Resolve decay settings: per-query overrides take priority over config.
+    let should_decay = query.decay.unwrap_or(decay_enabled);
+    let effective_half_life = query.decay_half_life.unwrap_or(decay_half_life);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     // Filter, assemble results, and apply min_score.
-    let results = assemble_results(query, index, &ranked_candidates)?;
+    let results = assemble_results(
+        query,
+        index,
+        &ranked_candidates,
+        should_decay,
+        effective_half_life,
+        now,
+    )?;
 
     info!(
         query = %query.query,
@@ -304,19 +353,19 @@ fn lexical_search(
         .collect())
 }
 
-/// Assemble SearchResult objects from ranked candidates, applying filters and min_score.
+/// Assemble SearchResult objects from ranked candidates, applying decay, filters, and min_score.
 fn assemble_results(
     query: &SearchQuery,
     index: &Index,
     candidates: &[(String, f64)],
+    decay_enabled: bool,
+    decay_half_life: f64,
+    now: u64,
 ) -> Result<Vec<SearchResult>> {
+    let file_mtimes = index.get_file_mtimes();
+
     let mut results = Vec::new();
     for (chunk_id, score) in candidates {
-        // Apply min_score threshold.
-        if *score < query.min_score {
-            continue;
-        }
-
         // Look up chunk metadata.
         let Some(chunk) = index.get_chunk(chunk_id) else {
             continue;
@@ -334,6 +383,21 @@ fn assemble_results(
             continue;
         };
 
+        // Apply time decay if enabled.
+        let effective_score = if decay_enabled {
+            let modified = file_mtimes.get(&chunk.source_path)
+                .copied()
+                .unwrap_or(file.indexed_at);
+            apply_time_decay(*score, modified, decay_half_life, now)
+        } else {
+            *score
+        };
+
+        // Apply min_score threshold (on potentially decayed score).
+        if effective_score < query.min_score {
+            continue;
+        }
+
         // Parse frontmatter JSON for filter evaluation.
         let frontmatter: Option<Value> = file
             .frontmatter
@@ -345,8 +409,10 @@ fn assemble_results(
             continue;
         }
 
+        let modified_at = file_mtimes.get(&chunk.source_path).copied();
+
         results.push(SearchResult {
-            score: *score,
+            score: effective_score,
             chunk: SearchResultChunk {
                 chunk_id: chunk_id.clone(),
                 heading_hierarchy: chunk.heading_hierarchy.clone(),
@@ -359,13 +425,20 @@ fn assemble_results(
                 frontmatter,
                 file_size: file.file_size,
                 path_components: chunk.source_path.split('/').map(String::from).collect(),
+                modified_at,
             },
         });
 
-        // Stop once we have enough results.
-        if results.len() >= query.limit {
+        // Stop early if no decay (order preserved) and we have enough results.
+        if !decay_enabled && results.len() >= query.limit {
             break;
         }
+    }
+
+    // When decay is applied, scores may reorder — re-sort and truncate.
+    if decay_enabled && results.len() > 1 {
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(query.limit);
     }
 
     // Apply link-graph boosting if requested.
@@ -1039,5 +1112,119 @@ mod tests {
         let mut results: Vec<(String, f64)> = vec![];
         normalize_rrf_scores(&mut results, 60.0, 2);
         assert!(results.is_empty());
+    }
+
+    // --- Time decay tests ---
+
+    #[test]
+    fn test_apply_time_decay_zero_age() {
+        // File modified right now → multiplier should be 1.0 (no penalty).
+        let now = 1_700_000_000;
+        let result = apply_time_decay(0.9, now, 90.0, now);
+        assert!((result - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_apply_time_decay_at_half_life() {
+        // File modified exactly 90 days ago with 90-day half-life → score halved.
+        let now = 1_700_000_000;
+        let modified = now - 90 * 86400;
+        let result = apply_time_decay(1.0, modified, 90.0, now);
+        assert!((result - 0.5).abs() < 1e-10, "expected 0.5, got {}", result);
+    }
+
+    #[test]
+    fn test_apply_time_decay_double_half_life() {
+        // File modified 180 days ago → score quartered.
+        let now = 1_700_000_000;
+        let modified = now - 180 * 86400;
+        let result = apply_time_decay(1.0, modified, 90.0, now);
+        assert!((result - 0.25).abs() < 1e-10, "expected 0.25, got {}", result);
+    }
+
+    #[test]
+    fn test_apply_time_decay_very_old() {
+        // File modified 365 days ago → very low score.
+        let now = 1_700_000_000;
+        let modified = now - 365 * 86400;
+        let result = apply_time_decay(1.0, modified, 90.0, now);
+        assert!(result > 0.0, "score should never be zero");
+        assert!(result < 0.1, "365 days old should be < 10% of original, got {}", result);
+    }
+
+    #[test]
+    fn test_apply_time_decay_preserves_zero_score() {
+        let now = 1_700_000_000;
+        let modified = now - 30 * 86400;
+        let result = apply_time_decay(0.0, modified, 90.0, now);
+        assert!((result - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_apply_time_decay_short_half_life() {
+        // 7-day half-life: more aggressive decay.
+        let now = 1_700_000_000;
+        let modified = now - 7 * 86400;
+        let result = apply_time_decay(1.0, modified, 7.0, now);
+        assert!((result - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_apply_time_decay_future_modified() {
+        // Edge case: modified_at in the future (clock skew) → saturating_sub gives 0, no penalty.
+        let now = 1_700_000_000;
+        let modified = now + 100;
+        let result = apply_time_decay(0.8, modified, 90.0, now);
+        assert!((result - 0.8).abs() < 1e-10, "future mtime should have no penalty, got {}", result);
+    }
+
+    #[test]
+    fn test_apply_time_decay_never_exceeds_original() {
+        // Decay should never increase the score.
+        let now = 1_700_000_000;
+        for days_ago in [0, 1, 10, 30, 90, 180, 365, 1000] {
+            let modified = now - days_ago * 86400;
+            let result = apply_time_decay(0.75, modified, 90.0, now);
+            assert!(result <= 0.75 + 1e-10, "decay should not exceed original score for age {} days", days_ago);
+            assert!(result >= 0.0, "decay should not go negative");
+        }
+    }
+
+    // --- SearchQuery decay builder tests ---
+
+    #[test]
+    fn test_search_query_decay_defaults() {
+        let q = SearchQuery::new("test");
+        assert!(q.decay.is_none());
+        assert!(q.decay_half_life.is_none());
+    }
+
+    #[test]
+    fn test_search_query_with_decay() {
+        let q = SearchQuery::new("test").with_decay(true);
+        assert_eq!(q.decay, Some(true));
+    }
+
+    #[test]
+    fn test_search_query_with_decay_disabled() {
+        let q = SearchQuery::new("test").with_decay(false);
+        assert_eq!(q.decay, Some(false));
+    }
+
+    #[test]
+    fn test_search_query_with_decay_half_life() {
+        let q = SearchQuery::new("test").with_decay_half_life(30.0);
+        assert_eq!(q.decay_half_life, Some(30.0));
+    }
+
+    #[test]
+    fn test_search_query_decay_chain() {
+        let q = SearchQuery::new("test")
+            .with_decay(true)
+            .with_decay_half_life(45.0)
+            .with_limit(5);
+        assert_eq!(q.decay, Some(true));
+        assert_eq!(q.decay_half_life, Some(45.0));
+        assert_eq!(q.limit, 5);
     }
 }

@@ -156,6 +156,18 @@ struct SearchArgs {
     /// Restrict search to files under this path prefix
     #[arg(long)]
     path: Option<String>,
+
+    /// Enable time decay (favor recently modified files)
+    #[arg(long, conflicts_with = "no_decay")]
+    decay: bool,
+
+    /// Disable time decay (even if enabled in config)
+    #[arg(long, conflicts_with = "decay")]
+    no_decay: bool,
+
+    /// Half-life in days for time decay (how many days until score is halved)
+    #[arg(long, value_name = "DAYS")]
+    decay_half_life: Option<f64>,
 }
 
 #[derive(Parser)]
@@ -321,6 +333,14 @@ async fn run() -> anyhow::Result<()> {
             query = query.with_mode(mode);
             if let Some(ref path) = args.path {
                 query = query.with_path_prefix(path);
+            }
+            if args.decay {
+                query = query.with_decay(true);
+            } else if args.no_decay {
+                query = query.with_decay(false);
+            }
+            if let Some(half_life) = args.decay_half_life {
+                query = query.with_decay_half_life(half_life);
             }
 
             let effective_mode = query.mode;
@@ -691,7 +711,7 @@ _mdvdb() {
             COMPREPLY=($(compgen -W "--reindex --preview --file --full --help" -- "$cur"))
             ;;
         search)
-            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --mode --semantic --lexical --path --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --help" -- "$cur"))
             ;;
         tree)
             COMPREPLY=($(compgen -W "--path --help" -- "$cur"))
@@ -762,7 +782,10 @@ _mdvdb() {
                         '--mode[Search mode]:mode:(hybrid semantic lexical)' \
                         '--semantic[Shorthand for --mode=semantic]' \
                         '--lexical[Shorthand for --mode=lexical]' \
-                        '--path[Restrict to path prefix]:path:'
+                        '--path[Restrict to path prefix]:path:' \
+                        '--decay[Enable time decay]' \
+                        '--no-decay[Disable time decay]' \
+                        '--decay-half-life[Half-life in days]:days:'
                     ;;
             esac
             ;;
@@ -809,6 +832,9 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l mode -d 'Search mod
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l semantic -d 'Shorthand for --mode=semantic'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l lexical -d 'Shorthand for --mode=lexical'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l path -d 'Restrict to path prefix'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay -d 'Enable time decay'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l no-decay -d 'Disable time decay'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-half-life -d 'Half-life in days' -r
 
 # Init subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'

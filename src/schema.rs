@@ -371,6 +371,7 @@ mod tests {
             content_hash: String::new(),
             file_size: 0,
             links: Vec::new(),
+            modified_at: 0,
         }
     }
 

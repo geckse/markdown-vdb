@@ -56,6 +56,10 @@ pub struct Config {
     /// BM25 saturation normalization constant. A BM25 score equal to this
     /// value maps to 0.5 after normalization. Higher = more compressed scores.
     pub bm25_norm_k: f64,
+    /// Whether time decay is applied to search scores by default.
+    pub search_decay_enabled: bool,
+    /// Half-life in days for time decay. After this many days, a score is halved.
+    pub search_decay_half_life: f64,
 }
 
 impl Config {
@@ -143,6 +147,10 @@ impl Config {
 
         let bm25_norm_k = parse_env::<f64>("MDVDB_BM25_NORM_K", 1.5)?;
 
+        let search_decay_enabled = parse_env_bool("MDVDB_SEARCH_DECAY", false)?;
+
+        let search_decay_half_life = parse_env::<f64>("MDVDB_SEARCH_DECAY_HALF_LIFE", 90.0)?;
+
         let config = Self {
             embedding_provider,
             embedding_model,
@@ -164,6 +172,8 @@ impl Config {
             search_default_mode,
             search_rrf_k,
             bm25_norm_k,
+            search_decay_enabled,
+            search_decay_half_life,
         };
 
         config.validate()?;
@@ -195,6 +205,11 @@ impl Config {
                 "search_min_score ({}) must be in [0.0, 1.0]",
                 self.search_min_score
             )));
+        }
+        if self.search_decay_half_life <= 0.0 {
+            return Err(Error::Config(
+                "search_decay_half_life must be > 0".into(),
+            ));
         }
         Ok(())
     }
@@ -324,6 +339,8 @@ mod tests {
             "MDVDB_SEARCH_MODE",
             "MDVDB_SEARCH_RRF_K",
             "MDVDB_BM25_NORM_K",
+            "MDVDB_SEARCH_DECAY",
+            "MDVDB_SEARCH_DECAY_HALF_LIFE",
         ];
         for var in &vars_to_clear {
             std::env::remove_var(var);
@@ -352,6 +369,8 @@ mod tests {
         assert_eq!(config.search_default_mode, SearchMode::Hybrid);
         assert_eq!(config.search_rrf_k, 60.0);
         assert_eq!(config.bm25_norm_k, 1.5);
+        assert!(!config.search_decay_enabled);
+        assert_eq!(config.search_decay_half_life, 90.0);
     }
 
     #[test]
@@ -521,6 +540,7 @@ mod tests {
             "MDVDB_CLUSTERING_ENABLED", "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
             "MDVDB_SEARCH_DEFAULT_LIMIT", "MDVDB_SEARCH_MIN_SCORE",
             "MDVDB_SEARCH_MODE", "MDVDB_SEARCH_RRF_K", "MDVDB_BM25_NORM_K",
+            "MDVDB_SEARCH_DECAY", "MDVDB_SEARCH_DECAY_HALF_LIFE",
         ] {
             std::env::remove_var(var);
         }

@@ -183,6 +183,8 @@ pub struct DocumentInfo {
     pub file_size: u64,
     /// Unix timestamp when indexed.
     pub indexed_at: u64,
+    /// Filesystem modification time as Unix timestamp, if available.
+    pub modified_at: Option<u64>,
 }
 
 /// Result of a doctor diagnostic check.
@@ -792,6 +794,8 @@ impl MarkdownVdb {
             Some(&self.fts_index),
             self.config.search_rrf_k,
             self.config.bm25_norm_k,
+            self.config.search_decay_enabled,
+            self.config.search_decay_half_life,
         )
         .await
     }
@@ -1096,6 +1100,8 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok());
 
+        let modified_at = self.index.get_file_mtime(relative_path);
+
         Ok(DocumentInfo {
             path: relative_path.to_string(),
             content_hash: file.content_hash.clone(),
@@ -1103,6 +1109,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             chunk_count: file.chunk_ids.len(),
             file_size: file.file_size,
             indexed_at: file.indexed_at,
+            modified_at,
         })
     }
 

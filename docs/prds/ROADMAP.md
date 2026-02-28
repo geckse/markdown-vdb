@@ -61,7 +61,7 @@ A filesystem-native vector database built entirely around Markdown files. Zero i
 
 ## Sprint 1 — Core Engine (Phases 1–10) ✅
 
-All 10 phases complete. 309 tests passing, clippy clean.
+All 10 phases complete.
 
 ### Phase 1 — Foundation & Configuration ✅
 > [phase-1-foundation-config.md](phase-1-foundation-config.md)
@@ -118,15 +118,16 @@ Full CLI: `mdvdb search|ingest|status|schema|clusters|get|watch|init`. Wrapped J
 ## Sprint 1.5 — Polish (Phase 11) ✅
 
 ### Phase 11 — Environment Variable & Config Loading ✅
+> **Status: Complete**
 > [phase-11-environment-vars-and-config.md](phase-11-environment-vars-and-config.md)
 
 `.env` file loaded as fallback config source. Priority: shell env > `.markdownvdb` > `.env` > defaults. Shared secrets like `OPENAI_API_KEY` live in `.env` (gitignored) and are picked up automatically.
 
 ---
 
-## Sprint 2 — CLI Polish & Search Power (Phases 12–14)
+## Sprint 2 — CLI Polish & Search Power (Phases 12–17) ✅
 
-### Phase 12 — Making CLI Great
+### Phase 12 — Making CLI Great ✅
 > [phase-12-cli-great.md](phase-12-cli-great.md)
 
 Transform the CLI from plain text into a polished terminal experience. New `src/format.rs` module centralizes all human-readable formatting with colored output, ASCII art branding, score bars, distribution bars, progress spinners (`indicatif`), and humanized values ("2 hours ago", "1.5 MB"). TTY-aware with `--no-color` flag and `NO_COLOR` env var support. JSON output remains completely untouched.
@@ -142,7 +143,7 @@ Transform the CLI from plain text into a polished terminal experience. New `src/
 
 ---
 
-### Phase 13 — File Tree Index & Path-Scoped Search
+### Phase 13 — File Tree Index & Path-Scoped Search ✅
 > [phase-13-file-tree-path-scoped-search.md](phase-13-file-tree-path-scoped-search.md)
 
 New `mdvdb tree` command showing ASCII tree view of indexed documents with colored file-state indicators (indexed/modified/new/deleted). Path-scoped search via `--path docs/api/` restricts results to a directory subtree. `path_components` field added to search results for hierarchical context. All computed on-the-fly from existing index data — no new stored structures.
@@ -158,7 +159,7 @@ New `mdvdb tree` command showing ASCII tree view of indexed documents with color
 
 ---
 
-### Phase 14 — Hybrid Search (Semantic + Lexical BM25)
+### Phase 14 — Hybrid Search (Semantic + Lexical BM25) ✅
 > [phase-14-hybrid-search.md](phase-14-hybrid-search.md)
 
 Add fast BM25 lexical search via Tantivy alongside existing HNSW semantic search, combined through Reciprocal Rank Fusion (RRF). Default mode is hybrid (both signals). Lexical-only mode works without any API key — pure local, sub-millisecond search.
@@ -177,7 +178,7 @@ Add fast BM25 lexical search via Tantivy alongside existing HNSW semantic search
 
 ---
 
-### Phase 15 — Link Graph & Backlinks
+### Phase 15 — Link Graph & Backlinks ✅
 > [phase-15-link-graph.md](phase-15-link-graph.md)
 
 Extract internal markdown links (`[text](path.md)` and `[[wikilinks]]`) during parsing to build a persistent link graph. Backlink queries, orphan detection, broken link checking, and optional link-aware search boosting. Three new CLI commands: `links`, `backlinks`, `orphans`.
@@ -193,6 +194,38 @@ Extract internal markdown links (`[text](path.md)` and `[[wikilinks]]`) during p
 - `mdvdb search --boost-links` — boost results that are link neighbors of top hits
 - Broken link detection with `[broken]` state badges
 - New `src/links.rs` module with `LinkGraph`, `LinkEntry`, `ResolvedLink`, `LinkState` types
+
+---
+
+### Phase 16 — Settings in User Location ✅
+> [phase-16-settings-user-location.md](phase-16-settings-user-location.md)
+
+User-level config at `~/.mdvdb/config`. Priority: shell env > project `.markdownvdb/.config` > legacy `.markdownvdb` > `.env` > `~/.mdvdb/config` > defaults. `MDVDB_NO_USER_CONFIG` to disable.
+
+---
+
+### Phase 17 — Interactive Ingest Progress ✅
+> [phase-17-interactive-ingest-progress.md](phase-17-interactive-ingest-progress.md)
+
+Rich interactive progress display during ingestion. Renames `--full` to `--reindex`, adds `--preview` dry-run mode, graceful Ctrl+C cancellation, live file status in watch mode.
+
+---
+
+## Sprint 3 — Search Intelligence (Phase 18+) ✅
+
+### Phase 18 — Time Decay for Search Results ✅
+> [phase-18-time-decay.md](phase-18-time-decay.md)
+
+Optional time-based decay multiplier for search scores, favoring recently edited files. Exponential half-life formula: `score * 0.5^(elapsed_days / half_life_days)`. Disabled by default, configurable via `MDVDB_SEARCH_DECAY` and `MDVDB_SEARCH_DECAY_HALF_LIFE`. CLI flags: `--decay`, `--no-decay`, `--decay-half-life <DAYS>`. Works across all three search modes.
+
+**No new crate dependencies.** Uses existing `std::fs::metadata` for file mtime capture.
+
+**Key additions:**
+- File modification time (`mtime`) captured during parsing and stored in `IndexMetadata`
+- `apply_time_decay()` function with configurable half-life (default 90 days)
+- `--decay` / `--no-decay` / `--decay-half-life` CLI flags
+- `modified_at` field in search results JSON output
+- Config: `MDVDB_SEARCH_DECAY`, `MDVDB_SEARCH_DECAY_HALF_LIFE`
 
 ---
 
@@ -243,7 +276,12 @@ Extract internal markdown links (`[text](path.md)` and `[[wikilinks]]`) during p
         ┌─▼──┐ ┌─▼──┐ ┌─▼──┐
         │ 13 │ │ 14 │ │ 15 │ Link Graph
         │Tree│ │BM25│ │    │ (uses 2, 5)
-        └────┘ └────┘ └────┘
+        └────┘ └─┬──┘ └────┘
+                 │
+               ┌─▼──┐
+               │ 18 │ Time Decay
+               │    │ (uses 6, 14)
+               └────┘
 ```
 
 **Sprint 1 critical path:** 1 → 2 → 3 → 4 → 5 → 6 → 10 ✅
