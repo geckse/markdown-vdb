@@ -400,7 +400,7 @@ async fn test_full_ingest_rebuilds_fts() {
     assert!(fts_before > 0, "FTS should have docs after ingest");
 
     // Full ingest: should clear and rebuild FTS.
-    let opts = IngestOptions { full: true, file: None };
+    let opts = IngestOptions { full: true, ..Default::default() };
     vdb.ingest(opts).await.unwrap();
     let fts_after = vdb.fts_index().num_docs().unwrap();
     assert!(
@@ -578,6 +578,120 @@ async fn test_init_global_creates_and_rejects() {
 }
 
 // ---------------------------------------------------------------------------
+// Progress callback, preview, and cancellation tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_ingest_with_progress_callback() {
+    let (_dir, vdb) = setup_project();
+
+    let phases = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let phases_clone = phases.clone();
+
+    let opts = IngestOptions {
+        progress: Some(Box::new(move |phase: &mdvdb::IngestPhase| {
+            let label = match phase {
+                mdvdb::IngestPhase::Discovering => "Discovering".to_string(),
+                mdvdb::IngestPhase::Parsing { .. } => "Parsing".to_string(),
+                mdvdb::IngestPhase::Skipped { .. } => "Skipped".to_string(),
+                mdvdb::IngestPhase::Embedding { .. } => "Embedding".to_string(),
+                mdvdb::IngestPhase::Saving => "Saving".to_string(),
+                mdvdb::IngestPhase::Clustering => "Clustering".to_string(),
+                mdvdb::IngestPhase::Cleaning => "Cleaning".to_string(),
+                mdvdb::IngestPhase::Done => "Done".to_string(),
+            };
+            phases_clone.lock().unwrap().push(label);
+        })),
+        ..Default::default()
+    };
+
+    vdb.ingest(opts).await.unwrap();
+
+    let collected = phases.lock().unwrap();
+    assert!(collected.contains(&"Discovering".to_string()), "should have Discovering phase, got: {collected:?}");
+    assert!(
+        collected.contains(&"Parsing".to_string()) || collected.contains(&"Skipped".to_string()),
+        "should have Parsing or Skipped phase, got: {collected:?}"
+    );
+    assert!(collected.contains(&"Saving".to_string()), "should have Saving phase, got: {collected:?}");
+    assert!(collected.contains(&"Done".to_string()), "should have Done phase, got: {collected:?}");
+}
+
+#[test]
+fn test_preview_returns_correct_counts() {
+    let (_dir, vdb) = setup_project();
+
+    let preview = vdb.preview(false, None).unwrap();
+
+    // We have 2 markdown files (hello.md, rust.md)
+    assert_eq!(preview.total_files, 2, "should discover 2 files");
+    assert_eq!(preview.files_to_process, 2, "all files should be new");
+    assert_eq!(preview.files_unchanged, 0, "no files should be unchanged");
+    assert!(preview.total_chunks > 0, "should have chunks");
+    assert!(preview.estimated_tokens > 0, "should have estimated tokens");
+}
+
+#[tokio::test]
+async fn test_preview_no_api_calls() {
+    let (_dir, vdb) = setup_project();
+
+    // Preview should not call the embedding provider
+    let _preview = vdb.preview(false, None).unwrap();
+
+    // After preview, status should still be empty (no actual indexing)
+    let status = vdb.status();
+    assert_eq!(status.document_count, 0, "preview should not modify index");
+    assert_eq!(status.chunk_count, 0, "preview should not create chunks");
+}
+
+#[tokio::test]
+async fn test_preview_reindex_marks_all_changed() {
+    let (_dir, vdb) = setup_project();
+
+    // First ingest
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Preview with reindex=true — all files should be marked Changed
+    let preview = vdb.preview(true, None).unwrap();
+    assert_eq!(preview.files_to_process, preview.total_files, "reindex should process all files");
+    assert_eq!(preview.files_unchanged, 0, "reindex should have no unchanged files");
+
+    for file in &preview.files {
+        assert_eq!(
+            file.status,
+            mdvdb::PreviewFileStatus::Changed,
+            "file {} should be Changed with reindex=true, got {:?}",
+            file.path, file.status
+        );
+    }
+}
+
+#[test]
+fn test_ingest_options_default() {
+    let opts = IngestOptions::default();
+    assert!(!opts.full, "default full should be false");
+    assert!(opts.file.is_none(), "default file should be None");
+    assert!(opts.progress.is_none(), "default progress should be None");
+    assert!(opts.cancel.is_none(), "default cancel should be None");
+}
+
+#[tokio::test]
+async fn test_ingest_cancellation() {
+    let (_dir, vdb) = setup_project();
+
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel(); // Cancel immediately
+
+    let opts = IngestOptions {
+        cancel: Some(token),
+        ..Default::default()
+    };
+
+    let result = vdb.ingest(opts).await.unwrap();
+    assert!(result.cancelled, "result should indicate cancellation");
+}
+
+// ---------------------------------------------------------------------------
 // HNSW key mismatch regression tests
 // ---------------------------------------------------------------------------
 
@@ -592,7 +706,7 @@ async fn test_search_works_after_full_reindex() {
     assert!(!results1.is_empty(), "search should return results after first ingest");
 
     // Full reindex
-    let opts = IngestOptions { full: true, file: None };
+    let opts = IngestOptions { full: true, ..Default::default() };
     vdb.ingest(opts).await.unwrap();
 
     // Search again — should still work
@@ -611,7 +725,7 @@ async fn test_multiple_reindex_cycles() {
 
     // Run 3 consecutive full reindexes
     for cycle in 0..3 {
-        let opts = IngestOptions { full: true, file: None };
+        let opts = IngestOptions { full: true, ..Default::default() };
         vdb.ingest(opts).await.unwrap();
 
         let status = vdb.status();

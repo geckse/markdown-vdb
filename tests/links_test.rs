@@ -202,6 +202,7 @@ async fn test_incremental_link_update() {
     let opts = IngestOptions {
         full: false,
         file: Some(PathBuf::from("a.md")),
+        ..Default::default()
     };
     vdb.ingest(opts).await.unwrap();
 
