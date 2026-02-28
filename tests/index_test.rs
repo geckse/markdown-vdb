@@ -457,3 +457,40 @@ fn test_portable_paths() {
         );
     }
 }
+
+#[test]
+fn test_hnsw_key_compaction_on_save() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    // Add multiple files to create non-sequential HNSW keys
+    for i in 0..3 {
+        let file = fake_markdown_file(&format!("file{i}.md"), &format!("hash{i}"));
+        let chunks = fake_chunks(&format!("file{i}.md"), 2);
+        let emb = fake_embeddings(2, 8);
+        index.upsert(&file, &chunks, &emb).unwrap();
+    }
+
+    // Remove middle file to create gap in keys
+    index.remove_file("file1.md").unwrap();
+
+    // Re-add with different content
+    let file = fake_markdown_file("file1.md", "hash1_v2");
+    let chunks = fake_chunks("file1.md", 3);
+    let emb = fake_embeddings(3, 8);
+    index.upsert(&file, &chunks, &emb).unwrap();
+
+    // Save and reopen
+    index.save().unwrap();
+    let reopened = Index::open(&path).unwrap();
+
+    let status = reopened.status();
+    // 2 + 3 + 2 = 7 chunks total (file0: 2, file1: 3, file2: 2)
+    assert_eq!(status.chunk_count, 7, "should have all chunks after reopen");
+    assert_eq!(status.vector_count, 7, "vectors should match chunks");
+
+    // Search should work correctly after compaction
+    let query = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let results = reopened.search(&query, 7).unwrap();
+    assert_eq!(results.len(), 7, "search should find all chunks after key compaction");
+}

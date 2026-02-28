@@ -576,3 +576,51 @@ async fn test_init_global_creates_and_rejects() {
     let result = MarkdownVdb::init_global(&config_path);
     assert!(matches!(result, Err(Error::ConfigAlreadyExists { .. })));
 }
+
+// ---------------------------------------------------------------------------
+// HNSW key mismatch regression tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_search_works_after_full_reindex() {
+    let (_dir, vdb) = setup_project();
+
+    // Initial ingest and search
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let query = SearchQuery::new("rust programming");
+    let results1 = vdb.search(query).await.unwrap();
+    assert!(!results1.is_empty(), "search should return results after first ingest");
+
+    // Full reindex
+    let opts = IngestOptions { full: true, file: None };
+    vdb.ingest(opts).await.unwrap();
+
+    // Search again — should still work
+    let query2 = SearchQuery::new("rust programming");
+    let results2 = vdb.search(query2).await.unwrap();
+    assert!(!results2.is_empty(), "search should return results after full reindex");
+    assert!(results2[0].score > 0.0, "results should have positive scores after reindex");
+}
+
+#[tokio::test]
+async fn test_multiple_reindex_cycles() {
+    let (_dir, vdb) = setup_project();
+
+    // Initial ingest
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Run 3 consecutive full reindexes
+    for cycle in 0..3 {
+        let opts = IngestOptions { full: true, file: None };
+        vdb.ingest(opts).await.unwrap();
+
+        let status = vdb.status();
+        assert!(status.document_count > 0, "cycle {cycle}: should have documents");
+        assert!(status.chunk_count > 0, "cycle {cycle}: should have chunks");
+        assert!(status.vector_count > 0, "cycle {cycle}: should have vectors");
+
+        let query = SearchQuery::new("test document");
+        let results = vdb.search(query).await.unwrap();
+        assert!(!results.is_empty(), "cycle {cycle}: search should return results");
+    }
+}
