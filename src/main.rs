@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_color: bool,
 
+    /// Output results as JSON
+    #[arg(long, global = true)]
+    json: bool,
+
     /// Print version information with logo
     #[arg(long)]
     version: bool,
@@ -149,10 +153,6 @@ struct SearchArgs {
     #[arg(long, conflicts_with_all = ["semantic", "mode"])]
     lexical: bool,
 
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-
     /// Restrict search to files under this path prefix
     #[arg(long)]
     path: Option<String>,
@@ -160,94 +160,58 @@ struct SearchArgs {
 
 #[derive(Parser)]
 struct IngestArgs {
-    /// Force full re-ingestion of all files
+    /// Force re-embedding of all files
     #[arg(long)]
+    reindex: bool,
+
+    /// Hidden alias for --reindex (deprecated)
+    #[arg(long, hide = true)]
     full: bool,
 
     /// Ingest a specific file only
     #[arg(long)]
     file: Option<PathBuf>,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
-struct StatusArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct StatusArgs {}
 
 #[derive(Parser)]
-struct SchemaArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct SchemaArgs {}
 
 #[derive(Parser)]
-struct ClustersArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct ClustersArgs {}
 
 #[derive(Parser)]
 struct TreeArgs {
     /// Restrict tree to files under this path prefix
     #[arg(long)]
     path: Option<String>,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
 struct GetArgs {
     /// Path to the markdown file
     file_path: PathBuf,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
-struct WatchArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct WatchArgs {}
 
 #[derive(Parser)]
 struct LinksArgs {
     /// Path to the markdown file
     file_path: PathBuf,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
 struct BacklinksArgs {
     /// Path to the markdown file
     file_path: PathBuf,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
-struct OrphansArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct OrphansArgs {}
 
 #[derive(Parser)]
 struct InitArgs {
@@ -257,18 +221,10 @@ struct InitArgs {
 }
 
 #[derive(Parser)]
-struct ConfigArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct ConfigArgs {}
 
 #[derive(Parser)]
-struct DoctorArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct DoctorArgs {}
 
 #[derive(Clone, ValueEnum)]
 enum ShellType {
@@ -327,6 +283,7 @@ async fn run() -> anyhow::Result<()> {
         None => std::env::current_dir()?,
     };
     let config = mdvdb::config::Config::load(&cwd)?;
+    let json = cli.json;
     let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some();
 
     match cli.command {
@@ -365,7 +322,7 @@ async fn run() -> anyhow::Result<()> {
             let effective_mode = query.mode;
             let results = vdb.search(query).await?;
 
-            if args.json {
+            if json {
                 let output = SearchOutput {
                     total_results: results.len(),
                     query: args.query.clone(),
@@ -382,13 +339,13 @@ async fn run() -> anyhow::Result<()> {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
 
             let options = mdvdb::IngestOptions {
-                full: args.full,
+                full: args.reindex || args.full,
                 file: args.file,
                 progress: None,
                 cancel: None,
             };
 
-            let use_spinner = !args.json && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let use_spinner = !json && std::io::IsTerminal::is_terminal(&std::io::stdout());
             let spinner = if use_spinner {
                 let sp = indicatif::ProgressBar::new_spinner();
                 sp.set_message("Ingesting markdown files...");
@@ -404,29 +361,29 @@ async fn run() -> anyhow::Result<()> {
                 sp.finish_and_clear();
             }
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &result)?;
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_ingest_result(&result);
             }
         }
-        Some(Commands::Status(args)) => {
+        Some(Commands::Status(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let status = vdb.status();
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &status)?;
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_status(&status);
             }
         }
-        Some(Commands::Schema(args)) => {
+        Some(Commands::Schema(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let schema = vdb.schema()?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &schema)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -434,11 +391,11 @@ async fn run() -> anyhow::Result<()> {
                 format::print_schema(&schema, vdb_status.document_count);
             }
         }
-        Some(Commands::Clusters(args)) => {
+        Some(Commands::Clusters(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let clusters = vdb.clusters()?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -449,7 +406,7 @@ async fn run() -> anyhow::Result<()> {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let tree = vdb.file_tree()?;
 
-            if args.json {
+            if json {
                 if let Some(ref prefix) = args.path {
                     if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
                         let filtered = mdvdb::tree::FileTree {
@@ -511,7 +468,7 @@ async fn run() -> anyhow::Result<()> {
             let path_str = args.file_path.to_string_lossy();
             let doc = vdb.get_document(&path_str)?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &doc)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -523,7 +480,7 @@ async fn run() -> anyhow::Result<()> {
             let path_str = args.file_path.to_string_lossy().to_string();
             let result = vdb.links(&path_str)?;
 
-            if args.json {
+            if json {
                 let output = LinksOutput {
                     file: path_str,
                     links: result,
@@ -539,7 +496,7 @@ async fn run() -> anyhow::Result<()> {
             let path_str = args.file_path.to_string_lossy().to_string();
             let result = vdb.backlinks(&path_str)?;
 
-            if args.json {
+            if json {
                 let output = BacklinksOutput {
                     total_backlinks: result.len(),
                     file: path_str,
@@ -551,11 +508,11 @@ async fn run() -> anyhow::Result<()> {
                 format::print_backlinks(&path_str, &result);
             }
         }
-        Some(Commands::Orphans(args)) => {
+        Some(Commands::Orphans(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let result = vdb.orphans()?;
 
-            if args.json {
+            if json {
                 let output = OrphansOutput {
                     total_orphans: result.len(),
                     orphans: result,
@@ -566,7 +523,7 @@ async fn run() -> anyhow::Result<()> {
                 format::print_orphans(&result);
             }
         }
-        Some(Commands::Watch(args)) => {
+        Some(Commands::Watch(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
 
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -576,7 +533,7 @@ async fn run() -> anyhow::Result<()> {
                 cancel_clone.cancel();
             });
 
-            if args.json {
+            if json {
                 let msg = serde_json::json!({"status": "watching", "message": "File watching started"});
                 serde_json::to_writer_pretty(std::io::stdout(), &msg)?;
                 writeln!(std::io::stdout())?;
@@ -600,8 +557,8 @@ async fn run() -> anyhow::Result<()> {
                 format::print_init_success(&cwd.display().to_string());
             }
         }
-        Some(Commands::Config(args)) => {
-            if args.json {
+        Some(Commands::Config(_args)) => {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &config)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -609,11 +566,11 @@ async fn run() -> anyhow::Result<()> {
                 format::print_config(&config, user_config.as_deref());
             }
         }
-        Some(Commands::Doctor(args)) => {
+        Some(Commands::Doctor(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let result = vdb.doctor().await?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &result)?;
                 writeln!(std::io::stdout())?;
             } else {
