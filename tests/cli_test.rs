@@ -857,6 +857,179 @@ fn test_search_semantic_lexical_flags_conflict() {
 }
 
 // ---------------------------------------------------------------------------
+// Init --global, config, and doctor tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_init_global_creates_user_config() {
+    let dir = TempDir::new().unwrap();
+    let output = mdvdb_bin()
+        .args(["init", "--global"])
+        .env("MDVDB_CONFIG_HOME", dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(
+        output.status.success(),
+        "init --global should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        dir.path().join("config").exists(),
+        "user config file should be created"
+    );
+
+    let content = fs::read_to_string(dir.path().join("config")).unwrap();
+    assert!(
+        content.contains("OPENAI_API_KEY"),
+        "user config template should mention OPENAI_API_KEY"
+    );
+}
+
+#[test]
+fn test_init_global_twice_fails() {
+    let dir = TempDir::new().unwrap();
+
+    let first = mdvdb_bin()
+        .args(["init", "--global"])
+        .env("MDVDB_CONFIG_HOME", dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+    assert!(first.status.success(), "first init --global should succeed");
+
+    let second = mdvdb_bin()
+        .args(["init", "--global"])
+        .env("MDVDB_CONFIG_HOME", dir.path())
+        .output()
+        .expect("failed to execute mdvdb");
+    assert!(
+        !second.status.success(),
+        "init --global when config exists should fail"
+    );
+}
+
+#[test]
+fn test_config_json_output() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .args(["config", "--json"])
+        .env("MDVDB_NO_USER_CONFIG", "1")
+        .current_dir(root)
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "config --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["embedding_model"].is_string(), "should have embedding_model field");
+    assert!(json["embedding_dimensions"].is_number(), "should have embedding_dimensions field");
+}
+
+#[test]
+fn test_config_human_output() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .args(["--no-color", "config"])
+        .env("MDVDB_NO_USER_CONFIG", "1")
+        .current_dir(root)
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "config should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Configuration"), "should contain Configuration header");
+    assert!(stdout.contains("Provider"), "should show provider");
+}
+
+#[test]
+fn test_doctor_json_output() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["doctor", "--json"])
+        .env("MDVDB_NO_USER_CONFIG", "1")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "doctor --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["checks"].is_array(), "should have checks array");
+    assert!(json["passed"].is_number(), "should have passed count");
+    assert!(json["total"].is_number(), "should have total count");
+}
+
+#[test]
+fn test_doctor_human_output() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["--no-color", "doctor"])
+        .env("MDVDB_NO_USER_CONFIG", "1")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "doctor should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("mdvdb doctor"), "should contain doctor header");
+    assert!(stdout.contains("checks passed"), "should show pass count");
+}
+
+#[test]
+fn test_help_shows_new_subcommands() {
+    let output = mdvdb_bin()
+        .arg("--help")
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "--help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for cmd in ["config", "doctor"] {
+        assert!(
+            stdout.contains(cmd),
+            "--help should mention '{cmd}'"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tree command tests
 // ---------------------------------------------------------------------------
 

@@ -59,7 +59,23 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load configuration with priority: shell env > `.markdownvdb/.config` > legacy `.markdownvdb` > `.env` > defaults.
+    /// Resolve the user-level config directory.
+    /// Priority: MDVDB_CONFIG_HOME env var > ~/.mdvdb
+    pub fn user_config_dir() -> Option<PathBuf> {
+        if let Ok(custom) = std::env::var("MDVDB_CONFIG_HOME") {
+            if !custom.is_empty() {
+                return Some(PathBuf::from(custom));
+            }
+        }
+        dirs::home_dir().map(|h| h.join(".mdvdb"))
+    }
+
+    /// Resolve the user-level config file path (~/.mdvdb/config).
+    pub fn user_config_path() -> Option<PathBuf> {
+        Self::user_config_dir().map(|d| d.join("config"))
+    }
+
+    /// Load configuration with priority: shell env > `.markdownvdb/.config` > legacy `.markdownvdb` > `.env` > `~/.mdvdb/config` > defaults.
     pub fn load(project_root: &Path) -> Result<Self, Error> {
         // Load config file (ignore if missing).
         // dotenvy::from_path does NOT override existing env vars,
@@ -76,6 +92,13 @@ impl Config {
         // Load .env as a fallback for shared secrets (e.g., OPENAI_API_KEY).
         // Since .markdownvdb was loaded first, its values take priority over .env.
         let _ = dotenvy::from_path(project_root.join(".env"));
+
+        // Load user-level config (~/.mdvdb/config) as lowest-priority file source.
+        if std::env::var("MDVDB_NO_USER_CONFIG").is_err() {
+            if let Some(config_dir) = Self::user_config_dir() {
+                let _ = dotenvy::from_path(config_dir.join("config"));
+            }
+        }
 
         let embedding_provider = env_or_default("MDVDB_EMBEDDING_PROVIDER", "openai")
             .parse::<EmbeddingProviderType>()?;
@@ -440,5 +463,82 @@ mod tests {
         let patterns = parse_comma_list_string("MDVDB_IGNORE_PATTERNS", vec![]);
         std::env::remove_var("MDVDB_IGNORE_PATTERNS");
         assert_eq!(patterns, vec!["*.tmp".to_string(), ".git".to_string()]);
+    }
+
+    #[test]
+    fn user_config_dir_uses_mdvdb_config_home() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("MDVDB_CONFIG_HOME", "/custom/config");
+        let dir = Config::user_config_dir();
+        std::env::remove_var("MDVDB_CONFIG_HOME");
+        assert_eq!(dir, Some(PathBuf::from("/custom/config")));
+    }
+
+    #[test]
+    fn user_config_dir_empty_env_falls_back() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("MDVDB_CONFIG_HOME", "");
+        let dir = Config::user_config_dir();
+        std::env::remove_var("MDVDB_CONFIG_HOME");
+        // Falls back to ~/.mdvdb (home dir dependent).
+        assert!(dir.is_some());
+        let path = dir.unwrap();
+        assert!(path.ends_with(".mdvdb"));
+    }
+
+    #[test]
+    fn user_config_dir_unset_falls_back() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("MDVDB_CONFIG_HOME");
+        let dir = Config::user_config_dir();
+        // Falls back to ~/.mdvdb (home dir dependent).
+        assert!(dir.is_some());
+        let path = dir.unwrap();
+        assert!(path.ends_with(".mdvdb"));
+    }
+
+    #[test]
+    fn user_config_path_appends_config() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("MDVDB_CONFIG_HOME", "/custom");
+        let path = Config::user_config_path();
+        std::env::remove_var("MDVDB_CONFIG_HOME");
+        assert_eq!(path, Some(PathBuf::from("/custom/config")));
+    }
+
+    #[test]
+    fn no_user_config_env_skips_user_config() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
+        // Clear all MDVDB vars first.
+        for var in &[
+            "MDVDB_EMBEDDING_PROVIDER", "MDVDB_EMBEDDING_MODEL",
+            "MDVDB_EMBEDDING_DIMENSIONS", "MDVDB_EMBEDDING_BATCH_SIZE",
+            "OPENAI_API_KEY", "OLLAMA_HOST", "MDVDB_EMBEDDING_ENDPOINT",
+            "MDVDB_SOURCE_DIRS", "MDVDB_IGNORE_PATTERNS",
+            "MDVDB_WATCH", "MDVDB_WATCH_DEBOUNCE_MS",
+            "MDVDB_CHUNK_MAX_TOKENS", "MDVDB_CHUNK_OVERLAP_TOKENS",
+            "MDVDB_CLUSTERING_ENABLED", "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
+            "MDVDB_SEARCH_DEFAULT_LIMIT", "MDVDB_SEARCH_MIN_SCORE",
+            "MDVDB_SEARCH_MODE", "MDVDB_SEARCH_RRF_K", "MDVDB_BM25_NORM_K",
+        ] {
+            std::env::remove_var(var);
+        }
+
+        // Create a temp user config that sets a specific model.
+        let temp = tempfile::TempDir::new().unwrap();
+        let config_path = temp.path().join("config");
+        std::fs::write(&config_path, "MDVDB_EMBEDDING_MODEL=custom-model\n").unwrap();
+
+        std::env::set_var("MDVDB_CONFIG_HOME", temp.path());
+        std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+
+        let config = Config::load(Path::new("/nonexistent")).unwrap();
+
+        std::env::remove_var("MDVDB_CONFIG_HOME");
+        std::env::remove_var("MDVDB_NO_USER_CONFIG");
+
+        // Should get default model, not the user config one.
+        assert_eq!(config.embedding_model, "text-embedding-3-small");
     }
 }

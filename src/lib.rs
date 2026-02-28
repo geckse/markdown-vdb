@@ -97,6 +97,36 @@ pub struct DocumentInfo {
     pub indexed_at: u64,
 }
 
+/// Result of a doctor diagnostic check.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorResult {
+    /// Individual diagnostic checks.
+    pub checks: Vec<DoctorCheck>,
+    /// Number of checks that passed.
+    pub passed: usize,
+    /// Total number of checks.
+    pub total: usize,
+}
+
+/// A single diagnostic check.
+#[derive(Debug, Clone, Serialize)]
+pub struct DoctorCheck {
+    /// Human-readable name of the check.
+    pub name: String,
+    /// Pass, Fail, or Warn.
+    pub status: CheckStatus,
+    /// Detail message describing the result.
+    pub detail: String,
+}
+
+/// Status of a diagnostic check.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub enum CheckStatus {
+    Pass,
+    Fail,
+    Warn,
+}
+
 /// Summary of a cluster.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClusterSummary {
@@ -803,6 +833,221 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             chunk_count: file.chunk_ids.len(),
             file_size: file.file_size,
             indexed_at: file.indexed_at,
+        })
+    }
+
+    /// Initialize a user-level config file at the given path.
+    ///
+    /// Creates parent directories if needed. Returns `Error::ConfigAlreadyExists`
+    /// if the file already exists.
+    pub fn init_global(config_path: &Path) -> Result<()> {
+        if config_path.exists() {
+            return Err(Error::ConfigAlreadyExists {
+                path: config_path.to_path_buf(),
+            });
+        }
+
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let template = "\
+# mdvdb user-level configuration
+# Values here apply to all projects unless overridden by project .markdownvdb
+
+# API credentials
+# OPENAI_API_KEY=sk-...
+
+# Default embedding provider
+# MDVDB_EMBEDDING_PROVIDER=openai
+# MDVDB_EMBEDDING_MODEL=text-embedding-3-small
+# MDVDB_EMBEDDING_DIMENSIONS=1536
+
+# Ollama host (if using Ollama)
+# OLLAMA_HOST=http://localhost:11434
+";
+
+        std::fs::write(config_path, template)?;
+        info!(path = %config_path.display(), "created user-level config file");
+        Ok(())
+    }
+
+    /// Run diagnostic checks on the project configuration and index.
+    pub async fn doctor(&self) -> Result<DoctorResult> {
+        let mut checks = Vec::new();
+
+        // 1. Config loaded (always passes since we're already constructed).
+        checks.push(DoctorCheck {
+            name: "Config loaded".to_string(),
+            status: CheckStatus::Pass,
+            detail: format!(
+                "{:?} / {} / {}",
+                self.config.embedding_provider,
+                self.config.embedding_model,
+                self.config.embedding_dimensions
+            ),
+        });
+
+        // 2. User config existence.
+        match Config::user_config_path() {
+            Some(path) if path.is_file() => {
+                checks.push(DoctorCheck {
+                    name: "User config".to_string(),
+                    status: CheckStatus::Pass,
+                    detail: path.display().to_string(),
+                });
+            }
+            Some(path) => {
+                checks.push(DoctorCheck {
+                    name: "User config".to_string(),
+                    status: CheckStatus::Warn,
+                    detail: format!("{} (not found)", path.display()),
+                });
+            }
+            None => {
+                checks.push(DoctorCheck {
+                    name: "User config".to_string(),
+                    status: CheckStatus::Warn,
+                    detail: "home directory not resolved".to_string(),
+                });
+            }
+        }
+
+        // 3. Project config.
+        let project_config = self.root.join(".markdownvdb");
+        if project_config.is_dir() {
+            checks.push(DoctorCheck {
+                name: "Project config".to_string(),
+                status: CheckStatus::Pass,
+                detail: ".markdownvdb/".to_string(),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "Project config".to_string(),
+                status: CheckStatus::Fail,
+                detail: ".markdownvdb not found".to_string(),
+            });
+        }
+
+        // 4. API key.
+        match self.config.embedding_provider {
+            config::EmbeddingProviderType::OpenAI => {
+                if self.config.openai_api_key.is_some() {
+                    checks.push(DoctorCheck {
+                        name: "API key".to_string(),
+                        status: CheckStatus::Pass,
+                        detail: "OPENAI_API_KEY is set".to_string(),
+                    });
+                } else {
+                    checks.push(DoctorCheck {
+                        name: "API key".to_string(),
+                        status: CheckStatus::Fail,
+                        detail: "OPENAI_API_KEY not set".to_string(),
+                    });
+                }
+            }
+            config::EmbeddingProviderType::Mock => {
+                checks.push(DoctorCheck {
+                    name: "API key".to_string(),
+                    status: CheckStatus::Pass,
+                    detail: "mock provider (no key needed)".to_string(),
+                });
+            }
+            _ => {
+                checks.push(DoctorCheck {
+                    name: "API key".to_string(),
+                    status: CheckStatus::Pass,
+                    detail: format!("{:?} provider configured", self.config.embedding_provider),
+                });
+            }
+        }
+
+        // 5. Provider connectivity.
+        let start = std::time::Instant::now();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.provider.embed_batch(&["test".to_string()]),
+        )
+        .await
+        {
+            Ok(Ok(_vectors)) => {
+                let ms = start.elapsed().as_millis();
+                checks.push(DoctorCheck {
+                    name: "Provider reachable".to_string(),
+                    status: CheckStatus::Pass,
+                    detail: format!("OK ({ms}ms)"),
+                });
+            }
+            Ok(Err(e)) => {
+                checks.push(DoctorCheck {
+                    name: "Provider reachable".to_string(),
+                    status: CheckStatus::Fail,
+                    detail: e.to_string(),
+                });
+            }
+            Err(_) => {
+                checks.push(DoctorCheck {
+                    name: "Provider reachable".to_string(),
+                    status: CheckStatus::Fail,
+                    detail: "timeout (5s)".to_string(),
+                });
+            }
+        }
+
+        // 6. Index integrity.
+        let status = self.index.status();
+        if status.vector_count == status.chunk_count {
+            checks.push(DoctorCheck {
+                name: "Index".to_string(),
+                status: CheckStatus::Pass,
+                detail: format!(
+                    "{} docs, {} chunks, {} vectors",
+                    status.document_count, status.chunk_count, status.vector_count
+                ),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "Index".to_string(),
+                status: CheckStatus::Warn,
+                detail: format!(
+                    "{} docs, {} chunks, {} vectors (mismatch)",
+                    status.document_count, status.chunk_count, status.vector_count
+                ),
+            });
+        }
+
+        // 7. Source directories.
+        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+        match disco.discover() {
+            Ok(files) => {
+                let dir_list: Vec<String> = self
+                    .config
+                    .source_dirs
+                    .iter()
+                    .map(|d| format!("{}/", d.display()))
+                    .collect();
+                checks.push(DoctorCheck {
+                    name: "Source directories".to_string(),
+                    status: CheckStatus::Pass,
+                    detail: format!("{} ({} .md files)", dir_list.join(" "), files.len()),
+                });
+            }
+            Err(e) => {
+                checks.push(DoctorCheck {
+                    name: "Source directories".to_string(),
+                    status: CheckStatus::Fail,
+                    detail: e.to_string(),
+                });
+            }
+        }
+
+        let passed = checks.iter().filter(|c| c.status == CheckStatus::Pass).count();
+        let total = checks.len();
+
+        Ok(DoctorResult {
+            checks,
+            passed,
+            total,
         })
     }
 }

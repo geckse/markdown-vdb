@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::error::Error;
 use mdvdb::search::SearchQuery;
-use mdvdb::{IngestOptions, MarkdownVdb, SearchMode};
+use mdvdb::{CheckStatus, IngestOptions, MarkdownVdb, SearchMode};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -492,4 +492,87 @@ async fn test_search_with_path_prefix() {
             r.file.path
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Doctor tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_doctor_with_mock_provider() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let result = vdb.doctor().await.unwrap();
+
+    // Mock provider should produce no Fail checks (no API key needed, provider always reachable).
+    for check in &result.checks {
+        assert_ne!(
+            check.status,
+            CheckStatus::Fail,
+            "mock provider doctor should not have failures, but '{}' failed: {}",
+            check.name,
+            check.detail
+        );
+    }
+    assert!(result.passed > 0, "should have passing checks");
+    assert_eq!(result.passed + (result.total - result.passed), result.total);
+}
+
+#[tokio::test]
+async fn test_doctor_reports_correct_counts() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let result = vdb.doctor().await.unwrap();
+
+    // Find the Index check.
+    let index_check = result
+        .checks
+        .iter()
+        .find(|c| c.name == "Index")
+        .expect("should have Index check");
+    assert_eq!(index_check.status, CheckStatus::Pass);
+    // Detail should mention document and chunk counts.
+    assert!(
+        index_check.detail.contains("docs") || index_check.detail.contains("chunks"),
+        "Index detail should mention counts: {}",
+        index_check.detail
+    );
+}
+
+#[tokio::test]
+async fn test_doctor_source_dirs_check() {
+    let (_dir, vdb) = setup_project();
+
+    let result = vdb.doctor().await.unwrap();
+
+    let src_check = result
+        .checks
+        .iter()
+        .find(|c| c.name == "Source directories")
+        .expect("should have Source directories check");
+    assert_eq!(src_check.status, CheckStatus::Pass);
+    assert!(
+        src_check.detail.contains(".md files"),
+        "should mention .md files: {}",
+        src_check.detail
+    );
+}
+
+#[tokio::test]
+async fn test_init_global_creates_and_rejects() {
+    let tmp = TempDir::new().unwrap();
+    let config_path = tmp.path().join("config");
+
+    // First call should succeed.
+    MarkdownVdb::init_global(&config_path).unwrap();
+    assert!(config_path.exists(), "config file should be created");
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("OPENAI_API_KEY"), "template should mention API key");
+
+    // Second call should fail.
+    let result = MarkdownVdb::init_global(&config_path);
+    assert!(matches!(result, Err(Error::ConfigAlreadyExists { .. })));
 }

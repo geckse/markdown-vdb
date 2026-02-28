@@ -96,6 +96,12 @@ enum Commands {
     /// Initialize a new .markdownvdb config file
     Init(InitArgs),
 
+    /// Show resolved configuration
+    Config(ConfigArgs),
+
+    /// Run diagnostic checks on config, provider, and index
+    Doctor(DoctorArgs),
+
     /// Show links originating from a file
     Links(LinksArgs),
 
@@ -244,7 +250,25 @@ struct OrphansArgs {
 }
 
 #[derive(Parser)]
-struct InitArgs {}
+struct InitArgs {
+    /// Create user-level config at ~/.mdvdb/config instead of project config
+    #[arg(long)]
+    global: bool,
+}
+
+#[derive(Parser)]
+struct ConfigArgs {
+    /// Output results as JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct DoctorArgs {
+    /// Output results as JSON
+    #[arg(long)]
+    json: bool,
+}
 
 #[derive(Clone, ValueEnum)]
 enum ShellType {
@@ -563,9 +587,36 @@ async fn run() -> anyhow::Result<()> {
 
             vdb.watch(cancel).await?;
         }
-        Some(Commands::Init(_args)) => {
-            MarkdownVdb::init(&cwd)?;
-            format::print_init_success(&cwd.display().to_string());
+        Some(Commands::Init(args)) => {
+            if args.global {
+                let config_path = mdvdb::config::Config::user_config_path()
+                    .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?;
+                MarkdownVdb::init_global(&config_path)?;
+                format::print_init_global_success(&config_path.display().to_string());
+            } else {
+                MarkdownVdb::init(&cwd)?;
+                format::print_init_success(&cwd.display().to_string());
+            }
+        }
+        Some(Commands::Config(args)) => {
+            if args.json {
+                serde_json::to_writer_pretty(std::io::stdout(), &config)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                let user_config = mdvdb::config::Config::user_config_path();
+                format::print_config(&config, user_config.as_deref());
+            }
+        }
+        Some(Commands::Doctor(args)) => {
+            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let result = vdb.doctor().await?;
+
+            if args.json {
+                serde_json::to_writer_pretty(std::io::stdout(), &result)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_doctor(&result);
+            }
         }
         Some(Commands::Completions(args)) => {
             // Shell completion generation.
@@ -577,7 +628,7 @@ _mdvdb() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="search ingest status schema clusters tree get watch init completions"
+    commands="search ingest status schema clusters tree get watch init config doctor links backlinks orphans completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands --help --version --verbose --root" -- "$cur"))
@@ -599,6 +650,11 @@ _mdvdb() {
         'get:Get metadata for a specific file'
         'watch:Watch for file changes and re-index automatically'
         'init:Initialize a new .markdownvdb config file'
+        'config:Show resolved configuration'
+        'doctor:Run diagnostic checks'
+        'links:Show links originating from a file'
+        'backlinks:Show backlinks pointing to a file'
+        'orphans:Find orphan files with no links'
     )
     _describe 'command' commands
 }
@@ -614,13 +670,18 @@ complete -c mdvdb -n '__fish_use_subcommand' -a clusters -d 'Show document clust
 complete -c mdvdb -n '__fish_use_subcommand' -a tree -d 'Show file tree with sync status indicators'
 complete -c mdvdb -n '__fish_use_subcommand' -a get -d 'Get metadata for a specific file'
 complete -c mdvdb -n '__fish_use_subcommand' -a watch -d 'Watch for file changes and re-index automatically'
-complete -c mdvdb -n '__fish_use_subcommand' -a init -d 'Initialize a new .markdownvdb config file'"#
+complete -c mdvdb -n '__fish_use_subcommand' -a init -d 'Initialize a new .markdownvdb config file'
+complete -c mdvdb -n '__fish_use_subcommand' -a config -d 'Show resolved configuration'
+complete -c mdvdb -n '__fish_use_subcommand' -a doctor -d 'Run diagnostic checks'
+complete -c mdvdb -n '__fish_use_subcommand' -a links -d 'Show links originating from a file'
+complete -c mdvdb -n '__fish_use_subcommand' -a backlinks -d 'Show backlinks pointing to a file'
+complete -c mdvdb -n '__fish_use_subcommand' -a orphans -d 'Find orphan files with no links'"#
                 }
                 ShellType::PowerShell => {
                     r#"# mdvdb PowerShell completions
 Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('search', 'ingest', 'status', 'schema', 'clusters', 'tree', 'get', 'watch', 'init')
+    $commands = @('search', 'ingest', 'status', 'schema', 'clusters', 'tree', 'get', 'watch', 'init', 'config', 'doctor', 'links', 'backlinks', 'orphans')
     $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
     }

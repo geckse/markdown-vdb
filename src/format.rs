@@ -10,6 +10,8 @@ use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
 use mdvdb::DocumentInfo;
 use mdvdb::IngestResult;
+use mdvdb::{CheckStatus, DoctorResult};
+use mdvdb::config::Config;
 
 /// Format a timestamp as a human-readable relative time string.
 ///
@@ -745,6 +747,153 @@ pub fn print_orphans(orphans: &[OrphanFile]) {
         "Total:".dimmed(),
         orphans.len().to_string().yellow(),
         if orphans.len() == 1 { "" } else { "s" }
+    );
+}
+
+/// Print success message for `mdvdb init --global`.
+pub fn print_init_global_success(path: &str) {
+    println!(
+        "\n  {} {}\n",
+        "✓".green().bold(),
+        "User config initialized".bold()
+    );
+    println!(
+        "  {} {}",
+        "Config:".dimmed(),
+        path.bold()
+    );
+    println!(
+        "  {}",
+        "Uncomment and set your API key and default settings.".dimmed()
+    );
+    println!();
+}
+
+/// Print the resolved configuration with colored formatting.
+pub fn print_config(config: &Config, user_config_path: Option<&std::path::Path>) {
+    println!("\n  {} {}\n", "●".cyan().bold(), "Configuration".bold());
+
+    println!(
+        "  {}     {:?}",
+        "Provider:".cyan(),
+        config.embedding_provider
+    );
+    println!(
+        "  {}        {}",
+        "Model:".cyan(),
+        config.embedding_model
+    );
+    println!(
+        "  {}   {}",
+        "Dimensions:".cyan(),
+        config.embedding_dimensions.to_string().yellow()
+    );
+    println!(
+        "  {}   {}",
+        "Batch size:".cyan(),
+        config.embedding_batch_size.to_string().yellow()
+    );
+
+    let key_status = if config.openai_api_key.is_some() {
+        "set".green().to_string()
+    } else {
+        "not set".yellow().to_string()
+    };
+    println!("  {}      {}", "API key:".cyan(), key_status);
+
+    println!(
+        "  {}  {}",
+        "Ollama host:".cyan(),
+        config.ollama_host
+    );
+
+    let dirs: Vec<String> = config
+        .source_dirs
+        .iter()
+        .map(|d| d.to_string_lossy().to_string())
+        .collect();
+    println!(
+        "  {}  {}",
+        "Source dirs:".cyan(),
+        dirs.join(", ")
+    );
+
+    if !config.ignore_patterns.is_empty() {
+        println!(
+            "  {}      {}",
+            "Ignore:".cyan(),
+            config.ignore_patterns.join(", ")
+        );
+    }
+
+    println!();
+    println!(
+        "  {}  {} tokens max, {} overlap",
+        "Chunking:".cyan(),
+        config.chunk_max_tokens.to_string().yellow(),
+        config.chunk_overlap_tokens.to_string().yellow()
+    );
+
+    println!(
+        "  {}    mode={:?}, limit={}, min_score={}, rrf_k={}",
+        "Search:".cyan(),
+        config.search_default_mode,
+        config.search_default_limit,
+        config.search_min_score,
+        config.search_rrf_k
+    );
+
+    println!(
+        "  {}  enabled={}, debounce={}ms",
+        "Watching:".cyan(),
+        config.watch_enabled,
+        config.watch_debounce_ms
+    );
+
+    println!(
+        "  {}  enabled={}, threshold={}",
+        "Clustering:".cyan(),
+        config.clustering_enabled,
+        config.clustering_rebalance_threshold
+    );
+
+    if let Some(path) = user_config_path {
+        println!();
+        let status = if path.is_file() { "exists" } else { "not found" };
+        println!(
+            "  {} {} ({})",
+            "User config:".dimmed(),
+            path.display(),
+            status
+        );
+    }
+    println!();
+}
+
+/// Print doctor diagnostic results with colored pass/fail indicators.
+pub fn print_doctor(result: &DoctorResult) {
+    println!("\n  {} {}\n", "●".cyan().bold(), "mdvdb doctor".bold());
+
+    for check in &result.checks {
+        let icon = match check.status {
+            CheckStatus::Pass => "✓".green().bold(),
+            CheckStatus::Fail => "✗".red().bold(),
+            CheckStatus::Warn => "!".yellow().bold(),
+        };
+
+        // Pad the check name for alignment.
+        println!(
+            "  {} {:<25} {}",
+            icon,
+            check.name,
+            check.detail.dimmed()
+        );
+    }
+
+    println!(
+        "\n  {}/{} checks passed\n",
+        result.passed.to_string().green().bold(),
+        result.total
     );
 }
 

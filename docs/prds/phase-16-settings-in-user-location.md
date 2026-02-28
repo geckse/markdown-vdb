@@ -192,9 +192,9 @@ No migration needed. This is purely additive:
 
 12. **Update shell completion scripts in `src/main.rs`** — Add `config` and `doctor` to the bash, zsh, fish, and PowerShell completion scripts alongside the existing commands.
 
-9. **Add unit tests to `src/config.rs`** — Test `user_config_dir()` with `MDVDB_CONFIG_HOME` set, unset, and empty. Test that `MDVDB_NO_USER_CONFIG` prevents loading. All tests use `ENV_MUTEX` (existing pattern).
+13. **Add unit tests to `src/config.rs`** — Test `user_config_dir()` with `MDVDB_CONFIG_HOME` set, unset, and empty. Test that `MDVDB_NO_USER_CONFIG` prevents loading. All tests use `ENV_MUTEX` (existing pattern).
 
-10. **Add integration tests to `tests/config_test.rs`** — Key test cases:
+14. **Add integration tests to `tests/config_test.rs`** — Key test cases:
     - User config provides fallback values (set `MDVDB_CONFIG_HOME` to tempdir, write config, verify values load)
     - Project `.markdownvdb` overrides user config (both set different values for same key, project wins)
     - Shell env overrides user config
@@ -204,14 +204,21 @@ No migration needed. This is purely additive:
     - Full four-level cascade (different keys from each source, all resolve correctly)
     All tests clear `MDVDB_CONFIG_HOME` and `MDVDB_NO_USER_CONFIG` in addition to the existing env var cleanup list.
 
-11. **Add CLI integration tests to `tests/cli_test.rs`** — Key test cases:
+15. **Add CLI integration tests to `tests/cli_test.rs`** — Key test cases:
     - `mdvdb init --global` creates config file at `MDVDB_CONFIG_HOME/config`
     - `mdvdb init --global` twice fails with error
     - `mdvdb config --json` outputs valid JSON with expected fields
     - `mdvdb config` (human mode) contains expected labels
+    - `mdvdb doctor --json` outputs valid JSON with checks array
+    - `mdvdb doctor` shows pass/fail lines for each check
     - CLI process inherits `MDVDB_CONFIG_HOME` and loads user config correctly
 
-12. **Update documentation** — Update the `Config::load()` doc comment to document the new four-file resolution order and the two new env vars (`MDVDB_CONFIG_HOME`, `MDVDB_NO_USER_CONFIG`).
+16. **Add doctor API tests to `tests/api_test.rs`** — Key test cases:
+    - `doctor()` with mock provider returns all Pass/Warn (no Fail since mock needs no API key)
+    - `doctor()` reports correct document/chunk counts after ingest
+    - `doctor()` reports missing source dirs as Fail
+
+17. **Update documentation** — Update the `Config::load()` doc comment to document the new four-file resolution order and the two new env vars (`MDVDB_CONFIG_HOME`, `MDVDB_NO_USER_CONFIG`).
 
 ## Validation Criteria
 
@@ -227,6 +234,11 @@ No migration needed. This is purely additive:
 - [ ] `MDVDB_NO_USER_CONFIG=1` prevents user config from loading
 - [ ] Missing `~/.mdvdb/` directory does not cause errors
 - [ ] Existing tests continue to pass (no env var pollution from user config)
+- [ ] `mdvdb doctor` runs all checks and reports pass/fail with details
+- [ ] `mdvdb doctor --json` outputs valid JSON matching `DoctorResult` struct
+- [ ] Doctor reports `Fail` for unreachable provider (invalid API key)
+- [ ] Doctor reports `Pass` for valid, fully-configured setup after ingest
+- [ ] Doctor reports correct vector/chunk count consistency
 
 ## Anti-Patterns to Avoid
 
