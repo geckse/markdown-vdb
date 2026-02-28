@@ -118,16 +118,14 @@ fn test_fts_heading_boost() {
     let (_dir, fts) = create_fts_dir();
 
     // One chunk with "rust" in heading, another with "rust" only in body
-    let chunks = vec![
-        chunk_data("a.md#0", "some generic programming content", &["Rust Guide"]),
-        chunk_data("b.md#0", "rust is mentioned in the body text", &["Introduction"]),
-    ];
-    fts.upsert_chunks("a.md", &chunks[..1]).unwrap();
-    fts.upsert_chunks("b.md", &chunks[1..]).unwrap();
+    let chunk_a = [chunk_data("a.md#0", "some generic programming content", &["Rust Guide"])];
+    let chunk_b = [chunk_data("b.md#0", "rust is mentioned in the body text", &["Introduction"])];
+    fts.upsert_chunks("a.md", &chunk_a).unwrap();
+    fts.upsert_chunks("b.md", &chunk_b).unwrap();
     fts.commit().unwrap();
 
     let results = fts.search("rust", 10).unwrap();
-    assert!(results.len() >= 1, "should find results for 'rust'");
+    assert!(!results.is_empty(), "should find results for 'rust'");
     // The chunk with "Rust" in heading should ideally score higher
     // (but we just verify both are found — boost is a ranking detail)
 }

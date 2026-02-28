@@ -97,11 +97,11 @@ struct SearchArgs {
     mode: Option<SearchMode>,
 
     /// Shorthand for --mode=semantic
-    #[arg(long, conflicts_with = "lexical")]
+    #[arg(long, conflicts_with_all = ["lexical", "mode"])]
     semantic: bool,
 
     /// Shorthand for --mode=lexical
-    #[arg(long, conflicts_with = "semantic")]
+    #[arg(long, conflicts_with_all = ["semantic", "mode"])]
     lexical: bool,
 
     /// Output results as JSON

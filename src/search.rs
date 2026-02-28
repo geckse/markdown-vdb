@@ -10,21 +10,16 @@ use crate::fts::FtsIndex;
 use crate::index::state::Index;
 
 /// Search mode controlling which retrieval signals are used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
     /// Both semantic (HNSW) and lexical (BM25) search, fused via RRF.
+    #[default]
     Hybrid,
     /// Semantic search only (embedding + HNSW).
     Semantic,
     /// Lexical search only (BM25 via Tantivy). No embedding API call needed.
     Lexical,
-}
-
-impl Default for SearchMode {
-    fn default() -> Self {
-        Self::Hybrid
-    }
 }
 
 impl FromStr for SearchMode {

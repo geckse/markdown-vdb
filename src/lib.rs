@@ -254,6 +254,25 @@ impl MarkdownVdb {
 
         info!(files = discovered.len(), "discovered markdown files");
 
+        // Full ingest: clear FTS index for a clean rebuild.
+        if options.full {
+            debug!("full ingest: clearing FTS index for rebuild");
+            self.fts_index.delete_all()?;
+            self.fts_index.commit()?;
+        }
+
+        // Consistency guard: if FTS has 0 docs but vector index has docs,
+        // force re-indexing of all files into FTS.
+        let fts_doc_count = self.fts_index.num_docs().unwrap_or(0);
+        let vector_doc_count = self.index.status().document_count;
+        let fts_needs_rebuild = !options.full && fts_doc_count == 0 && vector_doc_count > 0;
+        if fts_needs_rebuild {
+            info!(
+                vector_docs = vector_doc_count,
+                "FTS index empty but vector index has documents — will rebuild FTS"
+            );
+        }
+
         // Get existing hashes from index for skip detection.
         let existing_hashes = self.index.get_file_hashes();
         let existing_paths: std::collections::HashSet<String> =
@@ -389,6 +408,37 @@ impl MarkdownVdb {
             result.files_indexed += 1;
             result.chunks_created += chunks.len();
             debug!(path = %path.display(), chunks = chunks.len(), "indexed");
+        }
+
+        // Consistency guard: rebuild FTS from stored chunks for files that
+        // were skipped (already in vector index but missing from FTS).
+        if fts_needs_rebuild {
+            info!("rebuilding FTS index from stored chunks");
+            let file_hashes = self.index.get_file_hashes();
+            for path_str in file_hashes.keys() {
+                // Skip files we already upserted above.
+                if parsed_files.keys().any(|p| p.to_string_lossy() == *path_str) {
+                    continue;
+                }
+                if let Some(file_entry) = self.index.get_file(path_str) {
+                    let fts_chunks: Vec<fts::FtsChunkData> = file_entry
+                        .chunk_ids
+                        .iter()
+                        .filter_map(|cid| {
+                            self.index.get_chunk(cid).map(|sc| fts::FtsChunkData {
+                                chunk_id: cid.clone(),
+                                source_path: sc.source_path.clone(),
+                                content: sc.content.clone(),
+                                heading_hierarchy: sc.heading_hierarchy.join(" > "),
+                            })
+                        })
+                        .collect();
+                    if !fts_chunks.is_empty() {
+                        self.fts_index.upsert_chunks(path_str, &fts_chunks)?;
+                    }
+                }
+            }
+            debug!("FTS rebuild complete");
         }
 
         // Remove files that no longer exist on disk (only for full discovery, not single file).
@@ -540,6 +590,11 @@ MDVDB_CHUNK_OVERLAP_TOKENS=50
 # Search defaults
 MDVDB_SEARCH_DEFAULT_LIMIT=10
 MDVDB_SEARCH_MIN_SCORE=0.0
+MDVDB_SEARCH_MODE=hybrid
+MDVDB_SEARCH_RRF_K=60.0
+
+# Full-text search index directory
+MDVDB_FTS_INDEX_DIR=.markdownvdb.fts
 
 # File watching
 MDVDB_WATCH=true

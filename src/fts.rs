@@ -337,23 +337,21 @@ mod tests {
         let path = dir.path().join("fts_idx");
         let idx = FtsIndex::open_or_create(&path).unwrap();
 
-        let chunks = vec![
-            FtsChunkData {
-                chunk_id: "a.md#0".into(),
-                source_path: "a.md".into(),
-                content: "some unrelated body text here".into(),
-                heading_hierarchy: "database optimization techniques".into(),
-            },
-            FtsChunkData {
-                chunk_id: "b.md#0".into(),
-                source_path: "b.md".into(),
-                content: "database optimization techniques explained in detail".into(),
-                heading_hierarchy: "some unrelated heading".into(),
-            },
-        ];
+        let chunk_a = [FtsChunkData {
+            chunk_id: "a.md#0".into(),
+            source_path: "a.md".into(),
+            content: "some unrelated body text here".into(),
+            heading_hierarchy: "database optimization techniques".into(),
+        }];
+        let chunk_b = [FtsChunkData {
+            chunk_id: "b.md#0".into(),
+            source_path: "b.md".into(),
+            content: "database optimization techniques explained in detail".into(),
+            heading_hierarchy: "some unrelated heading".into(),
+        }];
 
-        idx.upsert_chunks("a.md", &chunks[0..1]).unwrap();
-        idx.upsert_chunks("b.md", &chunks[1..2]).unwrap();
+        idx.upsert_chunks("a.md", &chunk_a).unwrap();
+        idx.upsert_chunks("b.md", &chunk_b).unwrap();
         idx.commit().unwrap();
 
         let results = idx.search("database optimization", 10).unwrap();
