@@ -625,7 +625,18 @@ async fn run() -> anyhow::Result<()> {
                 format::print_watch_started(&dirs);
             }
 
-            vdb.watch(cancel, None).await?;
+            let use_json = json;
+            let callback: mdvdb::WatchEventCallback = Box::new(move |report| {
+                if use_json {
+                    if let Ok(line) = serde_json::to_string(report) {
+                        println!("{line}");
+                    }
+                } else {
+                    format::print_watch_event(report);
+                }
+            });
+
+            vdb.watch(cancel, Some(callback)).await?;
         }
         Some(Commands::Init(args)) => {
             if args.global {

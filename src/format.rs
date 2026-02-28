@@ -609,6 +609,38 @@ pub fn print_watch_started(dirs: &[String]) {
     );
 }
 
+/// Print a single watch event with status icon, path, chunk count, and duration.
+pub fn print_watch_event(report: &mdvdb::WatchEventReport) {
+    use mdvdb::WatchEventType;
+
+    let (icon, label) = match (&report.event_type, report.success) {
+        (_, false) => ("✗".red().bold(), "error".red()),
+        (WatchEventType::Deleted, true) => ("−".yellow().bold(), "deleted".yellow()),
+        (WatchEventType::Renamed, true) => ("↻".blue().bold(), "renamed".blue()),
+        _ => ("✓".green().bold(), "indexed".green()),
+    };
+
+    let chunks = if report.chunks_processed > 0 {
+        format!(" ({} chunks)", report.chunks_processed)
+    } else {
+        String::new()
+    };
+
+    let duration = format!("{}ms", report.duration_ms).dimmed();
+
+    if let Some(ref err) = report.error {
+        println!(
+            "  {} {} {} {} — {}",
+            icon, label, report.path.bold(), duration, err.red()
+        );
+    } else {
+        println!(
+            "  {} {} {}{} {}",
+            icon, label, report.path.bold(), chunks.dimmed(), duration
+        );
+    }
+}
+
 /// Print init success message with green checkmark.
 pub fn print_init_success(path: &str) {
     println!(
