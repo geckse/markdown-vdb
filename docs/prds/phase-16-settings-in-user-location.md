@@ -13,6 +13,7 @@ Currently, every mdvdb project requires its own `.markdownvdb` file (or shell en
 - Add `~/.mdvdb/config` as a fourth file source in the config cascade, below project files but above built-in defaults
 - Add `mdvdb init --global` to create the user config file with commented-out defaults
 - Add `mdvdb config` subcommand to display the resolved configuration
+- Add `mdvdb doctor` diagnostic command to verify config, provider connectivity, and index integrity
 - Maintain full backward compatibility — users who don't create `~/.mdvdb/config` see zero behavior change
 - Allow any setting to be placed at any level (no setting restrictions)
 
@@ -80,6 +81,34 @@ pub fn user_config_path() -> Option<PathBuf> {
 
 **`mdvdb config [--json]`** — Prints the fully resolved configuration. In JSON mode, serializes the `Config` struct. In human mode, prints labeled key-value pairs.
 
+**`mdvdb doctor [--json]`** — Runs a suite of diagnostic checks and reports pass/fail for each. Checks include:
+1. **Config resolution** — Can config load without errors? Show resolved provider, model, dimensions.
+2. **User config** — Does `~/.mdvdb/config` exist? Is it readable?
+3. **Project config** — Does `.markdownvdb` directory exist? Is there a config file?
+4. **API key present** — Is `OPENAI_API_KEY` (or relevant provider key) set?
+5. **Provider connectivity** — Can we reach the embedding API? Send a minimal test embedding request (single word like "test") and verify a vector comes back. Timeout after 5 seconds.
+6. **Index integrity** — Does the index file exist? Can it be opened? Do vector count and chunk count match? Are HNSW keys consistent with metadata?
+7. **Source directories** — Do configured source dirs exist and contain `.md` files?
+
+Output format (human):
+```
+  ● mdvdb doctor
+
+  ✓ Config loaded                  openai / text-embedding-3-small / 1536
+  ✓ User config                    ~/.mdvdb/config
+  ✗ Project config                 .markdownvdb not found
+  ✓ API key                        OPENAI_API_KEY is set
+  ✓ Provider reachable             200 OK (124ms)
+  ✓ Index                          42 docs, 128 chunks, 128 vectors
+  ✓ Source directories             docs/ notes/ (67 .md files)
+
+  6/7 checks passed
+```
+
+JSON mode outputs a `DoctorResult` struct with per-check status and details.
+
+**`MarkdownVdb::doctor()`** — New async method in `src/lib.rs` that runs all checks and returns `DoctorResult`. The provider connectivity check reuses the existing `EmbeddingProvider::embed_batch()` with a single-item input.
+
 **`MarkdownVdb::init_global(path)`** — New static method in `src/lib.rs` that creates the user config file at the given path.
 
 ### Migration Strategy
@@ -124,7 +153,44 @@ No migration needed. This is purely additive:
 
 7. **Add `print_config()` and `print_init_global_success()` to `src/format.rs`** — `print_config()` displays all resolved fields in the existing colored label/value style (matching `print_status()`). Show the user config path at the bottom if resolvable. `print_init_global_success()` follows the `print_init_success()` pattern with a green checkmark, the config path, and a one-line explanation.
 
-8. **Update shell completion scripts in `src/main.rs`** — Add `config` to the bash, zsh, fish, and PowerShell completion scripts alongside the existing commands.
+8. **Add `Doctor` subcommand to `src/main.rs`** — New `Doctor(DoctorArgs)` variant in `Commands` enum. `DoctorArgs` has `#[arg(long)] json: bool`. The handler calls `vdb.doctor().await?` and prints via `format::print_doctor()` or JSON serialize. Note: `doctor` needs an open VDB to check the index, but should also handle the case where the index doesn't exist (report as a finding, not an error).
+
+9. **Add `DoctorResult`, `DoctorCheck`, `CheckStatus` types to `src/lib.rs`** — Define the result types:
+   ```rust
+   #[derive(Debug, Clone, Serialize)]
+   pub struct DoctorResult {
+       pub checks: Vec<DoctorCheck>,
+       pub passed: usize,
+       pub total: usize,
+   }
+
+   #[derive(Debug, Clone, Serialize)]
+   pub struct DoctorCheck {
+       pub name: String,
+       pub status: CheckStatus,
+       pub detail: String,
+   }
+
+   #[derive(Debug, Clone, Serialize)]
+   pub enum CheckStatus {
+       Pass,
+       Fail,
+       Warn,
+   }
+   ```
+
+10. **Implement `MarkdownVdb::doctor()` in `src/lib.rs`** — Async method that runs each check sequentially:
+    - Config check: always passes (config already loaded at this point), report provider/model/dimensions
+    - User config: check `Config::user_config_path()` existence
+    - Project config: check `.markdownvdb` directory existence
+    - API key: check relevant env var based on provider type (skip for Mock provider)
+    - Provider connectivity: `provider.embed_batch(&["test".to_string()])` with a 5-second `tokio::time::timeout`. Report latency on success. Mark as `Warn` (not Fail) for Mock provider.
+    - Index integrity: check vector count matches chunk count in metadata. Check HNSW key consistency.
+    - Source dirs: check each configured source dir exists, count `.md` files via `discovery::discover_files()`
+
+11. **Add `print_doctor()` to `src/format.rs`** — Format each check as a colored line: green `✓` for Pass, red `✗` for Fail, yellow `!` for Warn. Summary line at the bottom with pass/total count.
+
+12. **Update shell completion scripts in `src/main.rs`** — Add `config` and `doctor` to the bash, zsh, fish, and PowerShell completion scripts alongside the existing commands.
 
 9. **Add unit tests to `src/config.rs`** — Test `user_config_dir()` with `MDVDB_CONFIG_HOME` set, unset, and empty. Test that `MDVDB_NO_USER_CONFIG` prevents loading. All tests use `ENV_MUTEX` (existing pattern).
 
