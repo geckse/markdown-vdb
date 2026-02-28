@@ -395,7 +395,7 @@ impl MarkdownVdb {
 
         // Helper: check if cancellation has been requested.
         let is_cancelled = || {
-            options.cancel.as_ref().map_or(false, |c| c.is_cancelled())
+            options.cancel.as_ref().is_some_and(|c| c.is_cancelled())
         };
 
         emit(&IngestPhase::Discovering);
@@ -888,7 +888,7 @@ impl MarkdownVdb {
         let estimated_api_calls = if total_chunks == 0 {
             0
         } else {
-            (total_chunks + batch_size - 1) / batch_size
+            total_chunks.div_ceil(batch_size)
         };
 
         Ok(IngestPreview {

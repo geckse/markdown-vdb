@@ -398,7 +398,7 @@ async fn run() -> anyhow::Result<()> {
                         mdvdb::IngestPhase::Parsing { current, total, path } => {
                             main_bar.set_length(*total as u64);
                             main_bar.set_position(*current as u64);
-                            main_bar.set_message(format!("{path}"));
+                            main_bar.set_message(path.to_string());
                             status_bar.set_message(format!("[{elapsed_str}] parsing {current}/{total}"));
                         }
                         mdvdb::IngestPhase::Skipped { current, total, path } => {
