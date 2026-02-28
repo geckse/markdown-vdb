@@ -671,6 +671,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Completions(args)) => {
             // Shell completion generation.
+            // TODO: Replace with clap_complete::generate() when clap_complete crate is available offline.
             let script = match args.shell {
                 ShellType::Bash => {
                     r#"# mdvdb bash completions
@@ -682,8 +683,29 @@ _mdvdb() {
     commands="search ingest status schema clusters tree get watch init config doctor links backlinks orphans completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "$commands --help --version --verbose --root" -- "$cur"))
+        COMPREPLY=($(compgen -W "$commands --help --version --verbose --root --json --no-color" -- "$cur"))
     fi
+
+    case "$prev" in
+        ingest)
+            COMPREPLY=($(compgen -W "--reindex --preview --file --full --help" -- "$cur"))
+            ;;
+        search)
+            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --mode --semantic --lexical --path --help" -- "$cur"))
+            ;;
+        tree)
+            COMPREPLY=($(compgen -W "--path --help" -- "$cur"))
+            ;;
+        get)
+            COMPREPLY=($(compgen -f -- "$cur"))
+            ;;
+        init)
+            COMPREPLY=($(compgen -W "--global --help" -- "$cur"))
+            ;;
+        completions)
+            COMPREPLY=($(compgen -W "bash zsh fish power-shell" -- "$cur"))
+            ;;
+    esac
 }
 complete -F _mdvdb mdvdb"#
                 }
@@ -707,7 +729,44 @@ _mdvdb() {
         'backlinks:Show backlinks pointing to a file'
         'orphans:Find orphan files with no links'
     )
-    _describe 'command' commands
+
+    _arguments \
+        '(-v --verbose)'{-v,--verbose}'[Increase log verbosity]' \
+        '--root[Project root directory]:directory:_directories' \
+        '--no-color[Disable colored output]' \
+        '--json[Output results as JSON]' \
+        '--version[Print version information]' \
+        '1:command:->commands' \
+        '*::arg:->args'
+
+    case "$state" in
+        commands)
+            _describe 'command' commands
+            ;;
+        args)
+            case "$words[1]" in
+                ingest)
+                    _arguments \
+                        '--reindex[Force re-embedding of all files]' \
+                        '--preview[Preview what ingestion would do]' \
+                        '--file[Ingest a specific file only]:file:_files' \
+                        '--full[Alias for --reindex (deprecated)]'
+                    ;;
+                search)
+                    _arguments \
+                        '1:query:' \
+                        '(-l --limit)'{-l,--limit}'[Maximum results]:number:' \
+                        '--min-score[Minimum similarity score]:score:' \
+                        '(-f --filter)'{-f,--filter}'[Metadata filter (KEY=VALUE)]:filter:' \
+                        '--boost-links[Boost linked results]' \
+                        '--mode[Search mode]:mode:(hybrid semantic lexical)' \
+                        '--semantic[Shorthand for --mode=semantic]' \
+                        '--lexical[Shorthand for --mode=lexical]' \
+                        '--path[Restrict to path prefix]:path:'
+                    ;;
+            esac
+            ;;
+    esac
 }
 _mdvdb"#
                 }
@@ -726,15 +785,59 @@ complete -c mdvdb -n '__fish_use_subcommand' -a config -d 'Show resolved configu
 complete -c mdvdb -n '__fish_use_subcommand' -a doctor -d 'Run diagnostic checks'
 complete -c mdvdb -n '__fish_use_subcommand' -a links -d 'Show links originating from a file'
 complete -c mdvdb -n '__fish_use_subcommand' -a backlinks -d 'Show backlinks pointing to a file'
-complete -c mdvdb -n '__fish_use_subcommand' -a orphans -d 'Find orphan files with no links'"#
+complete -c mdvdb -n '__fish_use_subcommand' -a orphans -d 'Find orphan files with no links'
+complete -c mdvdb -n '__fish_use_subcommand' -a completions -d 'Generate shell completions'
+
+# Global flags
+complete -c mdvdb -l verbose -s v -d 'Increase log verbosity'
+complete -c mdvdb -l root -d 'Project root directory' -r -F
+complete -c mdvdb -l no-color -d 'Disable colored output'
+complete -c mdvdb -l json -d 'Output results as JSON'
+complete -c mdvdb -l version -d 'Print version information'
+
+# Ingest subcommand flags
+complete -c mdvdb -n '__fish_seen_subcommand_from ingest' -l reindex -d 'Force re-embedding of all files'
+complete -c mdvdb -n '__fish_seen_subcommand_from ingest' -l preview -d 'Preview what ingestion would do'
+complete -c mdvdb -n '__fish_seen_subcommand_from ingest' -l file -d 'Ingest a specific file only' -r -F
+
+# Search subcommand flags
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l limit -s l -d 'Maximum number of results'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l min-score -d 'Minimum similarity score'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l filter -s f -d 'Metadata filter (KEY=VALUE)'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l boost-links -d 'Boost linked results'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l mode -d 'Search mode' -r -a 'hybrid semantic lexical'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l semantic -d 'Shorthand for --mode=semantic'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l lexical -d 'Shorthand for --mode=lexical'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l path -d 'Restrict to path prefix'
+
+# Init subcommand flags
+complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'
+
+# Completions subcommand
+complete -c mdvdb -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish power-shell' -d 'Shell type'"#
                 }
                 ShellType::PowerShell => {
                     r#"# mdvdb PowerShell completions
 Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('search', 'ingest', 'status', 'schema', 'clusters', 'tree', 'get', 'watch', 'init', 'config', 'doctor', 'links', 'backlinks', 'orphans')
-    $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
-        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    $commands = @(
+        @{ Name = 'search'; Tooltip = 'Semantic search across indexed markdown files' },
+        @{ Name = 'ingest'; Tooltip = 'Ingest markdown files into the index' },
+        @{ Name = 'status'; Tooltip = 'Show index status and configuration' },
+        @{ Name = 'schema'; Tooltip = 'Show inferred metadata schema' },
+        @{ Name = 'clusters'; Tooltip = 'Show document clusters' },
+        @{ Name = 'tree'; Tooltip = 'Show file tree with sync status indicators' },
+        @{ Name = 'get'; Tooltip = 'Get metadata for a specific file' },
+        @{ Name = 'watch'; Tooltip = 'Watch for file changes and re-index automatically' },
+        @{ Name = 'init'; Tooltip = 'Initialize a new .markdownvdb config file' },
+        @{ Name = 'config'; Tooltip = 'Show resolved configuration' },
+        @{ Name = 'doctor'; Tooltip = 'Run diagnostic checks' },
+        @{ Name = 'links'; Tooltip = 'Show links originating from a file' },
+        @{ Name = 'backlinks'; Tooltip = 'Show backlinks pointing to a file' },
+        @{ Name = 'orphans'; Tooltip = 'Find orphan files with no links' }
+    )
+    $commands | Where-Object { $_.Name -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_.Name, $_.Name, 'ParameterValue', $_.Tooltip)
     }
 }"#
                 }
