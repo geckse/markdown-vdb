@@ -384,6 +384,8 @@ async fn run() -> anyhow::Result<()> {
             let options = mdvdb::IngestOptions {
                 full: args.full,
                 file: args.file,
+                progress: None,
+                cancel: None,
             };
 
             let use_spinner = !args.json && std::io::IsTerminal::is_terminal(&std::io::stdout());

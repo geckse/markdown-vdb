@@ -26,6 +26,7 @@ pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchRe
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
 pub use tree::{FileState, FileTree, FileTreeNode};
+// Ingest progress and preview types are defined in this file and automatically public.
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,13 +44,95 @@ use crate::fts::FtsIndex;
 use crate::index::state::Index;
 use crate::index::types::EmbeddingConfig;
 
+/// Phase of the ingestion pipeline, reported via progress callbacks.
+#[derive(Debug, Clone, Serialize)]
+pub enum IngestPhase {
+    /// Discovering markdown files on disk.
+    Discovering,
+    /// Parsing a file. `current` and `total` are 1-based counts, `path` is relative.
+    Parsing { current: usize, total: usize, path: String },
+    /// Skipping an unchanged file.
+    Skipped { current: usize, total: usize, path: String },
+    /// Embedding a batch of chunks.
+    Embedding { batch: usize, total_batches: usize },
+    /// Saving the index to disk.
+    Saving,
+    /// Running clustering.
+    Clustering,
+    /// Cleaning up removed files.
+    Cleaning,
+    /// Ingestion complete.
+    Done,
+}
+
+/// Callback invoked to report ingestion progress.
+pub type ProgressCallback = Box<dyn Fn(&IngestPhase) + Send + Sync>;
+
+/// Status of a file in an ingest preview.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub enum PreviewFileStatus {
+    /// File is new (not yet indexed).
+    New,
+    /// File has changed since last index.
+    Changed,
+    /// File is unchanged.
+    Unchanged,
+}
+
+/// Information about a single file in an ingest preview.
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewFileInfo {
+    /// Relative path to the file.
+    pub path: String,
+    /// Whether the file is new, changed, or unchanged.
+    pub status: PreviewFileStatus,
+    /// Number of chunks this file would produce.
+    pub chunks: usize,
+    /// Estimated token count for embedding.
+    pub estimated_tokens: usize,
+}
+
+/// Preview of what an ingestion would do, without actually doing it.
+#[derive(Debug, Clone, Serialize)]
+pub struct IngestPreview {
+    /// Per-file details.
+    pub files: Vec<PreviewFileInfo>,
+    /// Total number of files discovered.
+    pub total_files: usize,
+    /// Number of files that need processing (new + changed).
+    pub files_to_process: usize,
+    /// Number of files that are unchanged.
+    pub files_unchanged: usize,
+    /// Total chunks across all files to process.
+    pub total_chunks: usize,
+    /// Estimated total tokens for embedding.
+    pub estimated_tokens: usize,
+    /// Estimated number of API calls.
+    pub estimated_api_calls: usize,
+}
+
 /// Options controlling the ingestion pipeline.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct IngestOptions {
     /// Force re-embedding of all files, ignoring content hashes.
     pub full: bool,
     /// Ingest only a single file (relative path).
     pub file: Option<PathBuf>,
+    /// Optional progress callback invoked during ingestion.
+    pub progress: Option<ProgressCallback>,
+    /// Optional cancellation token to abort ingestion early.
+    pub cancel: Option<CancellationToken>,
+}
+
+impl std::fmt::Debug for IngestOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngestOptions")
+            .field("full", &self.full)
+            .field("file", &self.file)
+            .field("progress", &self.progress.as_ref().map(|_| "..."))
+            .field("cancel", &self.cancel)
+            .finish()
+    }
 }
 
 /// Result of an ingestion operation.
@@ -69,6 +152,10 @@ pub struct IngestResult {
     pub files_failed: usize,
     /// Errors encountered during ingestion.
     pub errors: Vec<IngestError>,
+    /// Wall-clock duration of the ingestion in seconds.
+    pub duration_secs: f64,
+    /// Whether the ingestion was cancelled before completion.
+    pub cancelled: bool,
 }
 
 /// A single ingestion error for a specific file.
@@ -347,6 +434,8 @@ impl MarkdownVdb {
             api_calls: 0,
             files_failed: 0,
             errors: Vec::new(),
+            duration_secs: 0.0,
+            cancelled: false,
         };
 
         // Parse all files and collect chunks + hashes.
