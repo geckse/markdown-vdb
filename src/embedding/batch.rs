@@ -45,6 +45,7 @@ pub async fn embed_chunks(
     existing_hashes: &HashMap<PathBuf, String>,
     current_hashes: &HashMap<PathBuf, String>,
     batch_size: usize,
+    on_batch: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
 ) -> crate::Result<EmbeddingResult> {
     let mut skipped = Vec::new();
     let mut to_embed: Vec<&Chunk> = Vec::new();
@@ -97,8 +98,7 @@ pub async fn embed_chunks(
     const MAX_CONCURRENT: usize = 4;
 
     type BatchResult = crate::Result<(usize, Vec<(String, Vec<f32>)>)>;
-    let batch_results: Vec<BatchResult> =
-        stream::iter(batches.into_iter().enumerate().map(|(batch_idx, batch)| {
+    let mut stream = stream::iter(batches.into_iter().enumerate().map(|(batch_idx, batch)| {
             let chunk_ids: Vec<String> = batch.iter().map(|c| c.id.clone()).collect();
             let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
             async move {
@@ -110,21 +110,25 @@ pub async fn embed_chunks(
                 );
                 let pairs: Vec<(String, Vec<f32>)> =
                     chunk_ids.into_iter().zip(vectors).collect();
-                Ok((batch_idx, pairs))
+                let result: BatchResult = Ok((batch_idx, pairs));
+                result
             }
         }))
-        .buffer_unordered(MAX_CONCURRENT)
-        .collect()
-        .await;
+        .buffer_unordered(MAX_CONCURRENT);
 
     let mut embeddings: HashMap<String, Vec<f32>> = HashMap::new();
     let mut api_calls: usize = 0;
+    let mut completed_count: usize = 0;
 
-    for result in batch_results {
+    while let Some(result) = stream.next().await {
         let (_batch_idx, pairs) = result?;
         api_calls += 1;
+        completed_count += 1;
         for (id, vector) in pairs {
             embeddings.insert(id, vector);
+        }
+        if let Some(cb) = &on_batch {
+            cb(completed_count, total_batches);
         }
     }
 
@@ -167,7 +171,7 @@ mod tests {
         current.insert(PathBuf::from("a.md"), "hash_a".into());
         current.insert(PathBuf::from("b.md"), "hash_b".into());
 
-        let result = embed_chunks(&provider, &chunks, &existing, &current, 10)
+        let result = embed_chunks(&provider, &chunks, &existing, &current, 10, None)
             .await
             .unwrap();
 
@@ -190,7 +194,7 @@ mod tests {
         let mut current = HashMap::new();
         current.insert(PathBuf::from("a.md"), "same_hash".into());
 
-        let result = embed_chunks(&provider, &chunks, &existing, &current, 10)
+        let result = embed_chunks(&provider, &chunks, &existing, &current, 10, None)
             .await
             .unwrap();
 
@@ -214,7 +218,7 @@ mod tests {
         current.insert(PathBuf::from("a.md"), "hash_a".into());
         current.insert(PathBuf::from("b.md"), "new_hash_b".into());
 
-        let result = embed_chunks(&provider, &chunks, &existing, &current, 10)
+        let result = embed_chunks(&provider, &chunks, &existing, &current, 10, None)
             .await
             .unwrap();
 
@@ -238,7 +242,7 @@ mod tests {
         let mut current = HashMap::new();
         current.insert(PathBuf::from("a.md"), "hash_a".into());
 
-        let result = embed_chunks(&provider, &chunks, &existing, &current, 2)
+        let result = embed_chunks(&provider, &chunks, &existing, &current, 2, None)
             .await
             .unwrap();
 
@@ -254,7 +258,7 @@ mod tests {
         let existing: HashMap<PathBuf, String> = HashMap::new();
         let current: HashMap<PathBuf, String> = HashMap::new();
 
-        let result = embed_chunks(&provider, &chunks, &existing, &current, 10)
+        let result = embed_chunks(&provider, &chunks, &existing, &current, 10, None)
             .await
             .unwrap();
 

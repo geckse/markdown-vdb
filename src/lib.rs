@@ -573,6 +573,7 @@ impl MarkdownVdb {
             &embed_existing,
             &embed_current,
             self.config.embedding_batch_size,
+            None,
         )
         .await?;
 

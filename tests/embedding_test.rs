@@ -65,7 +65,7 @@ async fn test_embed_chunks_with_mock() {
     current.insert(PathBuf::from("docs/intro.md"), "hash_intro".into());
     current.insert(PathBuf::from("docs/guide.md"), "hash_guide".into());
 
-    let result = embed_chunks(&provider, &chunks, &existing, &current, 10)
+    let result = embed_chunks(&provider, &chunks, &existing, &current, 10, None)
         .await
         .unwrap();
 
@@ -107,7 +107,7 @@ async fn test_embed_chunks_hash_skip() {
     current.insert(PathBuf::from("unchanged.md"), "same_hash".into());
     current.insert(PathBuf::from("changed.md"), "new_hash".into());
 
-    let result = embed_chunks(&provider, &chunks, &existing, &current, 10)
+    let result = embed_chunks(&provider, &chunks, &existing, &current, 10, None)
         .await
         .unwrap();
 
