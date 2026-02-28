@@ -109,7 +109,7 @@ pub async fn ingest_file(
     let empty_existing: HashMap<PathBuf, String> = HashMap::new();
 
     let embed_result =
-        batch::embed_chunks(provider, &batch_chunks, &empty_existing, &current_hashes, batch_size)
+        batch::embed_chunks(provider, &batch_chunks, &empty_existing, &current_hashes, batch_size, None)
             .await?;
 
     // 5. Reorder embeddings to match chunk order.

@@ -10,6 +10,7 @@ use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
 use mdvdb::DocumentInfo;
 use mdvdb::IngestResult;
+use mdvdb::{IngestPreview, PreviewFileStatus};
 use mdvdb::{CheckStatus, DoctorResult};
 use mdvdb::config::Config;
 
@@ -284,6 +285,82 @@ pub fn print_ingest_result(result: &IngestResult) {
             );
         }
     }
+
+    if result.duration_secs > 0.0 {
+        let secs = result.duration_secs;
+        let duration_str = if secs < 1.0 {
+            format!("{:.0}ms", secs * 1000.0)
+        } else if secs < 60.0 {
+            format!("{:.1}s", secs)
+        } else {
+            let mins = (secs / 60.0).floor() as u64;
+            let rem = secs - (mins as f64 * 60.0);
+            format!("{}m {:.1}s", mins, rem)
+        };
+        println!(
+            "  {}     {}",
+            "Elapsed:".dimmed(),
+            duration_str.dimmed()
+        );
+    }
+    println!();
+}
+
+/// Print an ingestion preview with colored formatting to stdout.
+pub fn print_ingest_preview(preview: &IngestPreview) {
+    println!(
+        "\n  {} {}\n",
+        "⊙".cyan().bold(),
+        "Ingest Preview".bold()
+    );
+    println!(
+        "  {}    {}",
+        "Total files:".dimmed(),
+        preview.total_files.to_string().green()
+    );
+    println!(
+        "  {} {}",
+        "Files to process:".dimmed(),
+        preview.files_to_process.to_string().green()
+    );
+    println!(
+        "  {}     {}",
+        "Unchanged:".dimmed(),
+        preview.files_unchanged.to_string().yellow()
+    );
+    println!(
+        "  {}  {}",
+        "Total chunks:".dimmed(),
+        preview.total_chunks.to_string().yellow()
+    );
+    println!(
+        "  {}   {}",
+        "Est. tokens:".dimmed(),
+        preview.estimated_tokens.to_string().yellow()
+    );
+    println!(
+        "  {} {}",
+        "Est. API calls:".dimmed(),
+        preview.estimated_api_calls.to_string().yellow()
+    );
+
+    if !preview.files.is_empty() {
+        println!("\n  {}", "Files:".bold());
+        for file in &preview.files {
+            let (icon, color_path) = match file.status {
+                PreviewFileStatus::New => ("✚".green(), file.path.green()),
+                PreviewFileStatus::Changed => ("✎".yellow(), file.path.yellow()),
+                PreviewFileStatus::Unchanged => ("·".dimmed(), file.path.dimmed()),
+            };
+            println!(
+                "    {} {}  {} chunks, {} tokens",
+                icon,
+                color_path,
+                file.chunks,
+                file.estimated_tokens
+            );
+        }
+    }
     println!();
 }
 
@@ -530,6 +607,38 @@ pub fn print_watch_started(dirs: &[String]) {
         "\n  {}",
         "Press Ctrl+C to stop".dimmed()
     );
+}
+
+/// Print a single watch event with status icon, path, chunk count, and duration.
+pub fn print_watch_event(report: &mdvdb::WatchEventReport) {
+    use mdvdb::WatchEventType;
+
+    let (icon, label) = match (&report.event_type, report.success) {
+        (_, false) => ("✗".red().bold(), "error".red()),
+        (WatchEventType::Deleted, true) => ("−".yellow().bold(), "deleted".yellow()),
+        (WatchEventType::Renamed, true) => ("↻".blue().bold(), "renamed".blue()),
+        _ => ("✓".green().bold(), "indexed".green()),
+    };
+
+    let chunks = if report.chunks_processed > 0 {
+        format!(" ({} chunks)", report.chunks_processed)
+    } else {
+        String::new()
+    };
+
+    let duration = format!("{}ms", report.duration_ms).dimmed();
+
+    if let Some(ref err) = report.error {
+        println!(
+            "  {} {} {} {} — {}",
+            icon, label, report.path.bold(), duration, err.red()
+        );
+    } else {
+        println!(
+            "  {} {} {}{} {}",
+            icon, label, report.path.bold(), chunks.dimmed(), duration
+        );
+    }
 }
 
 /// Print init success message with green checkmark.

@@ -1163,3 +1163,169 @@ fn test_search_path_flag() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// New flag & behavior tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_ingest_reindex() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["ingest", "--reindex"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "ingest --reindex should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_cli_ingest_full_alias() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["ingest", "--full"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "ingest --full should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_cli_ingest_preview() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+    fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
+    fs::write(root.join("other.md"), "# Other\n\nMore content.\n").unwrap();
+
+    let output = mdvdb_bin()
+        .args(["ingest", "--preview"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "ingest --preview should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should mention file counts in some form
+    assert!(
+        stdout.contains("2") || stdout.contains("file"),
+        "preview output should contain file information, got: {stdout}"
+    );
+
+    // Preview is read-only — it should not trigger embedding API calls.
+    // (The index file may or may not exist from prior runs; the key check
+    // is that the command exits 0 and reports file info.)
+}
+
+#[test]
+fn test_cli_ingest_preview_json() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+    fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
+
+    let output = mdvdb_bin()
+        .args(["ingest", "--preview", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "ingest --preview --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("should be valid JSON: {e}, got: {stdout}"));
+
+    assert!(
+        json.get("total_files").is_some(),
+        "JSON should have total_files field"
+    );
+    assert!(
+        json.get("total_chunks").is_some(),
+        "JSON should have total_chunks field"
+    );
+    assert!(
+        json.get("estimated_tokens").is_some(),
+        "JSON should have estimated_tokens field"
+    );
+}
+
+#[test]
+fn test_cli_global_json_flag() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["--json", "status"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "--json status should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("should be valid JSON: {e}, got: {stdout}"));
+
+    assert!(
+        json.is_object(),
+        "global --json flag should produce JSON output"
+    );
+}
+
+#[test]
+fn test_cli_completions() {
+    let output = mdvdb_bin()
+        .args(["completions", "bash"])
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(
+        output.status.success(),
+        "completions bash should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("mdvdb"),
+        "completions output should contain 'mdvdb'"
+    );
+    assert!(
+        stdout.contains("complete") || stdout.contains("COMPREPLY") || stdout.contains("compgen"),
+        "completions output should contain completion-related keywords"
+    );
+}

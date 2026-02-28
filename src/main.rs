@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long, global = true)]
     no_color: bool,
 
+    /// Output results as JSON
+    #[arg(long, global = true)]
+    json: bool,
+
     /// Print version information with logo
     #[arg(long)]
     version: bool,
@@ -149,10 +153,6 @@ struct SearchArgs {
     #[arg(long, conflicts_with_all = ["semantic", "mode"])]
     lexical: bool,
 
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-
     /// Restrict search to files under this path prefix
     #[arg(long)]
     path: Option<String>,
@@ -160,94 +160,62 @@ struct SearchArgs {
 
 #[derive(Parser)]
 struct IngestArgs {
-    /// Force full re-ingestion of all files
+    /// Force re-embedding of all files
     #[arg(long)]
+    reindex: bool,
+
+    /// Hidden alias for --reindex (deprecated)
+    #[arg(long, hide = true)]
     full: bool,
 
     /// Ingest a specific file only
     #[arg(long)]
     file: Option<PathBuf>,
 
-    /// Output results as JSON
+    /// Preview what ingestion would do without actually ingesting
     #[arg(long)]
-    json: bool,
+    preview: bool,
 }
 
 #[derive(Parser)]
-struct StatusArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct StatusArgs {}
 
 #[derive(Parser)]
-struct SchemaArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct SchemaArgs {}
 
 #[derive(Parser)]
-struct ClustersArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct ClustersArgs {}
 
 #[derive(Parser)]
 struct TreeArgs {
     /// Restrict tree to files under this path prefix
     #[arg(long)]
     path: Option<String>,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
 struct GetArgs {
     /// Path to the markdown file
     file_path: PathBuf,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
-struct WatchArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct WatchArgs {}
 
 #[derive(Parser)]
 struct LinksArgs {
     /// Path to the markdown file
     file_path: PathBuf,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
 struct BacklinksArgs {
     /// Path to the markdown file
     file_path: PathBuf,
-
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
 }
 
 #[derive(Parser)]
-struct OrphansArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct OrphansArgs {}
 
 #[derive(Parser)]
 struct InitArgs {
@@ -257,18 +225,10 @@ struct InitArgs {
 }
 
 #[derive(Parser)]
-struct ConfigArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct ConfigArgs {}
 
 #[derive(Parser)]
-struct DoctorArgs {
-    /// Output results as JSON
-    #[arg(long)]
-    json: bool,
-}
+struct DoctorArgs {}
 
 #[derive(Clone, ValueEnum)]
 enum ShellType {
@@ -327,6 +287,7 @@ async fn run() -> anyhow::Result<()> {
         None => std::env::current_dir()?,
     };
     let config = mdvdb::config::Config::load(&cwd)?;
+    let json = cli.json;
     let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some();
 
     match cli.command {
@@ -365,7 +326,7 @@ async fn run() -> anyhow::Result<()> {
             let effective_mode = query.mode;
             let results = vdb.search(query).await?;
 
-            if args.json {
+            if json {
                 let output = SearchOutput {
                     total_results: results.len(),
                     query: args.query.clone(),
@@ -381,50 +342,129 @@ async fn run() -> anyhow::Result<()> {
         Some(Commands::Ingest(args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
 
-            let options = mdvdb::IngestOptions {
-                full: args.full,
-                file: args.file,
-            };
+            if args.preview {
+                let preview = vdb.preview(args.reindex || args.full, args.file)?;
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &preview)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    format::print_ingest_preview(&preview);
+                }
+                return Ok(());
+            }
 
-            let use_spinner = !args.json && std::io::IsTerminal::is_terminal(&std::io::stdout());
-            let spinner = if use_spinner {
-                let sp = indicatif::ProgressBar::new_spinner();
-                sp.set_message("Ingesting markdown files...");
-                sp.enable_steady_tick(std::time::Duration::from_millis(120));
-                Some(sp)
+            let interactive = !json && std::io::IsTerminal::is_terminal(&std::io::stdout());
+
+            // Set up Ctrl+C cancellation (same pattern as watch command).
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let cancel_clone = cancel.clone();
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.ok();
+                cancel_clone.cancel();
+            });
+
+            // Set up progress bars if interactive.
+            let progress_callback: Option<mdvdb::ProgressCallback> = if interactive {
+                let mp = indicatif::MultiProgress::new();
+                let main_bar = mp.add(indicatif::ProgressBar::new(0));
+                main_bar.set_style(
+                    indicatif::ProgressStyle::with_template(
+                        "  {spinner:.green} [{pos}/{len}] {msg} {wide_bar:.cyan/dim} {percent}%"
+                    )
+                    .unwrap()
+                    .progress_chars("█░░"),
+                );
+                main_bar.enable_steady_tick(std::time::Duration::from_millis(120));
+
+                let status_bar = mp.add(indicatif::ProgressBar::new_spinner());
+                status_bar.set_style(
+                    indicatif::ProgressStyle::with_template(
+                        "  {spinner:.dim} {msg}"
+                    )
+                    .unwrap(),
+                );
+                status_bar.enable_steady_tick(std::time::Duration::from_millis(120));
+
+                let start = std::time::Instant::now();
+
+                Some(Box::new(move |phase: &mdvdb::IngestPhase| {
+                    let elapsed = start.elapsed().as_secs();
+                    let elapsed_str = format!("{}:{:02}", elapsed / 60, elapsed % 60);
+                    match phase {
+                        mdvdb::IngestPhase::Discovering => {
+                            main_bar.set_message("Discovering files...");
+                            status_bar.set_message(format!("[{elapsed_str}] discovering"));
+                        }
+                        mdvdb::IngestPhase::Parsing { current, total, path } => {
+                            main_bar.set_length(*total as u64);
+                            main_bar.set_position(*current as u64);
+                            main_bar.set_message(path.to_string());
+                            status_bar.set_message(format!("[{elapsed_str}] parsing {current}/{total}"));
+                        }
+                        mdvdb::IngestPhase::Skipped { current, total, path } => {
+                            main_bar.set_length(*total as u64);
+                            main_bar.set_position(*current as u64);
+                            main_bar.set_message(format!("{path} (skipped)"));
+                            status_bar.set_message(format!("[{elapsed_str}] skipped {current}/{total}"));
+                        }
+                        mdvdb::IngestPhase::Embedding { batch, total_batches } => {
+                            main_bar.set_message(format!("Embedding batch {batch}/{total_batches}"));
+                            status_bar.set_message(format!("[{elapsed_str}] embedding"));
+                        }
+                        mdvdb::IngestPhase::Saving => {
+                            main_bar.set_message("Saving index...");
+                            status_bar.set_message(format!("[{elapsed_str}] saving"));
+                        }
+                        mdvdb::IngestPhase::Clustering => {
+                            main_bar.set_message("Clustering...");
+                            status_bar.set_message(format!("[{elapsed_str}] clustering"));
+                        }
+                        mdvdb::IngestPhase::Cleaning => {
+                            main_bar.set_message("Cleaning removed files...");
+                            status_bar.set_message(format!("[{elapsed_str}] cleaning"));
+                        }
+                        mdvdb::IngestPhase::Done => {
+                            main_bar.finish_and_clear();
+                            status_bar.finish_and_clear();
+                        }
+                    }
+                }))
             } else {
                 None
             };
 
+            let options = mdvdb::IngestOptions {
+                full: args.reindex || args.full,
+                file: args.file,
+                progress: progress_callback,
+                cancel: Some(cancel),
+            };
+
             let result = vdb.ingest(options).await?;
 
-            if let Some(sp) = spinner {
-                sp.finish_and_clear();
-            }
-
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &result)?;
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_ingest_result(&result);
             }
         }
-        Some(Commands::Status(args)) => {
+        Some(Commands::Status(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let status = vdb.status();
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &status)?;
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_status(&status);
             }
         }
-        Some(Commands::Schema(args)) => {
+        Some(Commands::Schema(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let schema = vdb.schema()?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &schema)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -432,11 +472,11 @@ async fn run() -> anyhow::Result<()> {
                 format::print_schema(&schema, vdb_status.document_count);
             }
         }
-        Some(Commands::Clusters(args)) => {
+        Some(Commands::Clusters(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let clusters = vdb.clusters()?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -447,7 +487,7 @@ async fn run() -> anyhow::Result<()> {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let tree = vdb.file_tree()?;
 
-            if args.json {
+            if json {
                 if let Some(ref prefix) = args.path {
                     if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
                         let filtered = mdvdb::tree::FileTree {
@@ -509,7 +549,7 @@ async fn run() -> anyhow::Result<()> {
             let path_str = args.file_path.to_string_lossy();
             let doc = vdb.get_document(&path_str)?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &doc)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -521,7 +561,7 @@ async fn run() -> anyhow::Result<()> {
             let path_str = args.file_path.to_string_lossy().to_string();
             let result = vdb.links(&path_str)?;
 
-            if args.json {
+            if json {
                 let output = LinksOutput {
                     file: path_str,
                     links: result,
@@ -537,7 +577,7 @@ async fn run() -> anyhow::Result<()> {
             let path_str = args.file_path.to_string_lossy().to_string();
             let result = vdb.backlinks(&path_str)?;
 
-            if args.json {
+            if json {
                 let output = BacklinksOutput {
                     total_backlinks: result.len(),
                     file: path_str,
@@ -549,11 +589,11 @@ async fn run() -> anyhow::Result<()> {
                 format::print_backlinks(&path_str, &result);
             }
         }
-        Some(Commands::Orphans(args)) => {
+        Some(Commands::Orphans(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let result = vdb.orphans()?;
 
-            if args.json {
+            if json {
                 let output = OrphansOutput {
                     total_orphans: result.len(),
                     orphans: result,
@@ -564,7 +604,7 @@ async fn run() -> anyhow::Result<()> {
                 format::print_orphans(&result);
             }
         }
-        Some(Commands::Watch(args)) => {
+        Some(Commands::Watch(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
 
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -574,7 +614,7 @@ async fn run() -> anyhow::Result<()> {
                 cancel_clone.cancel();
             });
 
-            if args.json {
+            if json {
                 let msg = serde_json::json!({"status": "watching", "message": "File watching started"});
                 serde_json::to_writer_pretty(std::io::stdout(), &msg)?;
                 writeln!(std::io::stdout())?;
@@ -585,7 +625,18 @@ async fn run() -> anyhow::Result<()> {
                 format::print_watch_started(&dirs);
             }
 
-            vdb.watch(cancel).await?;
+            let use_json = json;
+            let callback: mdvdb::WatchEventCallback = Box::new(move |report| {
+                if use_json {
+                    if let Ok(line) = serde_json::to_string(report) {
+                        println!("{line}");
+                    }
+                } else {
+                    format::print_watch_event(report);
+                }
+            });
+
+            vdb.watch(cancel, Some(callback)).await?;
         }
         Some(Commands::Init(args)) => {
             if args.global {
@@ -598,8 +649,8 @@ async fn run() -> anyhow::Result<()> {
                 format::print_init_success(&cwd.display().to_string());
             }
         }
-        Some(Commands::Config(args)) => {
-            if args.json {
+        Some(Commands::Config(_args)) => {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &config)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -607,11 +658,11 @@ async fn run() -> anyhow::Result<()> {
                 format::print_config(&config, user_config.as_deref());
             }
         }
-        Some(Commands::Doctor(args)) => {
+        Some(Commands::Doctor(_args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
             let result = vdb.doctor().await?;
 
-            if args.json {
+            if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &result)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -620,6 +671,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Completions(args)) => {
             // Shell completion generation.
+            // TODO: Replace with clap_complete::generate() when clap_complete crate is available offline.
             let script = match args.shell {
                 ShellType::Bash => {
                     r#"# mdvdb bash completions
@@ -631,8 +683,29 @@ _mdvdb() {
     commands="search ingest status schema clusters tree get watch init config doctor links backlinks orphans completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
-        COMPREPLY=($(compgen -W "$commands --help --version --verbose --root" -- "$cur"))
+        COMPREPLY=($(compgen -W "$commands --help --version --verbose --root --json --no-color" -- "$cur"))
     fi
+
+    case "$prev" in
+        ingest)
+            COMPREPLY=($(compgen -W "--reindex --preview --file --full --help" -- "$cur"))
+            ;;
+        search)
+            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --mode --semantic --lexical --path --help" -- "$cur"))
+            ;;
+        tree)
+            COMPREPLY=($(compgen -W "--path --help" -- "$cur"))
+            ;;
+        get)
+            COMPREPLY=($(compgen -f -- "$cur"))
+            ;;
+        init)
+            COMPREPLY=($(compgen -W "--global --help" -- "$cur"))
+            ;;
+        completions)
+            COMPREPLY=($(compgen -W "bash zsh fish power-shell" -- "$cur"))
+            ;;
+    esac
 }
 complete -F _mdvdb mdvdb"#
                 }
@@ -656,7 +729,44 @@ _mdvdb() {
         'backlinks:Show backlinks pointing to a file'
         'orphans:Find orphan files with no links'
     )
-    _describe 'command' commands
+
+    _arguments \
+        '(-v --verbose)'{-v,--verbose}'[Increase log verbosity]' \
+        '--root[Project root directory]:directory:_directories' \
+        '--no-color[Disable colored output]' \
+        '--json[Output results as JSON]' \
+        '--version[Print version information]' \
+        '1:command:->commands' \
+        '*::arg:->args'
+
+    case "$state" in
+        commands)
+            _describe 'command' commands
+            ;;
+        args)
+            case "$words[1]" in
+                ingest)
+                    _arguments \
+                        '--reindex[Force re-embedding of all files]' \
+                        '--preview[Preview what ingestion would do]' \
+                        '--file[Ingest a specific file only]:file:_files' \
+                        '--full[Alias for --reindex (deprecated)]'
+                    ;;
+                search)
+                    _arguments \
+                        '1:query:' \
+                        '(-l --limit)'{-l,--limit}'[Maximum results]:number:' \
+                        '--min-score[Minimum similarity score]:score:' \
+                        '(-f --filter)'{-f,--filter}'[Metadata filter (KEY=VALUE)]:filter:' \
+                        '--boost-links[Boost linked results]' \
+                        '--mode[Search mode]:mode:(hybrid semantic lexical)' \
+                        '--semantic[Shorthand for --mode=semantic]' \
+                        '--lexical[Shorthand for --mode=lexical]' \
+                        '--path[Restrict to path prefix]:path:'
+                    ;;
+            esac
+            ;;
+    esac
 }
 _mdvdb"#
                 }
@@ -675,15 +785,59 @@ complete -c mdvdb -n '__fish_use_subcommand' -a config -d 'Show resolved configu
 complete -c mdvdb -n '__fish_use_subcommand' -a doctor -d 'Run diagnostic checks'
 complete -c mdvdb -n '__fish_use_subcommand' -a links -d 'Show links originating from a file'
 complete -c mdvdb -n '__fish_use_subcommand' -a backlinks -d 'Show backlinks pointing to a file'
-complete -c mdvdb -n '__fish_use_subcommand' -a orphans -d 'Find orphan files with no links'"#
+complete -c mdvdb -n '__fish_use_subcommand' -a orphans -d 'Find orphan files with no links'
+complete -c mdvdb -n '__fish_use_subcommand' -a completions -d 'Generate shell completions'
+
+# Global flags
+complete -c mdvdb -l verbose -s v -d 'Increase log verbosity'
+complete -c mdvdb -l root -d 'Project root directory' -r -F
+complete -c mdvdb -l no-color -d 'Disable colored output'
+complete -c mdvdb -l json -d 'Output results as JSON'
+complete -c mdvdb -l version -d 'Print version information'
+
+# Ingest subcommand flags
+complete -c mdvdb -n '__fish_seen_subcommand_from ingest' -l reindex -d 'Force re-embedding of all files'
+complete -c mdvdb -n '__fish_seen_subcommand_from ingest' -l preview -d 'Preview what ingestion would do'
+complete -c mdvdb -n '__fish_seen_subcommand_from ingest' -l file -d 'Ingest a specific file only' -r -F
+
+# Search subcommand flags
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l limit -s l -d 'Maximum number of results'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l min-score -d 'Minimum similarity score'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l filter -s f -d 'Metadata filter (KEY=VALUE)'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l boost-links -d 'Boost linked results'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l mode -d 'Search mode' -r -a 'hybrid semantic lexical'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l semantic -d 'Shorthand for --mode=semantic'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l lexical -d 'Shorthand for --mode=lexical'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l path -d 'Restrict to path prefix'
+
+# Init subcommand flags
+complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'
+
+# Completions subcommand
+complete -c mdvdb -n '__fish_seen_subcommand_from completions' -a 'bash zsh fish power-shell' -d 'Shell type'"#
                 }
                 ShellType::PowerShell => {
                     r#"# mdvdb PowerShell completions
 Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
-    $commands = @('search', 'ingest', 'status', 'schema', 'clusters', 'tree', 'get', 'watch', 'init', 'config', 'doctor', 'links', 'backlinks', 'orphans')
-    $commands | Where-Object { $_ -like "$wordToComplete*" } | ForEach-Object {
-        [System.Management.Automation.CompletionResult]::new($_, $_, 'ParameterValue', $_)
+    $commands = @(
+        @{ Name = 'search'; Tooltip = 'Semantic search across indexed markdown files' },
+        @{ Name = 'ingest'; Tooltip = 'Ingest markdown files into the index' },
+        @{ Name = 'status'; Tooltip = 'Show index status and configuration' },
+        @{ Name = 'schema'; Tooltip = 'Show inferred metadata schema' },
+        @{ Name = 'clusters'; Tooltip = 'Show document clusters' },
+        @{ Name = 'tree'; Tooltip = 'Show file tree with sync status indicators' },
+        @{ Name = 'get'; Tooltip = 'Get metadata for a specific file' },
+        @{ Name = 'watch'; Tooltip = 'Watch for file changes and re-index automatically' },
+        @{ Name = 'init'; Tooltip = 'Initialize a new .markdownvdb config file' },
+        @{ Name = 'config'; Tooltip = 'Show resolved configuration' },
+        @{ Name = 'doctor'; Tooltip = 'Run diagnostic checks' },
+        @{ Name = 'links'; Tooltip = 'Show links originating from a file' },
+        @{ Name = 'backlinks'; Tooltip = 'Show backlinks pointing to a file' },
+        @{ Name = 'orphans'; Tooltip = 'Find orphan files with no links' }
+    )
+    $commands | Where-Object { $_.Name -like "$wordToComplete*" } | ForEach-Object {
+        [System.Management.Automation.CompletionResult]::new($_.Name, $_.Name, 'ParameterValue', $_.Tooltip)
     }
 }"#
                 }

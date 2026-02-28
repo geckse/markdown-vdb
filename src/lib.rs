@@ -26,6 +26,8 @@ pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchRe
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
 pub use tree::{FileState, FileTree, FileTreeNode};
+pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
+// Ingest progress and preview types are defined in this file and automatically public.
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,13 +45,95 @@ use crate::fts::FtsIndex;
 use crate::index::state::Index;
 use crate::index::types::EmbeddingConfig;
 
+/// Phase of the ingestion pipeline, reported via progress callbacks.
+#[derive(Debug, Clone, Serialize)]
+pub enum IngestPhase {
+    /// Discovering markdown files on disk.
+    Discovering,
+    /// Parsing a file. `current` and `total` are 1-based counts, `path` is relative.
+    Parsing { current: usize, total: usize, path: String },
+    /// Skipping an unchanged file.
+    Skipped { current: usize, total: usize, path: String },
+    /// Embedding a batch of chunks.
+    Embedding { batch: usize, total_batches: usize },
+    /// Saving the index to disk.
+    Saving,
+    /// Running clustering.
+    Clustering,
+    /// Cleaning up removed files.
+    Cleaning,
+    /// Ingestion complete.
+    Done,
+}
+
+/// Callback invoked to report ingestion progress.
+pub type ProgressCallback = Box<dyn Fn(&IngestPhase) + Send + Sync>;
+
+/// Status of a file in an ingest preview.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub enum PreviewFileStatus {
+    /// File is new (not yet indexed).
+    New,
+    /// File has changed since last index.
+    Changed,
+    /// File is unchanged.
+    Unchanged,
+}
+
+/// Information about a single file in an ingest preview.
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewFileInfo {
+    /// Relative path to the file.
+    pub path: String,
+    /// Whether the file is new, changed, or unchanged.
+    pub status: PreviewFileStatus,
+    /// Number of chunks this file would produce.
+    pub chunks: usize,
+    /// Estimated token count for embedding.
+    pub estimated_tokens: usize,
+}
+
+/// Preview of what an ingestion would do, without actually doing it.
+#[derive(Debug, Clone, Serialize)]
+pub struct IngestPreview {
+    /// Per-file details.
+    pub files: Vec<PreviewFileInfo>,
+    /// Total number of files discovered.
+    pub total_files: usize,
+    /// Number of files that need processing (new + changed).
+    pub files_to_process: usize,
+    /// Number of files that are unchanged.
+    pub files_unchanged: usize,
+    /// Total chunks across all files to process.
+    pub total_chunks: usize,
+    /// Estimated total tokens for embedding.
+    pub estimated_tokens: usize,
+    /// Estimated number of API calls.
+    pub estimated_api_calls: usize,
+}
+
 /// Options controlling the ingestion pipeline.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct IngestOptions {
     /// Force re-embedding of all files, ignoring content hashes.
     pub full: bool,
     /// Ingest only a single file (relative path).
     pub file: Option<PathBuf>,
+    /// Optional progress callback invoked during ingestion.
+    pub progress: Option<ProgressCallback>,
+    /// Optional cancellation token to abort ingestion early.
+    pub cancel: Option<CancellationToken>,
+}
+
+impl std::fmt::Debug for IngestOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IngestOptions")
+            .field("full", &self.full)
+            .field("file", &self.file)
+            .field("progress", &self.progress.as_ref().map(|_| "..."))
+            .field("cancel", &self.cancel)
+            .finish()
+    }
 }
 
 /// Result of an ingestion operation.
@@ -69,6 +153,10 @@ pub struct IngestResult {
     pub files_failed: usize,
     /// Errors encountered during ingestion.
     pub errors: Vec<IngestError>,
+    /// Wall-clock duration of the ingestion in seconds.
+    pub duration_secs: f64,
+    /// Whether the ingestion was cancelled before completion.
+    pub cancelled: bool,
 }
 
 /// A single ingestion error for a specific file.
@@ -296,6 +384,22 @@ impl MarkdownVdb {
     ///
     /// Pipeline: discover → parse → hash-compare → chunk → embed → upsert → remove deleted → save.
     pub async fn ingest(&self, options: IngestOptions) -> Result<IngestResult> {
+        let start_time = std::time::Instant::now();
+
+        // Helper: emit progress if callback is set.
+        let emit = |phase: &IngestPhase| {
+            if let Some(ref cb) = options.progress {
+                cb(phase);
+            }
+        };
+
+        // Helper: check if cancellation has been requested.
+        let is_cancelled = || {
+            options.cancel.as_ref().is_some_and(|c| c.is_cancelled())
+        };
+
+        emit(&IngestPhase::Discovering);
+
         let disco = discovery::FileDiscovery::new(&self.root, &self.config);
 
         // Discover files to process.
@@ -314,6 +418,18 @@ impl MarkdownVdb {
         };
 
         info!(files = discovered.len(), "discovered markdown files");
+
+        // Check cancellation after discovery.
+        if is_cancelled() {
+            self.index.save()?;
+            self.fts_index.commit()?;
+            return Ok(IngestResult {
+                files_indexed: 0, files_skipped: 0, files_removed: 0,
+                chunks_created: 0, api_calls: 0, files_failed: 0,
+                errors: Vec::new(), duration_secs: start_time.elapsed().as_secs_f64(),
+                cancelled: true,
+            });
+        }
 
         // Full ingest: clear FTS index for a clean rebuild.
         if options.full {
@@ -347,6 +463,8 @@ impl MarkdownVdb {
             api_calls: 0,
             files_failed: 0,
             errors: Vec::new(),
+            duration_secs: 0.0,
+            cancelled: false,
         };
 
         // Parse all files and collect chunks + hashes.
@@ -357,9 +475,16 @@ impl MarkdownVdb {
         let mut discovered_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
-        for path in &discovered {
+        let total_files = discovered.len();
+        for (file_idx, path) in discovered.iter().enumerate() {
             let path_str = path.to_string_lossy().to_string();
             discovered_paths.insert(path_str.clone());
+
+            emit(&IngestPhase::Parsing {
+                current: file_idx + 1,
+                total: total_files,
+                path: path_str.clone(),
+            });
 
             // Parse the file.
             let md = match parser::parse_markdown_file(&self.root, path) {
@@ -380,6 +505,11 @@ impl MarkdownVdb {
                 if let Some(existing) = existing_hashes.get(&path_str) {
                     if *existing == md.content_hash {
                         debug!(path = %path.display(), "unchanged, skipping");
+                        emit(&IngestPhase::Skipped {
+                            current: file_idx + 1,
+                            total: total_files,
+                            path: path_str.clone(),
+                        });
                         result.files_skipped += 1;
                         current_hashes.insert(path.clone(), md.content_hash.clone());
                         continue;
@@ -419,6 +549,17 @@ impl MarkdownVdb {
             parsed_files.insert(path.clone(), (md, chunks));
         }
 
+        // Check cancellation after parsing.
+        if is_cancelled() {
+            result.cancelled = true;
+            result.duration_secs = start_time.elapsed().as_secs_f64();
+            self.index.save()?;
+            self.fts_index.commit()?;
+            return Ok(result);
+        }
+
+        emit(&IngestPhase::Embedding { batch: 0, total_batches: 0 });
+
         // Embed all changed chunks.
         // For files we're re-embedding, we pass empty existing hashes so nothing is skipped.
         let embed_existing: HashMap<PathBuf, String> = HashMap::new();
@@ -433,10 +574,20 @@ impl MarkdownVdb {
             &embed_existing,
             &embed_current,
             self.config.embedding_batch_size,
+            None,
         )
         .await?;
 
         result.api_calls = embed_result.api_calls;
+
+        // Check cancellation after embedding.
+        if is_cancelled() {
+            result.cancelled = true;
+            result.duration_secs = start_time.elapsed().as_secs_f64();
+            self.index.save()?;
+            self.fts_index.commit()?;
+            return Ok(result);
+        }
 
         // Upsert files with their embeddings.
         for (path, (md, chunks)) in &parsed_files {
@@ -503,6 +654,7 @@ impl MarkdownVdb {
         }
 
         // Remove files that no longer exist on disk (only for full discovery, not single file).
+        emit(&IngestPhase::Cleaning);
         let mut removed_paths: Vec<String> = Vec::new();
         if options.file.is_none() {
             for path_str in &existing_paths {
@@ -560,12 +712,13 @@ impl MarkdownVdb {
         }
 
         // Save vector index first (atomic write-rename), then commit FTS.
-        // If vector save fails, FTS stays uncommitted — consistent on next ingest.
+        emit(&IngestPhase::Saving);
         self.index.save()?;
         self.fts_index.commit()?;
 
         // Run clustering if enabled.
         if self.config.clustering_enabled {
+            emit(&IngestPhase::Clustering);
             let clusterer = clustering::Clusterer::new(&self.config);
             let doc_vectors = self.index.get_document_vectors();
             let doc_contents = self.index.get_document_contents();
@@ -610,12 +763,17 @@ impl MarkdownVdb {
             }
         }
 
+        result.duration_secs = start_time.elapsed().as_secs_f64();
+
+        emit(&IngestPhase::Done);
+
         info!(
             files_indexed = result.files_indexed,
             files_skipped = result.files_skipped,
             files_removed = result.files_removed,
             chunks_created = result.chunks_created,
             api_calls = result.api_calls,
+            duration_secs = result.duration_secs,
             "ingestion complete"
         );
 
@@ -636,6 +794,112 @@ impl MarkdownVdb {
             self.config.bm25_norm_k,
         )
         .await
+    }
+
+    /// Preview what an ingestion would do, without making any API calls or modifying the index.
+    ///
+    /// This is intentionally synchronous because it performs no network requests.
+    /// It discovers, parses, and chunks files, then compares hashes with the existing index.
+    pub fn preview(&self, reindex: bool, file: Option<PathBuf>) -> Result<IngestPreview> {
+        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+
+        // Discover files to process.
+        let discovered = if let Some(ref single_file) = file {
+            let full = self.root.join(single_file);
+            if !full.is_file() {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("file not found: {}", single_file.display()),
+                )));
+            }
+            vec![single_file.clone()]
+        } else {
+            disco.discover()?
+        };
+
+        // Get existing hashes from index for skip detection.
+        let existing_hashes = self.index.get_file_hashes();
+
+        let mut files = Vec::new();
+        let mut total_chunks: usize = 0;
+        let mut estimated_tokens: usize = 0;
+        let mut files_to_process: usize = 0;
+        let mut files_unchanged: usize = 0;
+
+        for path in &discovered {
+            let path_str = path.to_string_lossy().to_string();
+
+            // Parse the file.
+            let md = match parser::parse_markdown_file(&self.root, path) {
+                Ok(md) => md,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to parse during preview");
+                    continue;
+                }
+            };
+
+            // Determine file status.
+            let status = if reindex {
+                PreviewFileStatus::Changed
+            } else if let Some(existing) = existing_hashes.get(&path_str) {
+                if *existing == md.content_hash {
+                    PreviewFileStatus::Unchanged
+                } else {
+                    PreviewFileStatus::Changed
+                }
+            } else {
+                PreviewFileStatus::New
+            };
+
+            // Chunk the document.
+            let chunks = match chunker::chunk_document(
+                &md,
+                self.config.chunk_max_tokens,
+                self.config.chunk_overlap_tokens,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to chunk during preview");
+                    continue;
+                }
+            };
+
+            let chunk_count = chunks.len();
+            let file_tokens: usize = chunks.iter().map(|c| chunker::count_tokens(&c.content)).sum();
+
+            if status != PreviewFileStatus::Unchanged {
+                files_to_process += 1;
+                total_chunks += chunk_count;
+                estimated_tokens += file_tokens;
+            } else {
+                files_unchanged += 1;
+            }
+
+            files.push(PreviewFileInfo {
+                path: path_str,
+                status,
+                chunks: chunk_count,
+                estimated_tokens: file_tokens,
+            });
+        }
+
+        // Estimate API calls: chunks are sent in batches.
+        let batch_size = self.config.embedding_batch_size.max(1);
+        let estimated_api_calls = if total_chunks == 0 {
+            0
+        } else {
+            total_chunks.div_ceil(batch_size)
+        };
+
+        Ok(IngestPreview {
+            total_files: discovered.len(),
+            files_to_process,
+            files_unchanged,
+            total_chunks,
+            estimated_tokens,
+            estimated_api_calls,
+            files,
+        })
     }
 
     /// Return a status snapshot of the index.
@@ -729,13 +993,19 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
     /// Start watching for file changes and re-index incrementally.
     ///
     /// Blocks until the provided `cancel` token is triggered (e.g. Ctrl+C).
-    pub async fn watch(&self, cancel: CancellationToken) -> Result<()> {
+    /// An optional `event_callback` is invoked after each event is processed.
+    pub async fn watch(
+        &self,
+        cancel: CancellationToken,
+        event_callback: Option<watcher::WatchEventCallback>,
+    ) -> Result<()> {
         let w = watcher::Watcher::new(
             self.config.clone(),
             &self.root,
             Arc::clone(&self.index),
             Arc::clone(&self.fts_index),
             Arc::clone(&self.provider),
+            event_callback,
         );
         w.watch(cancel).await
     }

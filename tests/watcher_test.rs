@@ -93,7 +93,7 @@ async fn watcher_detects_new_file() {
     let config = test_config("docs");
     let cancel = CancellationToken::new();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider);
+    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider, None);
 
     let cancel_clone = cancel.clone();
     let root_clone = project_root.clone();
@@ -132,7 +132,7 @@ async fn watcher_detects_modification() {
     let file_path = project_root.join("docs/existing.md");
     fs::write(&file_path, "# Original\n\nOriginal content.").unwrap();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider);
+    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider, None);
 
     let cancel_clone = cancel.clone();
     let watch_handle = tokio::spawn(async move {
@@ -169,7 +169,7 @@ async fn watcher_detects_deletion() {
     let file_path = project_root.join("docs/to_delete.md");
     fs::write(&file_path, "# To Delete\n\nThis will be deleted.").unwrap();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider);
+    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider, None);
 
     let cancel_clone = cancel.clone();
     let watch_handle = tokio::spawn(async move {
@@ -216,7 +216,7 @@ async fn watcher_graceful_shutdown_via_cancellation_token() {
     let config = test_config("docs");
     let cancel = CancellationToken::new();
 
-    let watcher = Watcher::new(config, &project_root, index, fts_index, provider);
+    let watcher = Watcher::new(config, &project_root, index, fts_index, provider, None);
 
     let cancel_clone = cancel.clone();
     let watch_handle = tokio::spawn(async move {
