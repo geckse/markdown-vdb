@@ -60,6 +60,8 @@ pub struct SearchQuery {
     pub filters: Vec<MetadataFilter>,
     /// Search mode: hybrid, semantic, or lexical.
     pub mode: SearchMode,
+    /// Optional path prefix to restrict results to a directory subtree.
+    pub path_prefix: Option<String>,
 }
 
 impl SearchQuery {
@@ -71,6 +73,7 @@ impl SearchQuery {
             min_score: 0.0,
             filters: Vec::new(),
             mode: SearchMode::default(),
+            path_prefix: None,
         }
     }
 
@@ -83,6 +86,12 @@ impl SearchQuery {
     /// Set the minimum cosine similarity score threshold.
     pub fn with_min_score(mut self, min_score: f64) -> Self {
         self.min_score = min_score;
+        self
+    }
+
+    /// Restrict results to files under the given path prefix.
+    pub fn with_path_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.path_prefix = Some(prefix.into());
         self
     }
 
@@ -154,6 +163,8 @@ pub struct SearchResultFile {
     pub frontmatter: Option<Value>,
     /// File size in bytes.
     pub file_size: u64,
+    /// Path split into components (e.g., `["docs", "api", "auth.md"]`).
+    pub path_components: Vec<String>,
 }
 
 /// Execute a search query against the index, supporting hybrid, semantic, and lexical modes.
@@ -285,6 +296,13 @@ fn assemble_results(
             continue;
         };
 
+        // Apply path prefix filter (before file metadata lookup for early short-circuit).
+        if let Some(ref prefix) = query.path_prefix {
+            if !chunk.source_path.starts_with(prefix.as_str()) {
+                continue;
+            }
+        }
+
         // Look up file metadata.
         let Some(file) = index.get_file_metadata(&chunk.source_path) else {
             continue;
@@ -314,6 +332,7 @@ fn assemble_results(
                 path: chunk.source_path.clone(),
                 frontmatter,
                 file_size: file.file_size,
+                path_components: chunk.source_path.split('/').map(String::from).collect(),
             },
         });
 
@@ -501,6 +520,18 @@ mod tests {
         assert_eq!(q.min_score, 0.0);
         assert!(q.filters.is_empty());
         assert_eq!(q.mode, SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn test_path_prefix_defaults_to_none() {
+        let q = SearchQuery::new("hello");
+        assert!(q.path_prefix.is_none());
+    }
+
+    #[test]
+    fn test_search_query_with_path_prefix() {
+        let q = SearchQuery::new("hello").with_path_prefix("docs/");
+        assert_eq!(q.path_prefix, Some("docs/".to_string()));
     }
 
     #[test]

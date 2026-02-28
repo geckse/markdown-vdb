@@ -291,3 +291,86 @@ async fn test_search_default_mode_is_hybrid() {
 
     assert!(!results.is_empty(), "default mode search should return results");
 }
+
+// ---------------------------------------------------------------------------
+// File tree and path prefix API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_file_tree_returns_structure() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join(".markdownvdb"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    // Create files in subdirectories
+    fs::create_dir_all(root.join("docs/guides")).unwrap();
+    fs::write(
+        root.join("readme.md"),
+        "---\ntitle: Readme\n---\n\n# Readme\n\nTop-level readme.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/overview.md"),
+        "---\ntitle: Overview\n---\n\n# Overview\n\nDocs overview.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/guides/start.md"),
+        "---\ntitle: Getting Started\n---\n\n# Getting Started\n\nA guide.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let tree = vdb.file_tree().unwrap();
+
+    // Should have entries covering our files
+    assert!(tree.total_files > 0, "file tree should have files");
+    assert!(tree.total_files >= 3, "should have at least 3 files, got {}", tree.total_files);
+}
+
+#[tokio::test]
+async fn test_search_with_path_prefix() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join(".markdownvdb"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(
+        root.join("top.md"),
+        "---\ntitle: Top\n---\n\n# Top\n\nTop-level content about programming.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/guide.md"),
+        "---\ntitle: Guide\n---\n\n# Guide\n\nA guide about programming.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Search scoped to docs/ directory
+    let query = SearchQuery::new("programming").with_path_prefix("docs/");
+    let results = vdb.search(query).await.unwrap();
+
+    // All results should be within docs/
+    for r in &results {
+        assert!(
+            r.file.path.starts_with("docs/"),
+            "path-scoped result should be under docs/, got: {}",
+            r.file.path
+        );
+    }
+}

@@ -61,8 +61,21 @@ impl EmbeddingProvider for OpenAIProvider {
             return Ok(vec![]);
         }
 
+        // OpenAI rejects empty strings in the input array.
+        // Replace any empty/whitespace-only texts with a single space.
+        let sanitized: Vec<String> = texts
+            .iter()
+            .map(|t| {
+                if t.trim().is_empty() {
+                    " ".to_string()
+                } else {
+                    t.clone()
+                }
+            })
+            .collect();
+
         let request_body = EmbeddingRequest {
-            input: texts,
+            input: &sanitized,
             model: &self.model,
             dimensions: self.dimensions,
         };

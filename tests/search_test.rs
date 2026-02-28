@@ -429,3 +429,73 @@ async fn test_search_mode_with_filter() {
         assert_eq!(fm["status"], "draft", "hybrid + filter should respect metadata filter");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Path prefix search tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_path_prefix_filters_results() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
+    populate_index(&index, "docs/api.md", "h2", Some(json!({"title": "API"})), 2);
+    populate_index(&index, "notes/todo.md", "h3", Some(json!({"title": "Todo"})), 2);
+
+    let query = SearchQuery::new("test").with_path_prefix("docs/");
+    let results = search(&query, &index, &provider, None, 60.0).await.unwrap();
+
+    assert!(!results.is_empty(), "should return results from docs/");
+    for r in &results {
+        assert!(
+            r.file.path.starts_with("docs/"),
+            "expected docs/ prefix, got: {}",
+            r.file.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_path_prefix_no_match() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
+
+    let query = SearchQuery::new("test").with_path_prefix("nonexistent/");
+    let results = search(&query, &index, &provider, None, 60.0).await.unwrap();
+
+    assert!(results.is_empty(), "nonexistent prefix should return no results");
+}
+
+#[tokio::test]
+async fn test_path_prefix_combined_with_metadata_filter() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "docs/draft.md", "h1", Some(json!({"status": "draft"})), 2);
+    populate_index(&index, "docs/published.md", "h2", Some(json!({"status": "published"})), 2);
+    populate_index(&index, "notes/draft.md", "h3", Some(json!({"status": "draft"})), 2);
+
+    let query = SearchQuery::new("test")
+        .with_path_prefix("docs/")
+        .with_filter(MetadataFilter::Equals {
+            field: "status".into(),
+            value: json!("draft"),
+        });
+    let results = search(&query, &index, &provider, None, 60.0).await.unwrap();
+
+    for r in &results {
+        assert!(
+            r.file.path.starts_with("docs/"),
+            "expected docs/ prefix, got: {}",
+            r.file.path
+        );
+        let fm = r.file.frontmatter.as_ref().unwrap();
+        assert_eq!(fm["status"], "draft", "should only return draft docs");
+    }
+}

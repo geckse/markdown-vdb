@@ -11,6 +11,7 @@ pub mod parser;
 pub mod ingest;
 pub mod schema;
 pub mod search;
+pub mod tree;
 pub mod watcher;
 
 pub use error::Error;
@@ -22,6 +23,7 @@ pub use schema::{FieldType, Schema, SchemaField};
 pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
+pub use tree::{FileState, FileTree, FileTreeNode};
 
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -643,6 +645,14 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 .collect()),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Build a file tree showing sync state of all discovered files.
+    ///
+    /// Compares files on disk against the index to classify each as
+    /// indexed, modified, new, or deleted.
+    pub fn file_tree(&self) -> Result<tree::FileTree> {
+        tree::build_file_tree(&self.root, &self.config, &self.index)
     }
 
     /// Get information about an indexed document by its relative path.

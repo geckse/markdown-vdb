@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use mdvdb::search::SearchResult;
 use mdvdb::schema::{FieldType, Schema};
+use mdvdb::tree::FileTree;
 use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
 use mdvdb::DocumentInfo;
@@ -500,6 +501,16 @@ pub fn print_clusters(clusters: &[ClusterSummary]) {
 
         println!();
     }
+}
+
+/// Print file tree with colored formatting to stdout.
+///
+/// Uses `tree::render_tree()` for the actual rendering, then prints to stdout.
+pub fn print_file_tree(tree: &FileTree, colored: bool) {
+    use mdvdb::tree::render_tree;
+
+    let rendered = render_tree(tree, colored);
+    print!("{rendered}");
 }
 
 /// Print watch startup message with green text and directory list.
