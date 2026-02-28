@@ -353,28 +353,94 @@ async fn run() -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            let options = mdvdb::IngestOptions {
-                full: args.reindex || args.full,
-                file: args.file,
-                progress: None,
-                cancel: None,
-            };
+            let interactive = !json && std::io::IsTerminal::is_terminal(&std::io::stdout());
 
-            let use_spinner = !json && std::io::IsTerminal::is_terminal(&std::io::stdout());
-            let spinner = if use_spinner {
-                let sp = indicatif::ProgressBar::new_spinner();
-                sp.set_message("Ingesting markdown files...");
-                sp.enable_steady_tick(std::time::Duration::from_millis(120));
-                Some(sp)
+            // Set up Ctrl+C cancellation (same pattern as watch command).
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let cancel_clone = cancel.clone();
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.ok();
+                cancel_clone.cancel();
+            });
+
+            // Set up progress bars if interactive.
+            let progress_callback: Option<mdvdb::ProgressCallback> = if interactive {
+                let mp = indicatif::MultiProgress::new();
+                let main_bar = mp.add(indicatif::ProgressBar::new(0));
+                main_bar.set_style(
+                    indicatif::ProgressStyle::with_template(
+                        "  {spinner:.green} [{pos}/{len}] {msg} {wide_bar:.cyan/dim} {percent}%"
+                    )
+                    .unwrap()
+                    .progress_chars("█░░"),
+                );
+                main_bar.enable_steady_tick(std::time::Duration::from_millis(120));
+
+                let status_bar = mp.add(indicatif::ProgressBar::new_spinner());
+                status_bar.set_style(
+                    indicatif::ProgressStyle::with_template(
+                        "  {spinner:.dim} {msg}"
+                    )
+                    .unwrap(),
+                );
+                status_bar.enable_steady_tick(std::time::Duration::from_millis(120));
+
+                let start = std::time::Instant::now();
+
+                Some(Box::new(move |phase: &mdvdb::IngestPhase| {
+                    let elapsed = start.elapsed().as_secs();
+                    let elapsed_str = format!("{}:{:02}", elapsed / 60, elapsed % 60);
+                    match phase {
+                        mdvdb::IngestPhase::Discovering => {
+                            main_bar.set_message("Discovering files...");
+                            status_bar.set_message(format!("[{elapsed_str}] discovering"));
+                        }
+                        mdvdb::IngestPhase::Parsing { current, total, path } => {
+                            main_bar.set_length(*total as u64);
+                            main_bar.set_position(*current as u64);
+                            main_bar.set_message(format!("{path}"));
+                            status_bar.set_message(format!("[{elapsed_str}] parsing {current}/{total}"));
+                        }
+                        mdvdb::IngestPhase::Skipped { current, total, path } => {
+                            main_bar.set_length(*total as u64);
+                            main_bar.set_position(*current as u64);
+                            main_bar.set_message(format!("{path} (skipped)"));
+                            status_bar.set_message(format!("[{elapsed_str}] skipped {current}/{total}"));
+                        }
+                        mdvdb::IngestPhase::Embedding { batch, total_batches } => {
+                            main_bar.set_message(format!("Embedding batch {batch}/{total_batches}"));
+                            status_bar.set_message(format!("[{elapsed_str}] embedding"));
+                        }
+                        mdvdb::IngestPhase::Saving => {
+                            main_bar.set_message("Saving index...");
+                            status_bar.set_message(format!("[{elapsed_str}] saving"));
+                        }
+                        mdvdb::IngestPhase::Clustering => {
+                            main_bar.set_message("Clustering...");
+                            status_bar.set_message(format!("[{elapsed_str}] clustering"));
+                        }
+                        mdvdb::IngestPhase::Cleaning => {
+                            main_bar.set_message("Cleaning removed files...");
+                            status_bar.set_message(format!("[{elapsed_str}] cleaning"));
+                        }
+                        mdvdb::IngestPhase::Done => {
+                            main_bar.finish_and_clear();
+                            status_bar.finish_and_clear();
+                        }
+                    }
+                }))
             } else {
                 None
             };
 
-            let result = vdb.ingest(options).await?;
+            let options = mdvdb::IngestOptions {
+                full: args.reindex || args.full,
+                file: args.file,
+                progress: progress_callback,
+                cancel: Some(cancel),
+            };
 
-            if let Some(sp) = spinner {
-                sp.finish_and_clear();
-            }
+            let result = vdb.ingest(options).await?;
 
             if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &result)?;

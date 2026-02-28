@@ -285,6 +285,24 @@ pub fn print_ingest_result(result: &IngestResult) {
             );
         }
     }
+
+    if result.duration_secs > 0.0 {
+        let secs = result.duration_secs;
+        let duration_str = if secs < 1.0 {
+            format!("{:.0}ms", secs * 1000.0)
+        } else if secs < 60.0 {
+            format!("{:.1}s", secs)
+        } else {
+            let mins = (secs / 60.0).floor() as u64;
+            let rem = secs - (mins as f64 * 60.0);
+            format!("{}m {:.1}s", mins, rem)
+        };
+        println!(
+            "  {}     {}",
+            "Elapsed:".dimmed(),
+            duration_str.dimmed()
+        );
+    }
     println!();
 }
 
