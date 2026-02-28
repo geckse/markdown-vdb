@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify_debouncer_full::notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
 use notify_debouncer_full::notify::{EventKind, RecursiveMode};
@@ -15,6 +15,37 @@ use crate::embedding::provider::EmbeddingProvider;
 use crate::error::{Error, Result};
 use crate::fts::{FtsChunkData, FtsIndex};
 use crate::index::state::Index;
+
+use serde::Serialize;
+
+/// Type of watch event for reporting.
+#[derive(Debug, Clone, Serialize)]
+pub enum WatchEventType {
+    Created,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+/// Report generated after processing a single watch event.
+#[derive(Debug, Clone, Serialize)]
+pub struct WatchEventReport {
+    /// The type of filesystem event.
+    pub event_type: WatchEventType,
+    /// Relative path of the affected file.
+    pub path: String,
+    /// Number of chunks processed (0 for deletions or skipped files).
+    pub chunks_processed: usize,
+    /// Duration in milliseconds to process this event.
+    pub duration_ms: u64,
+    /// Whether the event was processed successfully.
+    pub success: bool,
+    /// Error message, if processing failed.
+    pub error: Option<String>,
+}
+
+/// Callback invoked after each watch event is processed.
+pub type WatchEventCallback = Box<dyn Fn(&WatchEventReport) + Send + Sync>;
 
 /// A filesystem event relevant to the index.
 #[derive(Debug, Clone)]
@@ -39,6 +70,7 @@ pub struct Watcher {
     provider: Arc<dyn EmbeddingProvider>,
     #[allow(dead_code)]
     discovery: FileDiscovery,
+    event_callback: Option<WatchEventCallback>,
 }
 
 impl Watcher {
@@ -49,6 +81,7 @@ impl Watcher {
         index: Arc<Index>,
         fts_index: Arc<FtsIndex>,
         provider: Arc<dyn EmbeddingProvider>,
+        event_callback: Option<WatchEventCallback>,
     ) -> Self {
         let discovery = FileDiscovery::new(project_root, &config);
         Self {
@@ -58,6 +91,7 @@ impl Watcher {
             fts_index,
             provider,
             discovery,
+            event_callback,
         }
     }
 
@@ -143,6 +177,38 @@ impl Watcher {
 
     /// Process a single file event.
     pub async fn handle_event(&self, event: &FileEvent) -> Result<()> {
+        let start = Instant::now();
+        let (event_type, path_str) = match event {
+            FileEvent::Created(p) => (WatchEventType::Created, p.to_string_lossy().to_string()),
+            FileEvent::Modified(p) => (WatchEventType::Modified, p.to_string_lossy().to_string()),
+            FileEvent::Deleted(p) => (WatchEventType::Deleted, p.to_string_lossy().to_string()),
+            FileEvent::Renamed { to, .. } => (WatchEventType::Renamed, to.to_string_lossy().to_string()),
+        };
+
+        let result = self.handle_event_inner(event).await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let (success, error, chunks_processed) = match &result {
+            Ok(chunks) => (true, None, *chunks),
+            Err(e) => (false, Some(e.to_string()), 0),
+        };
+
+        if let Some(ref cb) = self.event_callback {
+            cb(&WatchEventReport {
+                event_type,
+                path: path_str,
+                chunks_processed,
+                duration_ms,
+                success,
+                error,
+            });
+        }
+
+        result.map(|_| ())
+    }
+
+    /// Inner implementation of event handling, returns chunk count on success.
+    async fn handle_event_inner(&self, event: &FileEvent) -> Result<usize> {
         match event {
             FileEvent::Created(path) | FileEvent::Modified(path) => {
                 debug!(path = %path.display(), "processing created/modified event");
@@ -161,7 +227,7 @@ impl Watcher {
                 self.fts_index.remove_file(&relative)?;
                 self.fts_index.commit()?;
                 self.index.save()?;
-                Ok(())
+                Ok(0)
             }
             FileEvent::Renamed { from, to } => {
                 let from_str = from.to_string_lossy().to_string();
@@ -179,8 +245,8 @@ impl Watcher {
         }
     }
 
-    /// Parse, chunk, embed, and upsert a single file.
-    async fn process_file(&self, relative_path: &Path) -> Result<()> {
+    /// Parse, chunk, embed, and upsert a single file. Returns the number of chunks processed.
+    async fn process_file(&self, relative_path: &Path) -> Result<usize> {
         let abs_path = self.project_root.join(relative_path);
 
         // If the file no longer exists (deleted between event and processing, or the
@@ -192,7 +258,7 @@ impl Watcher {
             self.fts_index.remove_file(&relative)?;
             self.fts_index.commit()?;
             self.index.save()?;
-            return Ok(());
+            return Ok(0);
         }
 
         // Check content hash to skip unchanged files.
@@ -206,7 +272,7 @@ impl Watcher {
         if let Some(ref hash) = stored_hash {
             if hash == &file.content_hash {
                 debug!(path = %relative_path.display(), "content unchanged, skipping");
-                return Ok(());
+                return Ok(0);
             }
         }
 
@@ -218,7 +284,7 @@ impl Watcher {
 
         if chunks.is_empty() {
             debug!(path = %relative_path.display(), "no chunks produced, skipping");
-            return Ok(());
+            return Ok(0);
         }
 
         // Embed all chunk texts.
@@ -266,13 +332,14 @@ impl Watcher {
 
         self.fts_index.commit()?;
         self.index.save()?;
+        let chunk_count = chunks.len();
         info!(
             path = %relative_path.display(),
-            chunks = chunks.len(),
+            chunks = chunk_count,
             "indexed file"
         );
 
-        Ok(())
+        Ok(chunk_count)
     }
 }
 

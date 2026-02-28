@@ -26,6 +26,7 @@ pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchRe
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
 pub use tree::{FileState, FileTree, FileTreeNode};
+pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
 // Ingest progress and preview types are defined in this file and automatically public.
 
 /// Convenience alias used throughout the crate.
@@ -992,13 +993,19 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
     /// Start watching for file changes and re-index incrementally.
     ///
     /// Blocks until the provided `cancel` token is triggered (e.g. Ctrl+C).
-    pub async fn watch(&self, cancel: CancellationToken) -> Result<()> {
+    /// An optional `event_callback` is invoked after each event is processed.
+    pub async fn watch(
+        &self,
+        cancel: CancellationToken,
+        event_callback: Option<watcher::WatchEventCallback>,
+    ) -> Result<()> {
         let w = watcher::Watcher::new(
             self.config.clone(),
             &self.root,
             Arc::clone(&self.index),
             Arc::clone(&self.fts_index),
             Arc::clone(&self.provider),
+            event_callback,
         );
         w.watch(cancel).await
     }

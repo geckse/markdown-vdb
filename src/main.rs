@@ -587,7 +587,7 @@ async fn run() -> anyhow::Result<()> {
                 format::print_watch_started(&dirs);
             }
 
-            vdb.watch(cancel).await?;
+            vdb.watch(cancel, None).await?;
         }
         Some(Commands::Init(args)) => {
             if args.global {
