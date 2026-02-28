@@ -171,6 +171,10 @@ struct IngestArgs {
     /// Ingest a specific file only
     #[arg(long)]
     file: Option<PathBuf>,
+
+    /// Preview what ingestion would do without actually ingesting
+    #[arg(long)]
+    preview: bool,
 }
 
 #[derive(Parser)]
@@ -337,6 +341,17 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Ingest(args)) => {
             let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+
+            if args.preview {
+                let preview = vdb.preview(args.reindex || args.full, args.file)?;
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &preview)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    format::print_ingest_preview(&preview);
+                }
+                return Ok(());
+            }
 
             let options = mdvdb::IngestOptions {
                 full: args.reindex || args.full,

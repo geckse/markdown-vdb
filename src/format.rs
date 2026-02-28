@@ -10,6 +10,7 @@ use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
 use mdvdb::DocumentInfo;
 use mdvdb::IngestResult;
+use mdvdb::{IngestPreview, PreviewFileStatus};
 use mdvdb::{CheckStatus, DoctorResult};
 use mdvdb::config::Config;
 
@@ -281,6 +282,64 @@ pub fn print_ingest_result(result: &IngestResult) {
                 "✗".red().bold(),
                 err.path,
                 err.message
+            );
+        }
+    }
+    println!();
+}
+
+/// Print an ingestion preview with colored formatting to stdout.
+pub fn print_ingest_preview(preview: &IngestPreview) {
+    println!(
+        "\n  {} {}\n",
+        "⊙".cyan().bold(),
+        "Ingest Preview".bold()
+    );
+    println!(
+        "  {}    {}",
+        "Total files:".dimmed(),
+        preview.total_files.to_string().green()
+    );
+    println!(
+        "  {} {}",
+        "Files to process:".dimmed(),
+        preview.files_to_process.to_string().green()
+    );
+    println!(
+        "  {}     {}",
+        "Unchanged:".dimmed(),
+        preview.files_unchanged.to_string().yellow()
+    );
+    println!(
+        "  {}  {}",
+        "Total chunks:".dimmed(),
+        preview.total_chunks.to_string().yellow()
+    );
+    println!(
+        "  {}   {}",
+        "Est. tokens:".dimmed(),
+        preview.estimated_tokens.to_string().yellow()
+    );
+    println!(
+        "  {} {}",
+        "Est. API calls:".dimmed(),
+        preview.estimated_api_calls.to_string().yellow()
+    );
+
+    if !preview.files.is_empty() {
+        println!("\n  {}", "Files:".bold());
+        for file in &preview.files {
+            let (icon, color_path) = match file.status {
+                PreviewFileStatus::New => ("✚".green(), file.path.green()),
+                PreviewFileStatus::Changed => ("✎".yellow(), file.path.yellow()),
+                PreviewFileStatus::Unchanged => ("·".dimmed(), file.path.dimmed()),
+            };
+            println!(
+                "    {} {}  {} chunks, {} tokens",
+                icon,
+                color_path,
+                file.chunks,
+                file.estimated_tokens
             );
         }
     }
