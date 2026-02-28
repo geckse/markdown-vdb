@@ -37,17 +37,17 @@ impl Index {
         let (metadata, hnsw) = storage::load_index(path)?;
 
         // Build id_to_key mapping and compute next_key from chunk IDs.
-        // Chunk keys in the HNSW are assigned sequentially starting from 0.
-        let mut id_to_key = HashMap::new();
-        let mut max_key: Option<u64> = None;
+        // Sort chunk IDs alphabetically for deterministic key assignment,
+        // ensuring reproducible mapping regardless of HashMap iteration order.
+        let mut sorted_chunk_ids: Vec<&String> = metadata.chunks.keys().collect();
+        sorted_chunk_ids.sort();
 
-        for (idx, chunk_id) in metadata.chunks.keys().enumerate() {
-            let key = idx as u64;
-            id_to_key.insert(chunk_id.clone(), key);
-            max_key = Some(max_key.map_or(key, |m: u64| m.max(key)));
+        let mut id_to_key = HashMap::new();
+        for (idx, chunk_id) in sorted_chunk_ids.iter().enumerate() {
+            id_to_key.insert((*chunk_id).clone(), idx as u64);
         }
 
-        let next_key = max_key.map_or(0, |k| k + 1);
+        let next_key = sorted_chunk_ids.len() as u64;
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -404,6 +404,9 @@ impl Index {
     }
 
     /// Persist the index to disk atomically.
+    ///
+    /// Compacts HNSW keys to sequential 0..N matching sorted chunk ID order,
+    /// ensuring that after any number of save/load cycles, keys always match.
     pub fn save(&self) -> Result<()> {
         let mut state = self.state.write();
 
@@ -411,6 +414,37 @@ impl Index {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+
+        // Compact HNSW keys: create a new index with sequential keys 0..N
+        // matching alphabetically sorted chunk IDs.
+        let dims = state.metadata.embedding_config.dimensions;
+        let mut sorted_chunk_ids: Vec<&String> = state.metadata.chunks.keys().collect();
+        sorted_chunk_ids.sort();
+
+        let new_hnsw = storage::create_hnsw(dims)?;
+        let n = sorted_chunk_ids.len();
+        if n > 0 {
+            new_hnsw
+                .reserve(n.max(10))
+                .map_err(|e| Error::Serialization(format!("usearch reserve: {e}")))?;
+        }
+
+        let mut new_id_to_key = HashMap::new();
+        let mut buf = vec![0.0f32; dims];
+        for (new_key, chunk_id) in sorted_chunk_ids.iter().enumerate() {
+            if let Some(&old_key) = state.id_to_key.get(*chunk_id) {
+                if state.hnsw.get(old_key, &mut buf).is_ok() {
+                    new_hnsw
+                        .add(new_key as u64, &buf)
+                        .map_err(|e| Error::Serialization(format!("usearch add: {e}")))?;
+                }
+            }
+            new_id_to_key.insert((*chunk_id).clone(), new_key as u64);
+        }
+
+        state.hnsw = new_hnsw;
+        state.id_to_key = new_id_to_key;
+        state.next_key = n as u64;
 
         storage::write_index(&self.path, &state.metadata, &state.hnsw)?;
         state.dirty = false;
