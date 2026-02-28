@@ -84,7 +84,7 @@ docs/prds/               # PRD specifications for all 10 phases (reference)
 ## Core Design Decisions
 
 - **Config:** Dotenv-style `.markdownvdb` file, NOT TOML/YAML. Resolution: shell env > file > defaults
-- **Index format:** Single binary file `[64B header][rkyv metadata][usearch HNSW]` — memory-mapped, portable
+- **Index directory:** `.markdownvdb/` contains `index` (binary: `[64B header][rkyv metadata][usearch HNSW]`) + `fts/` (Tantivy BM25 segments). Configured via `MDVDB_INDEX_DIR`.
 - **Paths:** ALL file paths in the index are relative to project root. Never absolute.
 - **Errors:** `thiserror` for typed library errors, `anyhow` only at CLI boundary in `main.rs`
 - **Concurrency:** `parking_lot::RwLock` (not std). Read lock for queries, write lock only during upsert.

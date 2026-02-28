@@ -21,8 +21,9 @@ fn setup_and_ingest() -> TempDir {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -93,8 +94,8 @@ fn test_init_creates_config_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        dir.path().join(".markdownvdb").exists(),
-        ".markdownvdb file should be created"
+        dir.path().join(".markdownvdb").join(".config").exists(),
+        ".markdownvdb/.config should be created"
     );
 }
 
@@ -183,8 +184,9 @@ fn test_ingest_json_output() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -463,8 +465,9 @@ fn test_ingest_json_unchanged() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -639,6 +642,62 @@ fn test_search_invalid_mode_rejected() {
     );
 }
 
+#[test]
+fn test_search_json_output_includes_mode() {
+    let dir = setup_and_ingest();
+
+    // Test with explicit lexical mode.
+    let output = mdvdb_bin()
+        .args(["search", "rust programming", "--mode", "lexical", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode lexical --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert_eq!(
+        json["mode"], "lexical",
+        "JSON output should include mode field with value 'lexical'"
+    );
+
+    // Test with hybrid mode (default).
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "hybrid", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert_eq!(
+        json["mode"], "hybrid",
+        "JSON output should include mode field with value 'hybrid'"
+    );
+}
+
+#[test]
+fn test_search_semantic_lexical_flags_conflict() {
+    let dir = setup_and_ingest();
+
+    // Using both --semantic and --lexical should fail (clap conflict).
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--semantic", "--lexical"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        !output.status.success(),
+        "--semantic and --lexical together should fail"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tree command tests
 // ---------------------------------------------------------------------------
@@ -647,8 +706,9 @@ fn setup_and_ingest_with_subdirs() -> TempDir {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();

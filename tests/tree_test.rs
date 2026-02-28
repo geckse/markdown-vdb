@@ -22,7 +22,6 @@ fn mock_config() -> Config {
         ollama_host: "http://localhost:11434".into(),
         embedding_endpoint: None,
         source_dirs: vec![PathBuf::from(".")],
-        index_file: PathBuf::from(".markdownvdb.index"),
         ignore_patterns: vec![],
         watch_enabled: false,
         watch_debounce_ms: 300,
@@ -32,9 +31,9 @@ fn mock_config() -> Config {
         clustering_rebalance_threshold: 50,
         search_default_limit: 10,
         search_min_score: 0.0,
-        fts_index_dir: PathBuf::from(".markdownvdb.fts"),
         search_default_mode: mdvdb::SearchMode::Hybrid,
         search_rrf_k: 60.0,
+        bm25_norm_k: 1.5,
     }
 }
 
@@ -42,8 +41,9 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -68,8 +68,9 @@ fn setup_nested_project() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();

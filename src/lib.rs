@@ -162,10 +162,37 @@ impl MarkdownVdb {
             dimensions: config.embedding_dimensions,
         };
 
-        let index_path = root.join(&config.index_file);
+        // Ensure the unified .markdownvdb directory exists.
+        // If it's a legacy flat config file, migrate it first.
+        let index_dir = root.join(".markdownvdb");
+        if index_dir.is_file() {
+            // Legacy: .markdownvdb was a flat config file. Move it aside,
+            // create the directory, then move the config inside as .config.
+            let tmp_config = root.join(".markdownvdb.migrating");
+            std::fs::rename(&index_dir, &tmp_config)?;
+            std::fs::create_dir_all(&index_dir)?;
+            std::fs::rename(&tmp_config, index_dir.join(".config"))?;
+            info!("migrated legacy .markdownvdb config file → .markdownvdb/.config");
+        } else if !index_dir.exists() {
+            std::fs::create_dir_all(&index_dir)?;
+        }
+
+        // Auto-migrate from old split layout (.markdownvdb.index file + .markdownvdb.fts/ dir).
+        let legacy_index_file = root.join(".markdownvdb.index");
+        let legacy_fts_dir = root.join(".markdownvdb.fts");
+        if legacy_index_file.is_file() && !index_dir.join("index").exists() {
+            info!("migrating legacy .markdownvdb.index → .markdownvdb/index");
+            std::fs::rename(&legacy_index_file, index_dir.join("index"))?;
+        }
+        if legacy_fts_dir.is_dir() && !index_dir.join("fts").exists() {
+            info!("migrating legacy .markdownvdb.fts/ → .markdownvdb/fts/");
+            std::fs::rename(&legacy_fts_dir, index_dir.join("fts"))?;
+        }
+
+        let index_path = index_dir.join("index");
         let index = Arc::new(Index::open_or_create(&index_path, &embedding_config)?);
 
-        let fts_path = root.join(&config.fts_index_dir);
+        let fts_path = index_dir.join("fts");
         let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
 
         // Check config compatibility: dimensions must match.
@@ -394,13 +421,13 @@ impl MarkdownVdb {
 
             self.index.upsert(md, chunks, &embeddings)?;
 
-            // Upsert into FTS index.
+            // Upsert into FTS index (strip markdown before indexing for clean BM25).
             let fts_chunks: Vec<fts::FtsChunkData> = chunks
                 .iter()
                 .map(|c| fts::FtsChunkData {
                     chunk_id: c.id.clone(),
                     source_path: c.source_path.to_string_lossy().to_string(),
-                    content: c.content.clone(),
+                    content: fts::strip_markdown(&c.content),
                     heading_hierarchy: c.heading_hierarchy.join(" > "),
                 })
                 .collect();
@@ -430,7 +457,7 @@ impl MarkdownVdb {
                             self.index.get_chunk(cid).map(|sc| fts::FtsChunkData {
                                 chunk_id: cid.clone(),
                                 source_path: sc.source_path.clone(),
-                                content: sc.content.clone(),
+                                content: fts::strip_markdown(&sc.content),
                                 heading_hierarchy: sc.heading_hierarchy.join(" > "),
                             })
                         })
@@ -455,9 +482,10 @@ impl MarkdownVdb {
             }
         }
 
-        // Commit FTS changes and save the vector index to disk.
-        self.fts_index.commit()?;
+        // Save vector index first (atomic write-rename), then commit FTS.
+        // If vector save fails, FTS stays uncommitted — consistent on next ingest.
         self.index.save()?;
+        self.fts_index.commit()?;
 
         // Run clustering if enabled.
         if self.config.clustering_enabled {
@@ -528,6 +556,7 @@ impl MarkdownVdb {
             self.provider.as_ref(),
             Some(&self.fts_index),
             self.config.search_rrf_k,
+            self.config.bm25_norm_k,
         )
         .await
     }
@@ -557,16 +586,30 @@ impl MarkdownVdb {
         Ok(schema::Schema::infer(&parsed))
     }
 
-    /// Initialize a new markdown-vdb project by creating a `.markdownvdb` config file
+    /// Initialize a new markdown-vdb project by creating `.markdownvdb/.config`
     /// with default/example values.
     ///
-    /// Returns `Error::ConfigAlreadyExists` if the file already exists.
+    /// Returns `Error::ConfigAlreadyExists` if the config already exists.
     pub fn init(root: &Path) -> Result<()> {
-        let config_path = root.join(".markdownvdb");
+        let dir_path = root.join(".markdownvdb");
+        let config_path = dir_path.join(".config");
+
+        // Check for both new and legacy config locations.
         if config_path.exists() {
             return Err(Error::ConfigAlreadyExists {
                 path: config_path,
             });
+        }
+        let legacy_path = root.join(".markdownvdb");
+        if legacy_path.is_file() {
+            return Err(Error::ConfigAlreadyExists {
+                path: legacy_path,
+            });
+        }
+
+        // Create the .markdownvdb directory if it doesn't exist.
+        if !dir_path.exists() {
+            std::fs::create_dir_all(&dir_path)?;
         }
 
         let default_config = "\
@@ -582,9 +625,6 @@ MDVDB_EMBEDDING_BATCH_SIZE=100
 # Source directories (comma-separated)
 MDVDB_SOURCE_DIRS=.
 
-# Index file location
-MDVDB_INDEX_FILE=.markdownvdb.index
-
 # Chunking
 MDVDB_CHUNK_MAX_TOKENS=512
 MDVDB_CHUNK_OVERLAP_TOKENS=50
@@ -594,9 +634,6 @@ MDVDB_SEARCH_DEFAULT_LIMIT=10
 MDVDB_SEARCH_MIN_SCORE=0.0
 MDVDB_SEARCH_MODE=hybrid
 MDVDB_SEARCH_RRF_K=60.0
-
-# Full-text search index directory
-MDVDB_FTS_INDEX_DIR=.markdownvdb.fts
 
 # File watching
 MDVDB_WATCH=true

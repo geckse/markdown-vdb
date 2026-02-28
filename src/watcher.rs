@@ -161,6 +161,7 @@ impl Watcher {
                 let from_str = from.to_string_lossy().to_string();
                 debug!(from = %from_str, to = %to.display(), "processing rename event");
                 self.index.remove_file(&from_str)?;
+                self.fts_index.remove_file(&from_str)?;
                 self.process_file(to).await
             }
         }
@@ -220,7 +221,7 @@ impl Watcher {
             .map(|c| FtsChunkData {
                 chunk_id: c.id.clone(),
                 source_path: c.source_path.to_string_lossy().to_string(),
-                content: c.content.clone(),
+                content: crate::fts::strip_markdown(&c.content),
                 heading_hierarchy: c.heading_hierarchy.join(" > "),
             })
             .collect();
@@ -362,7 +363,6 @@ mod tests {
             ollama_host: String::new(),
             embedding_endpoint: None,
             source_dirs: vec![PathBuf::from(".")],
-            index_file: PathBuf::from(".markdownvdb.index"),
             ignore_patterns: vec![],
             watch_enabled: true,
             watch_debounce_ms: 300,
@@ -372,9 +372,9 @@ mod tests {
             clustering_rebalance_threshold: 50,
             search_default_limit: 10,
             search_min_score: 0.0,
-            fts_index_dir: PathBuf::from(".markdownvdb.fts"),
             search_default_mode: crate::search::SearchMode::Hybrid,
             search_rrf_k: 60.0,
+            bm25_norm_k: 1.5,
         };
         FileDiscovery::new(Path::new("/tmp/test"), &config)
     }

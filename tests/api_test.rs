@@ -23,7 +23,6 @@ fn mock_config() -> Config {
         ollama_host: "http://localhost:11434".into(),
         embedding_endpoint: None,
         source_dirs: vec![PathBuf::from(".")],
-        index_file: PathBuf::from(".markdownvdb.index"),
         ignore_patterns: vec![],
         watch_enabled: false,
         watch_debounce_ms: 300,
@@ -33,9 +32,9 @@ fn mock_config() -> Config {
         clustering_rebalance_threshold: 50,
         search_default_limit: 10,
         search_min_score: 0.0,
-        fts_index_dir: PathBuf::from(".markdownvdb.fts"),
         search_default_mode: mdvdb::SearchMode::Hybrid,
         search_rrf_k: 60.0,
+        bm25_norm_k: 1.5,
     }
 }
 
@@ -44,9 +43,10 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    // Write .markdownvdb config (needed for Config::load to find project root)
+    // Write .markdownvdb/.config (needed for Config::load to find project root)
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -75,7 +75,8 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
 #[test]
 fn test_open_with_mock_config() {
     let dir = TempDir::new().unwrap();
-    fs::write(dir.path().join(".markdownvdb"), "MDVDB_EMBEDDING_PROVIDER=mock\n").unwrap();
+    fs::create_dir_all(dir.path().join(".markdownvdb")).unwrap();
+    fs::write(dir.path().join(".markdownvdb").join(".config"), "MDVDB_EMBEDDING_PROVIDER=mock\n").unwrap();
 
     let vdb = MarkdownVdb::open_with_config(dir.path().to_path_buf(), mock_config());
     assert!(vdb.is_ok(), "should open with mock config: {:?}", vdb.err());
@@ -177,8 +178,9 @@ fn setup_project_with_clustering() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -292,6 +294,49 @@ async fn test_search_default_mode_is_hybrid() {
     assert!(!results.is_empty(), "default mode search should return results");
 }
 
+#[tokio::test]
+async fn test_fts_auto_rebuild_from_rkyv() {
+    let (_dir, vdb) = setup_project();
+
+    // First ingest: populates both vector and FTS indexes.
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let fts_docs_before = vdb.fts_index().num_docs().unwrap();
+    assert!(fts_docs_before > 0, "FTS should have docs after initial ingest");
+
+    // Simulate a stale FTS index by deleting all FTS docs.
+    vdb.fts_index().delete_all().unwrap();
+    vdb.fts_index().commit().unwrap();
+    assert_eq!(vdb.fts_index().num_docs().unwrap(), 0, "FTS should be empty after delete_all");
+
+    // Re-ingest (incremental — files unchanged, so vector skips them).
+    // Consistency guard should detect FTS=0 + vector>0 and rebuild FTS.
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let fts_docs_after = vdb.fts_index().num_docs().unwrap();
+    assert!(
+        fts_docs_after > 0,
+        "FTS should have been rebuilt from rkyv metadata, got {fts_docs_after}"
+    );
+}
+
+#[tokio::test]
+async fn test_full_ingest_rebuilds_fts() {
+    let (_dir, vdb) = setup_project();
+
+    // Initial ingest.
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let fts_before = vdb.fts_index().num_docs().unwrap();
+    assert!(fts_before > 0, "FTS should have docs after ingest");
+
+    // Full ingest: should clear and rebuild FTS.
+    let opts = IngestOptions { full: true, file: None };
+    vdb.ingest(opts).await.unwrap();
+    let fts_after = vdb.fts_index().num_docs().unwrap();
+    assert!(
+        fts_after > 0,
+        "FTS should have docs after full re-ingest, got {fts_after}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // File tree and path prefix API tests
 // ---------------------------------------------------------------------------
@@ -301,8 +346,9 @@ async fn test_file_tree_returns_structure() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();
@@ -340,8 +386,9 @@ async fn test_search_with_path_prefix() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
+        root.join(".markdownvdb").join(".config"),
         "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
     )
     .unwrap();

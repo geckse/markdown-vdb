@@ -21,7 +21,7 @@ fn test_embedding_config() -> EmbeddingConfig {
     }
 }
 
-fn test_config(root: &std::path::Path) -> Config {
+fn test_config() -> Config {
     Config {
         embedding_provider: EmbeddingProviderType::OpenAI,
         embedding_model: "mock-model".into(),
@@ -31,7 +31,6 @@ fn test_config(root: &std::path::Path) -> Config {
         ollama_host: "http://localhost:11434".into(),
         embedding_endpoint: None,
         source_dirs: vec![PathBuf::from(".")],
-        index_file: root.join(".markdownvdb.index"),
         ignore_patterns: vec![],
         watch_enabled: false,
         watch_debounce_ms: 300,
@@ -41,9 +40,9 @@ fn test_config(root: &std::path::Path) -> Config {
         clustering_rebalance_threshold: 50,
         search_default_limit: 10,
         search_min_score: 0.0,
-        fts_index_dir: PathBuf::from(".markdownvdb.fts"),
         search_default_mode: mdvdb::SearchMode::Hybrid,
         search_rrf_k: 60.0,
+        bm25_norm_k: 1.5,
     }
 }
 
@@ -57,7 +56,8 @@ fn setup_project(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
         }
         fs::write(&full, content).unwrap();
     }
-    let idx_path = dir.path().join(".markdownvdb.index");
+    fs::create_dir_all(dir.path().join(".markdownvdb")).unwrap();
+    let idx_path = dir.path().join(".markdownvdb").join("index");
     (dir, idx_path)
 }
 
@@ -73,7 +73,7 @@ async fn test_full_ingest_indexes_all_files() {
         ("docs/gamma.md", "# Gamma\n\nGamma content."),
     ]);
 
-    let config = test_config(dir.path());
+    let config = test_config();
     let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
     let provider = MockProvider::new(DIMS);
 
@@ -100,7 +100,7 @@ async fn test_second_ingest_skips_unchanged() {
         ("two.md", "# Two\n\nContent two."),
     ]);
 
-    let config = test_config(dir.path());
+    let config = test_config();
     let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
     let provider = MockProvider::new(DIMS);
 
@@ -132,7 +132,7 @@ async fn test_modified_files_re_embedded() {
         ("doc.md", "# Doc\n\nOriginal content."),
     ]);
 
-    let config = test_config(dir.path());
+    let config = test_config();
     let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
     let provider = MockProvider::new(DIMS);
 
@@ -161,7 +161,7 @@ async fn test_deleted_files_removed_as_stale() {
         ("remove.md", "# Remove\n\nThis will be deleted."),
     ]);
 
-    let config = test_config(dir.path());
+    let config = test_config();
     let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
     let provider = MockProvider::new(DIMS);
 
@@ -192,7 +192,7 @@ async fn test_ingest_result_counts_accurate() {
         ("c.md", "# C\n\nContent C."),
     ]);
 
-    let config = test_config(dir.path());
+    let config = test_config();
     let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
     let provider = MockProvider::new(DIMS);
 

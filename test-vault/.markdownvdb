@@ -5,7 +5,6 @@ MDVDB_EMBEDDING_DIMENSIONS=1536
 
 # Source
 MDVDB_SOURCE_DIRS=docs,notes,guides,runbooks
-MDVDB_INDEX_FILE=.markdownvdb.index
 MDVDB_IGNORE_PATTERNS=drafts/**,*.tmp
 
 # Chunking

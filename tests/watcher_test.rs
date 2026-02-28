@@ -26,7 +26,6 @@ fn test_config(source_dir: &str) -> Config {
         ollama_host: String::new(),
         embedding_endpoint: None,
         source_dirs: vec![PathBuf::from(source_dir)],
-        index_file: PathBuf::from(".markdownvdb.index"),
         ignore_patterns: vec![],
         watch_enabled: true,
         watch_debounce_ms: 200,
@@ -36,9 +35,9 @@ fn test_config(source_dir: &str) -> Config {
         clustering_rebalance_threshold: 50,
         search_default_limit: 10,
         search_min_score: 0.0,
-        fts_index_dir: PathBuf::from(".markdownvdb.fts"),
         search_default_mode: mdvdb::SearchMode::Hybrid,
         search_rrf_k: 60.0,
+        bm25_norm_k: 1.5,
     }
 }
 
@@ -60,7 +59,7 @@ fn setup() -> (TempDir, PathBuf, Arc<Index>, Arc<FtsIndex>, Arc<dyn EmbeddingPro
         dimensions: 8,
     };
     let index = Arc::new(Index::create(&index_path, &embedding_config).unwrap());
-    let fts_index = Arc::new(FtsIndex::open_or_create(&project_root.join(".markdownvdb.fts")).unwrap());
+    let fts_index = Arc::new(FtsIndex::open_or_create(&project_root.join(".markdownvdb").join("fts")).unwrap());
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(MockProvider::new(8));
 
     (dir, project_root, index, fts_index, provider)

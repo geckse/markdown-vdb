@@ -42,7 +42,6 @@ pub struct Config {
     pub ollama_host: String,
     pub embedding_endpoint: Option<String>,
     pub source_dirs: Vec<PathBuf>,
-    pub index_file: PathBuf,
     pub ignore_patterns: Vec<String>,
     pub watch_enabled: bool,
     pub watch_debounce_ms: u64,
@@ -52,18 +51,27 @@ pub struct Config {
     pub clustering_rebalance_threshold: usize,
     pub search_default_limit: usize,
     pub search_min_score: f64,
-    pub fts_index_dir: PathBuf,
     pub search_default_mode: SearchMode,
     pub search_rrf_k: f64,
+    /// BM25 saturation normalization constant. A BM25 score equal to this
+    /// value maps to 0.5 after normalization. Higher = more compressed scores.
+    pub bm25_norm_k: f64,
 }
 
 impl Config {
-    /// Load configuration with priority: shell env > `.markdownvdb` file > `.env` file > built-in defaults.
+    /// Load configuration with priority: shell env > `.markdownvdb/.config` > legacy `.markdownvdb` > `.env` > defaults.
     pub fn load(project_root: &Path) -> Result<Self, Error> {
-        // Load .markdownvdb file first (ignore if missing).
+        // Load config file (ignore if missing).
         // dotenvy::from_path does NOT override existing env vars,
         // so shell env always takes priority.
-        let _ = dotenvy::from_path(project_root.join(".markdownvdb"));
+        // Try new location first, fall back to legacy flat file.
+        let new_config = project_root.join(".markdownvdb").join(".config");
+        let legacy_config = project_root.join(".markdownvdb");
+        if new_config.is_file() {
+            let _ = dotenvy::from_path(new_config);
+        } else if legacy_config.is_file() {
+            let _ = dotenvy::from_path(legacy_config);
+        }
 
         // Load .env as a fallback for shared secrets (e.g., OPENAI_API_KEY).
         // Since .markdownvdb was loaded first, its values take priority over .env.
@@ -86,8 +94,6 @@ impl Config {
 
         let source_dirs = parse_comma_list_path("MDVDB_SOURCE_DIRS", vec![PathBuf::from(".")]);
 
-        let index_file = PathBuf::from(env_or_default("MDVDB_INDEX_FILE", ".markdownvdb.index"));
-
         let ignore_patterns = parse_comma_list_string("MDVDB_IGNORE_PATTERNS", vec![]);
 
         let watch_enabled = parse_env_bool("MDVDB_WATCH", true)?;
@@ -107,13 +113,12 @@ impl Config {
 
         let search_min_score = parse_env::<f64>("MDVDB_SEARCH_MIN_SCORE", 0.0)?;
 
-        let fts_index_dir =
-            PathBuf::from(env_or_default("MDVDB_FTS_INDEX_DIR", ".markdownvdb.fts"));
-
         let search_default_mode = env_or_default("MDVDB_SEARCH_MODE", "hybrid")
             .parse::<SearchMode>()?;
 
         let search_rrf_k = parse_env::<f64>("MDVDB_SEARCH_RRF_K", 60.0)?;
+
+        let bm25_norm_k = parse_env::<f64>("MDVDB_BM25_NORM_K", 1.5)?;
 
         let config = Self {
             embedding_provider,
@@ -124,7 +129,6 @@ impl Config {
             ollama_host,
             embedding_endpoint,
             source_dirs,
-            index_file,
             ignore_patterns,
             watch_enabled,
             watch_debounce_ms,
@@ -134,9 +138,9 @@ impl Config {
             clustering_rebalance_threshold,
             search_default_limit,
             search_min_score,
-            fts_index_dir,
             search_default_mode,
             search_rrf_k,
+            bm25_norm_k,
         };
 
         config.validate()?;
@@ -159,6 +163,9 @@ impl Config {
         }
         if self.search_rrf_k <= 0.0 {
             return Err(Error::Config("search_rrf_k must be > 0".into()));
+        }
+        if self.bm25_norm_k <= 0.0 {
+            return Err(Error::Config("bm25_norm_k must be > 0".into()));
         }
         if !(0.0..=1.0).contains(&self.search_min_score) {
             return Err(Error::Config(format!(
@@ -282,7 +289,6 @@ mod tests {
             "OLLAMA_HOST",
             "MDVDB_EMBEDDING_ENDPOINT",
             "MDVDB_SOURCE_DIRS",
-            "MDVDB_INDEX_FILE",
             "MDVDB_IGNORE_PATTERNS",
             "MDVDB_WATCH",
             "MDVDB_WATCH_DEBOUNCE_MS",
@@ -292,9 +298,9 @@ mod tests {
             "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
             "MDVDB_SEARCH_DEFAULT_LIMIT",
             "MDVDB_SEARCH_MIN_SCORE",
-            "MDVDB_FTS_INDEX_DIR",
             "MDVDB_SEARCH_MODE",
             "MDVDB_SEARCH_RRF_K",
+            "MDVDB_BM25_NORM_K",
         ];
         for var in &vars_to_clear {
             std::env::remove_var(var);
@@ -311,7 +317,6 @@ mod tests {
         assert_eq!(config.ollama_host, "http://localhost:11434");
         assert_eq!(config.embedding_endpoint, None);
         assert_eq!(config.source_dirs, vec![PathBuf::from(".")]);
-        assert_eq!(config.index_file, PathBuf::from(".markdownvdb.index"));
         assert!(config.ignore_patterns.is_empty());
         assert!(config.watch_enabled);
         assert_eq!(config.watch_debounce_ms, 300);
@@ -321,9 +326,9 @@ mod tests {
         assert_eq!(config.clustering_rebalance_threshold, 50);
         assert_eq!(config.search_default_limit, 10);
         assert_eq!(config.search_min_score, 0.0);
-        assert_eq!(config.fts_index_dir, PathBuf::from(".markdownvdb.fts"));
         assert_eq!(config.search_default_mode, SearchMode::Hybrid);
         assert_eq!(config.search_rrf_k, 60.0);
+        assert_eq!(config.bm25_norm_k, 1.5);
     }
 
     #[test]

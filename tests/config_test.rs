@@ -16,7 +16,6 @@ const ALL_ENV_VARS: &[&str] = &[
     "OLLAMA_HOST",
     "MDVDB_EMBEDDING_ENDPOINT",
     "MDVDB_SOURCE_DIRS",
-    "MDVDB_INDEX_FILE",
     "MDVDB_IGNORE_PATTERNS",
     "MDVDB_WATCH",
     "MDVDB_WATCH_DEBOUNCE_MS",
@@ -26,9 +25,9 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
     "MDVDB_SEARCH_DEFAULT_LIMIT",
     "MDVDB_SEARCH_MIN_SCORE",
-    "MDVDB_FTS_INDEX_DIR",
     "MDVDB_SEARCH_MODE",
     "MDVDB_SEARCH_RRF_K",
+    "MDVDB_BM25_NORM_K",
 ];
 
 /// Clear all MDVDB-related env vars to ensure test isolation.
@@ -53,7 +52,6 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.ollama_host, "http://localhost:11434");
     assert_eq!(config.embedding_endpoint, None);
     assert_eq!(config.source_dirs, vec![PathBuf::from(".")]);
-    assert_eq!(config.index_file, PathBuf::from(".markdownvdb.index"));
     assert!(config.ignore_patterns.is_empty());
     assert!(config.watch_enabled);
     assert_eq!(config.watch_debounce_ms, 300);
@@ -63,9 +61,9 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.clustering_rebalance_threshold, 50);
     assert_eq!(config.search_default_limit, 10);
     assert_eq!(config.search_min_score, 0.0);
-    assert_eq!(config.fts_index_dir, PathBuf::from(".markdownvdb.fts"));
     assert_eq!(config.search_default_mode, mdvdb::SearchMode::Hybrid);
     assert_eq!(config.search_rrf_k, 60.0);
+    assert_eq!(config.bm25_norm_k, 1.5);
 }
 
 #[test]
@@ -349,19 +347,17 @@ fn shell_env_overrides_both_files() {
 
 #[test]
 #[serial]
-fn fts_config_from_dotenv() {
+fn search_config_from_dotenv() {
     clear_env();
     let tmp = TempDir::new().unwrap();
     fs::write(
         tmp.path().join(".markdownvdb"),
-        "MDVDB_FTS_INDEX_DIR=custom_fts\n\
-         MDVDB_SEARCH_MODE=semantic\n\
+        "MDVDB_SEARCH_MODE=semantic\n\
          MDVDB_SEARCH_RRF_K=30.0\n",
     )
     .unwrap();
 
     let config = Config::load(tmp.path()).unwrap();
-    assert_eq!(config.fts_index_dir, PathBuf::from("custom_fts"));
     assert_eq!(config.search_default_mode, mdvdb::SearchMode::Semantic);
     assert_eq!(config.search_rrf_k, 30.0);
 

@@ -131,7 +131,11 @@ pub enum MetadataFilter {
 /// A single search result with relevance score, chunk content, and file context.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResult {
-    /// Cosine similarity score (0.0–1.0, higher is more relevant).
+    /// Relevance score (0.0–1.0, higher is more relevant).
+    ///
+    /// - **Semantic**: cosine similarity (absolute).
+    /// - **Lexical**: BM25 score normalized via saturation `score/(score+k)`.
+    /// - **Hybrid**: RRF score normalized by theoretical maximum.
     pub score: f64,
     /// The matched chunk.
     pub chunk: SearchResultChunk,
@@ -171,8 +175,8 @@ pub struct SearchResultFile {
 ///
 /// Pipeline varies by mode:
 /// - **Semantic**: embed → HNSW search → filter → assemble → truncate
-/// - **Lexical**: BM25 search → filter → assemble → truncate (no embedding API call)
-/// - **Hybrid**: semantic + lexical in parallel → RRF fusion → filter → assemble → truncate
+/// - **Lexical**: BM25 search → normalize → filter → assemble → truncate (no embedding API call)
+/// - **Hybrid**: semantic + lexical in parallel → RRF fusion → normalize → filter → assemble → truncate
 ///
 /// When `fts_index` is `None` and mode is Hybrid or Lexical, falls back to semantic-only.
 pub async fn search(
@@ -181,6 +185,7 @@ pub async fn search(
     provider: &dyn EmbeddingProvider,
     fts_index: Option<&FtsIndex>,
     rrf_k: f64,
+    bm25_norm_k: f64,
 ) -> Result<Vec<SearchResult>> {
     // Validate: empty query is a no-op.
     if query.query.trim().is_empty() {
@@ -200,11 +205,14 @@ pub async fn search(
         mode => mode,
     };
 
-    // Over-fetch 3x to account for filtering.
-    let over_fetch = query.limit * 3;
+    // Over-fetch to account for filtering. 5x for hybrid (RRF needs more candidates), 3x otherwise.
+    let over_fetch = match effective_mode {
+        SearchMode::Hybrid => query.limit * 5,
+        _ => query.limit * 3,
+    };
 
     // Get ranked candidates based on mode.
-    let ranked_candidates: Vec<(String, f64)> = match effective_mode {
+    let mut ranked_candidates: Vec<(String, f64)> = match effective_mode {
         SearchMode::Semantic => {
             semantic_search(query, index, provider, over_fetch).await?
         }
@@ -231,6 +239,13 @@ pub async fn search(
             reciprocal_rank_fusion(&semantic, &lexical, rrf_k)
         }
     };
+
+    // Normalize scores to [0, 1] for non-semantic modes.
+    match effective_mode {
+        SearchMode::Lexical => normalize_bm25_scores(&mut ranked_candidates, bm25_norm_k),
+        SearchMode::Hybrid => normalize_rrf_scores(&mut ranked_candidates, rrf_k, 2),
+        SearchMode::Semantic => {} // already [0, 1] cosine similarity
+    }
 
     debug!(
         candidates = ranked_candidates.len(),
@@ -371,6 +386,34 @@ pub fn reciprocal_rank_fusion(
     let mut results: Vec<(String, f64)> = scores.into_iter().collect();
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results
+}
+
+/// Normalize BM25 scores to `[0, 1]` using saturation: `score / (score + k)`.
+///
+/// This maps the unbounded BM25 range `(0, ∞)` into `(0, 1)` with diminishing returns.
+/// The parameter `k` controls the midpoint (a BM25 score equal to `k` maps to 0.5).
+/// Monotonically increasing, so ranking order is preserved.
+fn normalize_bm25_scores(results: &mut [(String, f64)], k: f64) {
+    for r in results.iter_mut() {
+        r.1 = r.1 / (r.1 + k);
+    }
+}
+
+/// Normalize RRF scores by dividing by the theoretical maximum.
+///
+/// The maximum possible RRF score is `num_lists / (k + 1)`, achieved when a document
+/// is ranked #1 in every list. After normalization:
+/// - 1.0 = top-ranked by all retrievers
+/// - ~0.5 = found by only one retriever at rank 1
+///
+/// Monotonically increasing, so ranking order is preserved.
+fn normalize_rrf_scores(results: &mut [(String, f64)], rrf_k: f64, num_lists: usize) {
+    let max_score = num_lists as f64 / (rrf_k + 1.0);
+    if max_score > 0.0 {
+        for r in results.iter_mut() {
+            r.1 /= max_score;
+        }
+    }
 }
 
 /// Evaluate all metadata filters against parsed frontmatter. Returns `true` if all pass.
@@ -812,6 +855,99 @@ mod tests {
     fn test_rrf_empty_inputs() {
         let empty: Vec<(String, f64)> = vec![];
         let results = reciprocal_rank_fusion(&empty, &empty, 60.0);
+        assert!(results.is_empty());
+    }
+
+    // --- BM25 normalization tests ---
+
+    #[test]
+    fn test_bm25_normalization_midpoint() {
+        // A BM25 score equal to k should normalize to 0.5
+        let mut results = vec![("a".to_string(), 1.5)];
+        normalize_bm25_scores(&mut results, 1.5);
+        assert!((results[0].1 - 0.5).abs() < 1e-10, "k maps to 0.5");
+    }
+
+    #[test]
+    fn test_bm25_normalization_known_values() {
+        let mut results = vec![
+            ("a".to_string(), 0.0),
+            ("b".to_string(), 0.5),
+            ("c".to_string(), 1.5),
+            ("d".to_string(), 3.0),
+            ("e".to_string(), 6.0),
+            ("f".to_string(), 15.0),
+        ];
+        normalize_bm25_scores(&mut results, 1.5);
+
+        assert!((results[0].1 - 0.0).abs() < 1e-10, "0 maps to 0");
+        assert!((results[1].1 - 0.25).abs() < 1e-10, "0.5 maps to 0.25");
+        assert!((results[2].1 - 0.5).abs() < 1e-10, "1.5 maps to 0.5");
+        assert!((results[3].1 - 2.0 / 3.0).abs() < 1e-10, "3.0 maps to ~0.67");
+        assert!((results[4].1 - 0.8).abs() < 1e-10, "6.0 maps to 0.8");
+        assert!((results[5].1 - 15.0 / 16.5).abs() < 1e-10, "15.0 maps to ~0.91");
+    }
+
+    #[test]
+    fn test_bm25_normalization_preserves_order() {
+        let mut results = vec![
+            ("a".to_string(), 10.0),
+            ("b".to_string(), 5.0),
+            ("c".to_string(), 1.0),
+        ];
+        normalize_bm25_scores(&mut results, 1.5);
+        assert!(results[0].1 > results[1].1);
+        assert!(results[1].1 > results[2].1);
+    }
+
+    #[test]
+    fn test_bm25_normalization_stays_below_one() {
+        let mut results = vec![("a".to_string(), 1000.0)];
+        normalize_bm25_scores(&mut results, 1.5);
+        assert!(results[0].1 < 1.0, "score should be < 1.0, got {}", results[0].1);
+    }
+
+    #[test]
+    fn test_bm25_normalization_empty() {
+        let mut results: Vec<(String, f64)> = vec![];
+        normalize_bm25_scores(&mut results, 1.5);
+        assert!(results.is_empty());
+    }
+
+    // --- RRF normalization tests ---
+
+    #[test]
+    fn test_rrf_normalization_rank1_both_lists() {
+        // #1 in both lists with k=60 → raw score = 2/61, max = 2/61 → normalized = 1.0
+        let mut results = vec![("a".to_string(), 2.0 / 61.0)];
+        normalize_rrf_scores(&mut results, 60.0, 2);
+        assert!((results[0].1 - 1.0).abs() < 1e-10, "expected 1.0, got {}", results[0].1);
+    }
+
+    #[test]
+    fn test_rrf_normalization_rank1_one_list() {
+        // #1 in one list only → raw = 1/61, max = 2/61 → normalized = 0.5
+        let mut results = vec![("a".to_string(), 1.0 / 61.0)];
+        normalize_rrf_scores(&mut results, 60.0, 2);
+        assert!((results[0].1 - 0.5).abs() < 1e-10, "expected 0.5, got {}", results[0].1);
+    }
+
+    #[test]
+    fn test_rrf_normalization_preserves_order() {
+        let mut results = vec![
+            ("a".to_string(), 2.0 / 61.0),  // both #1
+            ("b".to_string(), 1.0 / 61.0 + 1.0 / 62.0), // #1 + #2
+            ("c".to_string(), 1.0 / 61.0),  // single #1
+        ];
+        normalize_rrf_scores(&mut results, 60.0, 2);
+        assert!(results[0].1 > results[1].1);
+        assert!(results[1].1 > results[2].1);
+    }
+
+    #[test]
+    fn test_rrf_normalization_empty() {
+        let mut results: Vec<(String, f64)> = vec![];
+        normalize_rrf_scores(&mut results, 60.0, 2);
         assert!(results.is_empty());
     }
 }

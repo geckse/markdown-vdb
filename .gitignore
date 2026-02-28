@@ -15,5 +15,6 @@ logs/security/
 /target
 
 # Project artifacts
-.markdownvdb.index
+.markdownvdb/
 .env
+.markdownvdb.index
