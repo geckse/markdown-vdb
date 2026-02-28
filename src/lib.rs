@@ -1266,7 +1266,13 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
 
         // 6. Index integrity.
         let status = self.index.status();
-        if status.vector_count == status.chunk_count {
+        if status.document_count == 0 && status.chunk_count == 0 && status.vector_count == 0 {
+            checks.push(DoctorCheck {
+                name: "Index".to_string(),
+                status: CheckStatus::Warn,
+                detail: "empty — run `mdvdb ingest` to index your markdown files".to_string(),
+            });
+        } else if status.vector_count == status.chunk_count {
             checks.push(DoctorCheck {
                 name: "Index".to_string(),
                 status: CheckStatus::Pass,

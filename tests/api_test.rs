@@ -542,6 +542,26 @@ async fn test_doctor_reports_correct_counts() {
 }
 
 #[tokio::test]
+async fn test_doctor_empty_index_warns_to_ingest() {
+    let (_dir, vdb) = setup_project();
+    // No ingest — index is empty.
+
+    let result = vdb.doctor().await.unwrap();
+
+    let index_check = result
+        .checks
+        .iter()
+        .find(|c| c.name == "Index")
+        .expect("should have Index check");
+    assert_eq!(index_check.status, CheckStatus::Warn);
+    assert!(
+        index_check.detail.contains("ingest"),
+        "empty index warning should hint to run ingest: {}",
+        index_check.detail
+    );
+}
+
+#[tokio::test]
 async fn test_doctor_source_dirs_check() {
     let (_dir, vdb) = setup_project();
 
