@@ -1,10 +1,51 @@
+use std::str::FromStr;
+
 use serde::Serialize;
 use serde_json::Value;
 use tracing::{debug, info};
 
 use crate::embedding::provider::EmbeddingProvider;
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::fts::FtsIndex;
 use crate::index::state::Index;
+
+/// Search mode controlling which retrieval signals are used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    /// Both semantic (HNSW) and lexical (BM25) search, fused via RRF.
+    #[default]
+    Hybrid,
+    /// Semantic search only (embedding + HNSW).
+    Semantic,
+    /// Lexical search only (BM25 via Tantivy). No embedding API call needed.
+    Lexical,
+}
+
+impl FromStr for SearchMode {
+    type Err = Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "hybrid" => Ok(Self::Hybrid),
+            "semantic" => Ok(Self::Semantic),
+            "lexical" => Ok(Self::Lexical),
+            other => Err(Error::Config(format!(
+                "unknown search mode '{other}': expected hybrid, semantic, or lexical"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SearchMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Hybrid => write!(f, "hybrid"),
+            Self::Semantic => write!(f, "semantic"),
+            Self::Lexical => write!(f, "lexical"),
+        }
+    }
+}
 
 /// Builder-pattern query for semantic search.
 #[derive(Debug, Clone)]
@@ -17,6 +58,8 @@ pub struct SearchQuery {
     pub min_score: f64,
     /// Metadata filters applied with AND logic.
     pub filters: Vec<MetadataFilter>,
+    /// Search mode: hybrid, semantic, or lexical.
+    pub mode: SearchMode,
     /// Optional path prefix to restrict results to a directory subtree.
     pub path_prefix: Option<String>,
 }
@@ -29,6 +72,7 @@ impl SearchQuery {
             limit: 10,
             min_score: 0.0,
             filters: Vec::new(),
+            mode: SearchMode::default(),
             path_prefix: None,
         }
     }
@@ -54,6 +98,12 @@ impl SearchQuery {
     /// Add a metadata filter (multiple filters use AND logic).
     pub fn with_filter(mut self, filter: MetadataFilter) -> Self {
         self.filters.push(filter);
+        self
+    }
+
+    /// Set the search mode (hybrid, semantic, or lexical).
+    pub fn with_mode(mut self, mode: SearchMode) -> Self {
+        self.mode = mode;
         self
     }
 }
@@ -117,13 +167,20 @@ pub struct SearchResultFile {
     pub path_components: Vec<String>,
 }
 
-/// Execute a semantic search query against the index.
+/// Execute a search query against the index, supporting hybrid, semantic, and lexical modes.
 ///
-/// Pipeline: validate → embed → HNSW search (3x over-fetch) → filter → assemble → sort → truncate.
+/// Pipeline varies by mode:
+/// - **Semantic**: embed → HNSW search → filter → assemble → truncate
+/// - **Lexical**: BM25 search → filter → assemble → truncate (no embedding API call)
+/// - **Hybrid**: semantic + lexical in parallel → RRF fusion → filter → assemble → truncate
+///
+/// When `fts_index` is `None` and mode is Hybrid or Lexical, falls back to semantic-only.
 pub async fn search(
     query: &SearchQuery,
     index: &Index,
     provider: &dyn EmbeddingProvider,
+    fts_index: Option<&FtsIndex>,
+    rrf_k: f64,
 ) -> Result<Vec<SearchResult>> {
     // Validate: empty query is a no-op.
     if query.query.trim().is_empty() {
@@ -131,23 +188,104 @@ pub async fn search(
         return Ok(Vec::new());
     }
 
-    // Embed the query text.
-    let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
-    let query_vector = &embeddings[0];
+    // Determine effective mode: fall back to semantic if no FTS index available.
+    let effective_mode = match query.mode {
+        SearchMode::Hybrid | SearchMode::Lexical if fts_index.is_none() => {
+            debug!(
+                requested = %query.mode,
+                "FTS index not available, falling back to semantic mode"
+            );
+            SearchMode::Semantic
+        }
+        mode => mode,
+    };
 
     // Over-fetch 3x to account for filtering.
     let over_fetch = query.limit * 3;
-    let candidates = index.search_vectors(query_vector, over_fetch)?;
+
+    // Get ranked candidates based on mode.
+    let ranked_candidates: Vec<(String, f64)> = match effective_mode {
+        SearchMode::Semantic => {
+            semantic_search(query, index, provider, over_fetch).await?
+        }
+        SearchMode::Lexical => {
+            let fts = fts_index.unwrap(); // safe: checked above
+            lexical_search(query, fts, over_fetch)?
+        }
+        SearchMode::Hybrid => {
+            let fts = fts_index.unwrap(); // safe: checked above
+            let (semantic_results, lexical_results) = tokio::join!(
+                semantic_search(query, index, provider, over_fetch),
+                async { lexical_search(query, fts, over_fetch) }
+            );
+            let semantic = semantic_results?;
+            let lexical = lexical_results?;
+
+            debug!(
+                semantic_count = semantic.len(),
+                lexical_count = lexical.len(),
+                rrf_k = rrf_k,
+                "fusing semantic and lexical results via RRF"
+            );
+
+            reciprocal_rank_fusion(&semantic, &lexical, rrf_k)
+        }
+    };
 
     debug!(
-        candidates = candidates.len(),
+        candidates = ranked_candidates.len(),
         limit = query.limit,
-        "HNSW search returned candidates"
+        mode = %effective_mode,
+        "search returned candidates"
     );
 
     // Filter, assemble results, and apply min_score.
+    let results = assemble_results(query, index, &ranked_candidates)?;
+
+    info!(
+        query = %query.query,
+        results = results.len(),
+        mode = %effective_mode,
+        "search complete"
+    );
+
+    Ok(results)
+}
+
+/// Run semantic (HNSW) search and return ranked (chunk_id, score) pairs.
+async fn semantic_search(
+    query: &SearchQuery,
+    index: &Index,
+    provider: &dyn EmbeddingProvider,
+    limit: usize,
+) -> Result<Vec<(String, f64)>> {
+    let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
+    let query_vector = &embeddings[0];
+    let candidates = index.search_vectors(query_vector, limit)?;
+    Ok(candidates)
+}
+
+/// Run lexical (BM25) search and return ranked (chunk_id, score) pairs.
+fn lexical_search(
+    query: &SearchQuery,
+    fts_index: &FtsIndex,
+    limit: usize,
+) -> Result<Vec<(String, f64)>> {
+    let fts_results = fts_index.search(&query.query, limit)?;
+    Ok(fts_results
+        .into_iter()
+        .map(|r| (r.chunk_id, r.score as f64))
+        .collect())
+}
+
+/// Assemble SearchResult objects from ranked candidates, applying filters and min_score.
+fn assemble_results(
+    query: &SearchQuery,
+    index: &Index,
+    candidates: &[(String, f64)],
+) -> Result<Vec<SearchResult>> {
     let mut results = Vec::new();
-    for (chunk_id, score) in &candidates {
+    for (chunk_id, score) in candidates {
         // Apply min_score threshold.
         if *score < query.min_score {
             continue;
@@ -203,15 +341,36 @@ pub async fn search(
             break;
         }
     }
-
-    // Results are already sorted by score descending from search_vectors.
-    info!(
-        query = %query.query,
-        results = results.len(),
-        "search complete"
-    );
-
     Ok(results)
+}
+
+/// Reciprocal Rank Fusion: merges two ranked lists into a single scored list.
+///
+/// Each item's fused score is `Σ 1/(k + rank)` where rank is 1-indexed.
+/// Items appearing in both lists accumulate scores from each.
+/// Returns a list of `(chunk_id, fused_score)` sorted by score descending.
+pub fn reciprocal_rank_fusion(
+    list_a: &[(String, f64)],
+    list_b: &[(String, f64)],
+    k: f64,
+) -> Vec<(String, f64)> {
+    use std::collections::HashMap;
+
+    let mut scores: HashMap<String, f64> = HashMap::new();
+
+    for (rank, (id, _score)) in list_a.iter().enumerate() {
+        let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
+        *scores.entry(id.clone()).or_default() += rrf_score;
+    }
+
+    for (rank, (id, _score)) in list_b.iter().enumerate() {
+        let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
+        *scores.entry(id.clone()).or_default() += rrf_score;
+    }
+
+    let mut results: Vec<(String, f64)> = scores.into_iter().collect();
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results
 }
 
 /// Evaluate all metadata filters against parsed frontmatter. Returns `true` if all pass.
@@ -314,6 +473,43 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // --- SearchMode tests ---
+
+    #[test]
+    fn test_search_mode_default_is_hybrid() {
+        assert_eq!(SearchMode::default(), SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn test_search_mode_from_str() {
+        assert_eq!("hybrid".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+        assert_eq!("semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
+        assert_eq!("lexical".parse::<SearchMode>().unwrap(), SearchMode::Lexical);
+        // Case-insensitive
+        assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
+        assert_eq!("Semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
+    }
+
+    #[test]
+    fn test_search_mode_from_str_invalid() {
+        let err = "invalid".parse::<SearchMode>().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown search mode"));
+    }
+
+    #[test]
+    fn test_search_mode_display() {
+        assert_eq!(SearchMode::Hybrid.to_string(), "hybrid");
+        assert_eq!(SearchMode::Semantic.to_string(), "semantic");
+        assert_eq!(SearchMode::Lexical.to_string(), "lexical");
+    }
+
+    #[test]
+    fn test_search_mode_serialize() {
+        assert_eq!(serde_json::to_string(&SearchMode::Hybrid).unwrap(), "\"hybrid\"");
+        assert_eq!(serde_json::to_string(&SearchMode::Lexical).unwrap(), "\"lexical\"");
+    }
+
     // --- SearchQuery builder tests ---
 
     #[test]
@@ -323,6 +519,7 @@ mod tests {
         assert_eq!(q.limit, 10);
         assert_eq!(q.min_score, 0.0);
         assert!(q.filters.is_empty());
+        assert_eq!(q.mode, SearchMode::Hybrid);
     }
 
     #[test]
@@ -348,6 +545,15 @@ mod tests {
         assert_eq!(q.limit, 5);
         assert_eq!(q.min_score, 0.7);
         assert_eq!(q.filters.len(), 1);
+    }
+
+    #[test]
+    fn test_search_query_with_mode() {
+        let q = SearchQuery::new("test").with_mode(SearchMode::Lexical);
+        assert_eq!(q.mode, SearchMode::Lexical);
+
+        let q2 = SearchQuery::new("test").with_mode(SearchMode::Semantic);
+        assert_eq!(q2.mode, SearchMode::Semantic);
     }
 
     // --- Filter evaluation tests ---
@@ -526,5 +732,86 @@ mod tests {
             },
         ];
         assert!(!evaluate_filters(&filters_fail, Some(&fm)));
+    }
+
+    // --- RRF tests ---
+
+    #[test]
+    fn test_rrf_overlapping_lists() {
+        let list_a = vec![
+            ("a".to_string(), 0.9),
+            ("b".to_string(), 0.8),
+            ("c".to_string(), 0.7),
+        ];
+        let list_b = vec![
+            ("b".to_string(), 5.0),
+            ("c".to_string(), 4.0),
+            ("d".to_string(), 3.0),
+        ];
+        let results = reciprocal_rank_fusion(&list_a, &list_b, 60.0);
+
+        // "b" appears in both lists (rank 2 in A, rank 1 in B)
+        let b_score: f64 = results.iter().find(|(id, _)| id == "b").unwrap().1;
+        let expected_b = 1.0 / (60.0 + 2.0) + 1.0 / (60.0 + 1.0);
+        assert!((b_score - expected_b).abs() < 1e-10);
+
+        // "a" only in list_a rank 1
+        let a_score = results.iter().find(|(id, _)| id == "a").unwrap().1;
+        let expected_a = 1.0 / (60.0 + 1.0);
+        assert!((a_score - expected_a).abs() < 1e-10);
+
+        // Results sorted descending by score
+        for w in results.windows(2) {
+            assert!(w[0].1 >= w[1].1);
+        }
+    }
+
+    #[test]
+    fn test_rrf_disjoint_lists() {
+        let list_a = vec![("a".to_string(), 1.0), ("b".to_string(), 0.5)];
+        let list_b = vec![("c".to_string(), 1.0), ("d".to_string(), 0.5)];
+        let results = reciprocal_rank_fusion(&list_a, &list_b, 60.0);
+
+        assert_eq!(results.len(), 4);
+        // All items have single-list scores: 1/(60+rank)
+        let a_score = results.iter().find(|(id, _)| id == "a").unwrap().1;
+        assert!((a_score - 1.0 / 61.0).abs() < 1e-10);
+        let c_score = results.iter().find(|(id, _)| id == "c").unwrap().1;
+        assert!((c_score - 1.0 / 61.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rrf_single_list_with_empty() {
+        let list_a = vec![("x".to_string(), 1.0), ("y".to_string(), 0.5)];
+        let empty: Vec<(String, f64)> = vec![];
+        let results = reciprocal_rank_fusion(&list_a, &empty, 60.0);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, "x");
+        assert!((results[0].1 - 1.0 / 61.0).abs() < 1e-10);
+        assert_eq!(results[1].0, "y");
+        assert!((results[1].1 - 1.0 / 62.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rrf_k_parameter_effect() {
+        let list_a = vec![("a".to_string(), 1.0), ("b".to_string(), 0.5)];
+        let list_b = vec![("a".to_string(), 1.0), ("b".to_string(), 0.5)];
+
+        // Smaller k → larger scores and bigger spread between ranks
+        let results_k1 = reciprocal_rank_fusion(&list_a, &list_b, 1.0);
+        let results_k60 = reciprocal_rank_fusion(&list_a, &list_b, 60.0);
+
+        let a_k1 = results_k1.iter().find(|(id, _)| id == "a").unwrap().1;
+        let a_k60 = results_k60.iter().find(|(id, _)| id == "a").unwrap().1;
+        // k=1: score = 2 * 1/(1+1) = 1.0; k=60: score = 2 * 1/(60+1) ≈ 0.0328
+        assert!(a_k1 > a_k60);
+    }
+
+    #[test]
+    fn test_rrf_empty_inputs() {
+        let empty: Vec<(String, f64)> = vec![];
+        let results = reciprocal_rank_fusion(&empty, &empty, 60.0);
+        assert!(results.is_empty());
     }
 }

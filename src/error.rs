@@ -44,6 +44,9 @@ pub enum Error {
 
     #[error("clustering error: {0}")]
     Clustering(String),
+
+    #[error("full-text search error: {0}")]
+    Fts(String),
 }
 
 /// Convenience alias used throughout the crate.
@@ -145,6 +148,12 @@ mod tests {
     fn clustering_variant_formats() {
         let err = Error::Clustering("too few points".into());
         assert_eq!(err.to_string(), "clustering error: too few points");
+    }
+
+    #[test]
+    fn fts_variant_formats() {
+        let err = Error::Fts("tokenization failed".into());
+        assert_eq!(err.to_string(), "full-text search error: tokenization failed");
     }
 
     #[test]

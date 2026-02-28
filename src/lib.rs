@@ -4,6 +4,7 @@ pub mod config;
 pub mod discovery;
 pub mod embedding;
 pub mod error;
+pub mod fts;
 pub mod index;
 pub mod logging;
 pub mod parser;
@@ -19,7 +20,7 @@ pub use error::Error;
 pub use config::Config;
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{MetadataFilter, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
+pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 pub use tree::{FileState, FileTree, FileTreeNode};
@@ -36,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::embedding::provider::{create_provider, EmbeddingProvider};
+use crate::fts::FtsIndex;
 use crate::index::state::Index;
 use crate::index::types::EmbeddingConfig;
 
@@ -116,6 +118,8 @@ pub struct MarkdownVdb {
     provider: Arc<dyn EmbeddingProvider>,
     /// Vector index (Arc for sharing with watcher).
     index: Arc<Index>,
+    /// Full-text search index (Arc for sharing with watcher).
+    fts_index: Arc<FtsIndex>,
 }
 
 impl MarkdownVdb {
@@ -161,6 +165,9 @@ impl MarkdownVdb {
         let index_path = root.join(&config.index_file);
         let index = Arc::new(Index::open_or_create(&index_path, &embedding_config)?);
 
+        let fts_path = root.join(&config.fts_index_dir);
+        let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
+
         // Check config compatibility: dimensions must match.
         let status = index.status();
         if status.embedding_config.dimensions != config.embedding_dimensions {
@@ -182,6 +189,7 @@ impl MarkdownVdb {
             config,
             provider,
             index,
+            fts_index,
         })
     }
 
@@ -215,6 +223,16 @@ impl MarkdownVdb {
         Arc::clone(&self.provider)
     }
 
+    /// Get a reference to the full-text search index.
+    pub fn fts_index(&self) -> &FtsIndex {
+        &self.fts_index
+    }
+
+    /// Get a shared reference to the FTS index (for watcher integration).
+    pub fn fts_index_arc(&self) -> Arc<FtsIndex> {
+        Arc::clone(&self.fts_index)
+    }
+
     /// Ingest markdown files into the index.
     ///
     /// Pipeline: discover → parse → hash-compare → chunk → embed → upsert → remove deleted → save.
@@ -237,6 +255,25 @@ impl MarkdownVdb {
         };
 
         info!(files = discovered.len(), "discovered markdown files");
+
+        // Full ingest: clear FTS index for a clean rebuild.
+        if options.full {
+            debug!("full ingest: clearing FTS index for rebuild");
+            self.fts_index.delete_all()?;
+            self.fts_index.commit()?;
+        }
+
+        // Consistency guard: if FTS has 0 docs but vector index has docs,
+        // force re-indexing of all files into FTS.
+        let fts_doc_count = self.fts_index.num_docs().unwrap_or(0);
+        let vector_doc_count = self.index.status().document_count;
+        let fts_needs_rebuild = !options.full && fts_doc_count == 0 && vector_doc_count > 0;
+        if fts_needs_rebuild {
+            info!(
+                vector_docs = vector_doc_count,
+                "FTS index empty but vector index has documents — will rebuild FTS"
+            );
+        }
 
         // Get existing hashes from index for skip detection.
         let existing_hashes = self.index.get_file_hashes();
@@ -356,9 +393,54 @@ impl MarkdownVdb {
                 .collect();
 
             self.index.upsert(md, chunks, &embeddings)?;
+
+            // Upsert into FTS index.
+            let fts_chunks: Vec<fts::FtsChunkData> = chunks
+                .iter()
+                .map(|c| fts::FtsChunkData {
+                    chunk_id: c.id.clone(),
+                    source_path: c.source_path.to_string_lossy().to_string(),
+                    content: c.content.clone(),
+                    heading_hierarchy: c.heading_hierarchy.join(" > "),
+                })
+                .collect();
+            let path_str_fts = path.to_string_lossy().to_string();
+            self.fts_index.upsert_chunks(&path_str_fts, &fts_chunks)?;
+
             result.files_indexed += 1;
             result.chunks_created += chunks.len();
             debug!(path = %path.display(), chunks = chunks.len(), "indexed");
+        }
+
+        // Consistency guard: rebuild FTS from stored chunks for files that
+        // were skipped (already in vector index but missing from FTS).
+        if fts_needs_rebuild {
+            info!("rebuilding FTS index from stored chunks");
+            let file_hashes = self.index.get_file_hashes();
+            for path_str in file_hashes.keys() {
+                // Skip files we already upserted above.
+                if parsed_files.keys().any(|p| p.to_string_lossy() == *path_str) {
+                    continue;
+                }
+                if let Some(file_entry) = self.index.get_file(path_str) {
+                    let fts_chunks: Vec<fts::FtsChunkData> = file_entry
+                        .chunk_ids
+                        .iter()
+                        .filter_map(|cid| {
+                            self.index.get_chunk(cid).map(|sc| fts::FtsChunkData {
+                                chunk_id: cid.clone(),
+                                source_path: sc.source_path.clone(),
+                                content: sc.content.clone(),
+                                heading_hierarchy: sc.heading_hierarchy.join(" > "),
+                            })
+                        })
+                        .collect();
+                    if !fts_chunks.is_empty() {
+                        self.fts_index.upsert_chunks(path_str, &fts_chunks)?;
+                    }
+                }
+            }
+            debug!("FTS rebuild complete");
         }
 
         // Remove files that no longer exist on disk (only for full discovery, not single file).
@@ -366,13 +448,15 @@ impl MarkdownVdb {
             for path_str in &existing_paths {
                 if !discovered_paths.contains(path_str) {
                     self.index.remove_file(path_str)?;
+                    self.fts_index.remove_file(path_str)?;
                     result.files_removed += 1;
                     debug!(path = %path_str, "removed deleted file from index");
                 }
             }
         }
 
-        // Save the index to disk.
+        // Commit FTS changes and save the vector index to disk.
+        self.fts_index.commit()?;
         self.index.save()?;
 
         // Run clustering if enabled.
@@ -438,7 +522,14 @@ impl MarkdownVdb {
         &self,
         query: search::SearchQuery,
     ) -> Result<Vec<search::SearchResult>> {
-        search::search(&query, &self.index, self.provider.as_ref()).await
+        search::search(
+            &query,
+            &self.index,
+            self.provider.as_ref(),
+            Some(&self.fts_index),
+            self.config.search_rrf_k,
+        )
+        .await
     }
 
     /// Return a status snapshot of the index.
@@ -501,6 +592,11 @@ MDVDB_CHUNK_OVERLAP_TOKENS=50
 # Search defaults
 MDVDB_SEARCH_DEFAULT_LIMIT=10
 MDVDB_SEARCH_MIN_SCORE=0.0
+MDVDB_SEARCH_MODE=hybrid
+MDVDB_SEARCH_RRF_K=60.0
+
+# Full-text search index directory
+MDVDB_FTS_INDEX_DIR=.markdownvdb.fts
 
 # File watching
 MDVDB_WATCH=true
@@ -524,6 +620,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             self.config.clone(),
             &self.root,
             Arc::clone(&self.index),
+            Arc::clone(&self.fts_index),
             Arc::clone(&self.provider),
         );
         w.watch(cancel).await

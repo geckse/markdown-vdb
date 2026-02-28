@@ -4,6 +4,7 @@ use std::str::FromStr;
 use serde::Serialize;
 
 use crate::error::Error;
+use crate::search::SearchMode;
 
 /// Supported embedding provider backends.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -51,6 +52,9 @@ pub struct Config {
     pub clustering_rebalance_threshold: usize,
     pub search_default_limit: usize,
     pub search_min_score: f64,
+    pub fts_index_dir: PathBuf,
+    pub search_default_mode: SearchMode,
+    pub search_rrf_k: f64,
 }
 
 impl Config {
@@ -103,6 +107,14 @@ impl Config {
 
         let search_min_score = parse_env::<f64>("MDVDB_SEARCH_MIN_SCORE", 0.0)?;
 
+        let fts_index_dir =
+            PathBuf::from(env_or_default("MDVDB_FTS_INDEX_DIR", ".markdownvdb.fts"));
+
+        let search_default_mode = env_or_default("MDVDB_SEARCH_MODE", "hybrid")
+            .parse::<SearchMode>()?;
+
+        let search_rrf_k = parse_env::<f64>("MDVDB_SEARCH_RRF_K", 60.0)?;
+
         let config = Self {
             embedding_provider,
             embedding_model,
@@ -122,6 +134,9 @@ impl Config {
             clustering_rebalance_threshold,
             search_default_limit,
             search_min_score,
+            fts_index_dir,
+            search_default_mode,
+            search_rrf_k,
         };
 
         config.validate()?;
@@ -141,6 +156,9 @@ impl Config {
                 "chunk_overlap_tokens ({}) must be less than chunk_max_tokens ({})",
                 self.chunk_overlap_tokens, self.chunk_max_tokens
             )));
+        }
+        if self.search_rrf_k <= 0.0 {
+            return Err(Error::Config("search_rrf_k must be > 0".into()));
         }
         if !(0.0..=1.0).contains(&self.search_min_score) {
             return Err(Error::Config(format!(
@@ -274,6 +292,9 @@ mod tests {
             "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
             "MDVDB_SEARCH_DEFAULT_LIMIT",
             "MDVDB_SEARCH_MIN_SCORE",
+            "MDVDB_FTS_INDEX_DIR",
+            "MDVDB_SEARCH_MODE",
+            "MDVDB_SEARCH_RRF_K",
         ];
         for var in &vars_to_clear {
             std::env::remove_var(var);
@@ -300,6 +321,9 @@ mod tests {
         assert_eq!(config.clustering_rebalance_threshold, 50);
         assert_eq!(config.search_default_limit, 10);
         assert_eq!(config.search_min_score, 0.0);
+        assert_eq!(config.fts_index_dir, PathBuf::from(".markdownvdb.fts"));
+        assert_eq!(config.search_default_mode, SearchMode::Hybrid);
+        assert_eq!(config.search_rrf_k, 60.0);
     }
 
     #[test]
@@ -360,6 +384,26 @@ mod tests {
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_SEARCH_MIN_SCORE");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validation_rejects_zero_rrf_k() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("MDVDB_SEARCH_RRF_K", "0");
+        let result = Config::load(Path::new("/nonexistent"));
+        std::env::remove_var("MDVDB_SEARCH_RRF_K");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("search_rrf_k"));
+    }
+
+    #[test]
+    fn validation_rejects_negative_rrf_k() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("MDVDB_SEARCH_RRF_K", "-10.0");
+        let result = Config::load(Path::new("/nonexistent"));
+        std::env::remove_var("MDVDB_SEARCH_RRF_K");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("search_rrf_k"));
     }
 
     #[test]

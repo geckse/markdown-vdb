@@ -507,6 +507,139 @@ fn test_status_json_unchanged() {
 }
 
 // ---------------------------------------------------------------------------
+// Hybrid / FTS search CLI tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_search_help_shows_mode_flags() {
+    let output = mdvdb_bin()
+        .args(["search", "--help"])
+        .output()
+        .expect("failed to execute mdvdb");
+
+    assert!(output.status.success(), "search --help should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for flag in ["--mode", "--semantic", "--lexical"] {
+        assert!(
+            stdout.contains(flag),
+            "search --help should mention '{flag}', got: {}",
+            &stdout[..stdout.len().min(500)]
+        );
+    }
+}
+
+#[test]
+fn test_search_with_mode_semantic() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "semantic", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode semantic should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["results"].is_array(), "should have results array");
+}
+
+#[test]
+fn test_search_with_mode_lexical() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust programming", "--mode", "lexical", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode lexical should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["results"].is_array(), "should have results array");
+}
+
+#[test]
+fn test_search_with_mode_hybrid() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "hybrid", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --mode hybrid should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["results"].is_array(), "should have results array");
+}
+
+#[test]
+fn test_search_semantic_shorthand_flag() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--semantic", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --semantic should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_search_lexical_shorthand_flag() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust programming", "--lexical", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --lexical should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_search_invalid_mode_rejected() {
+    let dir = setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "rust", "--mode", "invalid"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        !output.status.success(),
+        "search --mode invalid should fail"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Tree command tests
 // ---------------------------------------------------------------------------
 
