@@ -1,6 +1,12 @@
 # Markdown Vector Database (mdvdb)
 (pronounced /ˌɛm di ˌvi di ˈbi/)
 
+![language](https://img.shields.io/badge/language-Rust-b7410e)
+![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-0.1.0-blue)
+![tests](https://img.shields.io/badge/tests-524%20passing-brightgreen)
+![clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)
+
 A filesystem-native vector database built around Markdown files. 
 Zero infrastructure — no servers, no containers, everything lives on disk.
 
