@@ -153,6 +153,7 @@ mod tests {
             last_updated: 1234567890,
             schema: None,
             cluster_state: None,
+            link_graph: None,
         }
     }
 

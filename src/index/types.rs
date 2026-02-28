@@ -3,6 +3,7 @@ use std::time::SystemTime;
 
 use crate::chunker::Chunk;
 use crate::clustering::ClusterState;
+use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
 
@@ -74,6 +75,8 @@ pub struct IndexMetadata {
     pub schema: Option<Schema>,
     /// Cluster state from K-means clustering, if available.
     pub cluster_state: Option<ClusterState>,
+    /// Link graph from link extraction, if available.
+    pub link_graph: Option<LinkGraph>,
 }
 
 /// Status snapshot returned by `Index::status()`.
@@ -167,6 +170,7 @@ mod tests {
             body: "Some body text".to_string(),
             content_hash: "abc123".to_string(),
             file_size: 1024,
+            links: Vec::new(),
         };
 
         let stored = StoredFile::from(&file);
@@ -189,6 +193,7 @@ mod tests {
             body: String::new(),
             content_hash: "def456".to_string(),
             file_size: 0,
+            links: Vec::new(),
         };
 
         let stored = StoredFile::from(&file);

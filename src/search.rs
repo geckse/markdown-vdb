@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::str::FromStr;
 
 use serde::Serialize;
@@ -8,6 +9,7 @@ use crate::embedding::provider::EmbeddingProvider;
 use crate::error::{Error, Result};
 use crate::fts::FtsIndex;
 use crate::index::state::Index;
+use crate::links;
 
 /// Search mode controlling which retrieval signals are used.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -58,6 +60,8 @@ pub struct SearchQuery {
     pub min_score: f64,
     /// Metadata filters applied with AND logic.
     pub filters: Vec<MetadataFilter>,
+    /// Whether to boost results that are link neighbors of top results.
+    pub boost_links: bool,
     /// Search mode: hybrid, semantic, or lexical.
     pub mode: SearchMode,
     /// Optional path prefix to restrict results to a directory subtree.
@@ -72,6 +76,7 @@ impl SearchQuery {
             limit: 10,
             min_score: 0.0,
             filters: Vec::new(),
+            boost_links: false,
             mode: SearchMode::default(),
             path_prefix: None,
         }
@@ -98,6 +103,12 @@ impl SearchQuery {
     /// Add a metadata filter (multiple filters use AND logic).
     pub fn with_filter(mut self, filter: MetadataFilter) -> Self {
         self.filters.push(filter);
+        self
+    }
+
+    /// Enable link-graph boosting: results linked to top results get a score boost.
+    pub fn with_boost_links(mut self, boost: bool) -> Self {
+        self.boost_links = boost;
         self
     }
 
@@ -356,6 +367,54 @@ fn assemble_results(
             break;
         }
     }
+
+    // Apply link-graph boosting if requested.
+    if query.boost_links && results.len() > 1 {
+        if let Some(link_graph) = index.get_link_graph() {
+            let backlinks = links::compute_backlinks(&link_graph);
+
+            // Collect link neighbors of top 3 results.
+            let top_paths: Vec<String> = results
+                .iter()
+                .take(3)
+                .map(|r| r.file.path.clone())
+                .collect();
+
+            let mut neighbor_paths: HashSet<String> = HashSet::new();
+            for path in &top_paths {
+                // Outgoing links from this file.
+                if let Some(entries) = link_graph.forward.get(path) {
+                    for entry in entries {
+                        neighbor_paths.insert(entry.target.clone());
+                    }
+                }
+                // Files linking to this file (backlinks).
+                if let Some(entries) = backlinks.get(path) {
+                    for entry in entries {
+                        neighbor_paths.insert(entry.source.clone());
+                    }
+                }
+            }
+
+            // Remove the top paths themselves from neighbors to avoid self-boost.
+            for path in &top_paths {
+                neighbor_paths.remove(path);
+            }
+
+            // Boost neighbor results by 1.2x.
+            if !neighbor_paths.is_empty() {
+                for result in &mut results {
+                    if neighbor_paths.contains(&result.file.path) {
+                        result.score *= 1.2;
+                        debug!(path = %result.file.path, "boosted link neighbor score");
+                    }
+                }
+                // Re-sort by score descending.
+                results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            }
+        }
+    }
+
     Ok(results)
 }
 
@@ -775,6 +834,37 @@ mod tests {
             },
         ];
         assert!(!evaluate_filters(&filters_fail, Some(&fm)));
+    }
+
+    // --- boost_links field and builder tests ---
+
+    #[test]
+    fn test_search_query_boost_links_default_false() {
+        let q = SearchQuery::new("test");
+        assert!(!q.boost_links);
+    }
+
+    #[test]
+    fn test_search_query_with_boost_links() {
+        let q = SearchQuery::new("test").with_boost_links(true);
+        assert!(q.boost_links);
+    }
+
+    #[test]
+    fn test_search_query_with_boost_links_false() {
+        let q = SearchQuery::new("test").with_boost_links(true).with_boost_links(false);
+        assert!(!q.boost_links);
+    }
+
+    #[test]
+    fn test_search_query_builder_chain_with_boost_links() {
+        let q = SearchQuery::new("test")
+            .with_limit(5)
+            .with_min_score(0.5)
+            .with_boost_links(true);
+        assert_eq!(q.limit, 5);
+        assert_eq!(q.min_score, 0.5);
+        assert!(q.boost_links);
     }
 
     // --- RRF tests ---

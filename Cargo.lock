@@ -1491,6 +1491,7 @@ dependencies = [
  "notify-debouncer-full",
  "parking_lot",
  "pulldown-cmark",
+ "regex",
  "reqwest",
  "rkyv",
  "serde",

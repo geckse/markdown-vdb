@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 use mdvdb::search::SearchResult;
 use mdvdb::schema::{FieldType, Schema};
+use mdvdb::links::{LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
 use mdvdb::tree::FileTree;
 use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
@@ -546,6 +547,205 @@ pub fn print_init_success(path: &str) {
         "Edit it to configure your embedding provider and other settings.".dimmed()
     );
     println!();
+}
+
+/// Print link query results with tree-rendered outgoing and incoming links.
+///
+/// Shows outgoing links with broken/wikilink badges, incoming backlinks,
+/// and a summary line with counts.
+pub fn print_links(result: &LinkQueryResult) {
+    let broken_count = result
+        .outgoing
+        .iter()
+        .filter(|r| r.state == LinkState::Broken)
+        .count();
+
+    println!(
+        "\n  {} {}\n",
+        "●".cyan().bold(),
+        result.file.bold()
+    );
+
+    // Outgoing links
+    let outgoing_count = result.outgoing.len();
+    println!(
+        "  {} {}",
+        "Outgoing:".cyan(),
+        outgoing_count.to_string().yellow()
+    );
+
+    for (i, link) in result.outgoing.iter().enumerate() {
+        let connector = if i == outgoing_count - 1 {
+            "└──"
+        } else {
+            "├──"
+        };
+
+        let mut badges = String::new();
+        if link.state == LinkState::Broken {
+            badges.push_str(&format!(" {}", "[broken]".red()));
+        }
+        if link.entry.is_wikilink {
+            badges.push_str(&format!(" {}", "[wikilink]".blue()));
+        }
+
+        println!(
+            "  {} {} {}{}",
+            connector.dimmed(),
+            link.entry.target.bold(),
+            format!("\"{}\"", link.entry.text).dimmed(),
+            badges
+        );
+        println!(
+            "  {}   {}",
+            if i == outgoing_count - 1 { " " } else { "│" }.dimmed(),
+            format!("line {}", link.entry.line_number).dimmed()
+        );
+    }
+
+    if outgoing_count == 0 {
+        println!("  {} {}", "└──".dimmed(), "(none)".dimmed());
+    }
+
+    println!();
+
+    // Incoming links (backlinks)
+    let incoming_count = result.incoming.len();
+    println!(
+        "  {} {}",
+        "Incoming:".cyan(),
+        incoming_count.to_string().yellow()
+    );
+
+    for (i, entry) in result.incoming.iter().enumerate() {
+        let connector = if i == incoming_count - 1 {
+            "└──"
+        } else {
+            "├──"
+        };
+
+        let mut badges = String::new();
+        if entry.is_wikilink {
+            badges.push_str(&format!(" {}", "[wikilink]".blue()));
+        }
+
+        println!(
+            "  {} {} {}{}",
+            connector.dimmed(),
+            entry.source.bold(),
+            format!("\"{}\"", entry.text).dimmed(),
+            badges
+        );
+        println!(
+            "  {}   {}",
+            if i == incoming_count - 1 { " " } else { "│" }.dimmed(),
+            format!("line {}", entry.line_number).dimmed()
+        );
+    }
+
+    if incoming_count == 0 {
+        println!("  {} {}", "└──".dimmed(), "(none)".dimmed());
+    }
+
+    // Summary
+    println!();
+    let mut summary = format!(
+        "  {} outgoing, {} incoming",
+        outgoing_count.to_string().yellow(),
+        incoming_count.to_string().yellow()
+    );
+    if broken_count > 0 {
+        summary.push_str(&format!(", {} {}", broken_count.to_string().red().bold(), "broken".red()));
+    }
+    println!("  {}", summary);
+    println!();
+}
+
+/// Print backlinks (incoming links only) for a file.
+///
+/// Simpler layout than `print_links` — shows only files linking TO the given file.
+pub fn print_backlinks(file_path: &str, backlinks: &[ResolvedLink]) {
+    println!(
+        "\n  {} {} {}\n",
+        "●".cyan().bold(),
+        "Backlinks to".cyan(),
+        file_path.bold()
+    );
+
+    if backlinks.is_empty() {
+        println!(
+            "  {} No files link to {}",
+            "✗".red().bold(),
+            file_path.yellow()
+        );
+        println!();
+        return;
+    }
+
+    println!(
+        "  {} {} incoming link{}\n",
+        "Incoming:".cyan(),
+        backlinks.len().to_string().yellow(),
+        if backlinks.len() == 1 { "" } else { "s" }
+    );
+
+    for (i, link) in backlinks.iter().enumerate() {
+        let connector = if i == backlinks.len() - 1 {
+            "└──"
+        } else {
+            "├──"
+        };
+
+        let mut badges = String::new();
+        if link.entry.is_wikilink {
+            badges.push_str(&format!(" {}", "[wikilink]".blue()));
+        }
+
+        println!(
+            "  {} {} {}{}",
+            connector.dimmed(),
+            link.entry.source.bold(),
+            format!("\"{}\"", link.entry.text).dimmed(),
+            badges
+        );
+        println!(
+            "  {}   {}",
+            if i == backlinks.len() - 1 { " " } else { "│" }.dimmed(),
+            format!("line {}", link.entry.line_number).dimmed()
+        );
+    }
+
+    println!();
+}
+
+/// Print orphan files (files with no incoming or outgoing links).
+pub fn print_orphans(orphans: &[OrphanFile]) {
+    if orphans.is_empty() {
+        println!(
+            "\n  {} No orphan files found — all files are connected.\n",
+            "✓".green().bold()
+        );
+        return;
+    }
+
+    println!(
+        "\n  {} {} {} {}\n",
+        "●".yellow().bold(),
+        "Orphan Files".bold(),
+        format!("({})", orphans.len()).dimmed(),
+        "— no incoming or outgoing links".dimmed()
+    );
+
+    for orphan in orphans {
+        println!("  {} {}", "•".yellow(), orphan.path.bold());
+    }
+
+    println!(
+        "\n  {} {} orphan file{}\n",
+        "Total:".dimmed(),
+        orphans.len().to_string().yellow(),
+        if orphans.len() == 1 { "" } else { "s" }
+    );
 }
 
 #[cfg(test)]

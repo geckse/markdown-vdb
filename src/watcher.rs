@@ -152,6 +152,12 @@ impl Watcher {
                 let relative = path.to_string_lossy().to_string();
                 info!(path = %relative, "removing deleted file from index");
                 self.index.remove_file(&relative)?;
+
+                // Update link graph: remove links from deleted file.
+                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0 });
+                crate::links::remove_file_links(&mut graph, &relative);
+                self.index.update_link_graph(Some(graph));
+
                 self.fts_index.remove_file(&relative)?;
                 self.fts_index.commit()?;
                 self.index.save()?;
@@ -161,6 +167,12 @@ impl Watcher {
                 let from_str = from.to_string_lossy().to_string();
                 debug!(from = %from_str, to = %to.display(), "processing rename event");
                 self.index.remove_file(&from_str)?;
+
+                // Remove old path links from graph before processing new path.
+                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0 });
+                crate::links::remove_file_links(&mut graph, &from_str);
+                self.index.update_link_graph(Some(graph));
+
                 self.fts_index.remove_file(&from_str)?;
                 self.process_file(to).await
             }
@@ -215,6 +227,13 @@ impl Watcher {
 
         // Upsert vector index and FTS index.
         self.index.upsert(&file, &chunks, &embeddings)?;
+
+        // Update link graph with links from this file.
+        if !file.links.is_empty() {
+            let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0 });
+            crate::links::update_file_links(&mut graph, &file);
+            self.index.update_link_graph(Some(graph));
+        }
 
         let fts_chunks: Vec<FtsChunkData> = chunks
             .iter()

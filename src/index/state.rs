@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::index::storage;
 use crate::clustering::ClusterState;
 use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
+use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
 
@@ -76,6 +77,7 @@ impl Index {
                 .unwrap_or(0),
             schema: None,
             cluster_state: None,
+            link_graph: None,
         };
 
         let hnsw = storage::create_hnsw(config.dimensions)?;
@@ -373,6 +375,25 @@ impl Index {
         let mut state = self.state.write();
         state.metadata.cluster_state = cluster_state;
         state.dirty = true;
+    }
+
+    /// Get the current link graph, if any.
+    pub fn get_link_graph(&self) -> Option<LinkGraph> {
+        let state = self.state.read();
+        state.metadata.link_graph.clone()
+    }
+
+    /// Update (or clear) the link graph.
+    pub fn update_link_graph(&self, link_graph: Option<LinkGraph>) {
+        let mut state = self.state.write();
+        state.metadata.link_graph = link_graph;
+        state.dirty = true;
+    }
+
+    /// Get all indexed file paths as a HashSet.
+    pub fn get_indexed_file_paths(&self) -> std::collections::HashSet<String> {
+        let state = self.state.read();
+        state.metadata.files.keys().cloned().collect()
     }
 
     /// Set (or clear) the metadata schema.

@@ -37,6 +37,7 @@ fn fake_markdown_file(path: &str, hash: &str, frontmatter: Option<serde_json::Va
         body: "Test body content".to_string(),
         content_hash: hash.to_string(),
         file_size: 100,
+        links: Vec::new(),
     }
 }
 

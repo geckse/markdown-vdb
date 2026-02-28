@@ -489,6 +489,164 @@ fn test_ingest_json_unchanged() {
     let _: serde_json::Value = serde_json::from_str(&stdout).expect("ingest --json should be valid JSON");
 }
 
+// ---------------------------------------------------------------------------
+// Link graph CLI tests
+// ---------------------------------------------------------------------------
+
+/// Create a temp directory with markdown files that contain links, ingest it.
+fn setup_and_ingest_with_links() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::write(
+        root.join(".markdownvdb"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("alpha.md"),
+        "---\ntitle: Alpha\n---\n\n# Alpha\n\nLinks to [Beta](beta.md) and [Gamma](gamma.md).\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("beta.md"),
+        "---\ntitle: Beta\n---\n\n# Beta\n\nLinks back to [Alpha](alpha.md).\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("gamma.md"),
+        "---\ntitle: Gamma\n---\n\n# Gamma\n\nNo outgoing links here.\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("orphan.md"),
+        "---\ntitle: Orphan\n---\n\n# Orphan\n\nThis file has no links at all.\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .arg("ingest")
+        .current_dir(root)
+        .output()
+        .expect("failed to run ingest");
+    assert!(
+        output.status.success(),
+        "ingest should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    dir
+}
+
+#[test]
+fn test_links_json_output() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["links", "alpha.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success(), "links --json should succeed, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    assert_eq!(json["file"].as_str().unwrap(), "alpha.md");
+    let links = &json["links"];
+    assert!(links["outgoing"].is_array(), "should have 'links.outgoing' array");
+    let outgoing = links["outgoing"].as_array().unwrap();
+    assert!(outgoing.len() >= 2, "alpha.md should have at least 2 outgoing links, got {}", outgoing.len());
+    assert!(links["incoming"].is_array(), "should have 'links.incoming' array");
+}
+
+#[test]
+fn test_backlinks_json_output() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["backlinks", "alpha.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success(), "backlinks --json should succeed, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    assert_eq!(json["file"].as_str().unwrap(), "alpha.md");
+    assert!(json["backlinks"].is_array(), "should have 'backlinks' array");
+    // beta.md links to alpha.md, so alpha should have backlinks
+    let backlinks = json["backlinks"].as_array().unwrap();
+    assert!(!backlinks.is_empty(), "alpha.md should have backlinks from beta.md");
+}
+
+#[test]
+fn test_orphans_json_output() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["orphans", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(output.status.success(), "orphans --json should succeed, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    // orphan.md has no links in or out, so it should appear
+    assert!(json["orphans"].is_array(), "should have 'orphans' array");
+    let orphans = json["orphans"].as_array().unwrap();
+    let paths: Vec<&str> = orphans.iter().filter_map(|o| o["path"].as_str()).collect();
+    assert!(paths.contains(&"orphan.md"), "orphan.md should be in orphans list, got: {paths:?}");
+}
+
+#[test]
+fn test_links_nonexistent_file() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["links", "nonexistent.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    // The command succeeds but returns empty links for a nonexistent file
+    assert!(output.status.success(), "links should succeed even for nonexistent file");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    let links = &json["links"];
+    let outgoing = links["outgoing"].as_array().unwrap();
+    let incoming = links["incoming"].as_array().unwrap();
+    assert!(outgoing.is_empty(), "nonexistent file should have no outgoing links");
+    assert!(incoming.is_empty(), "nonexistent file should have no incoming links");
+}
+
+#[test]
+fn test_search_boost_links_flag() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["search", "alpha", "--boost-links", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "search --boost-links should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+    assert!(json["results"].is_array(), "should have 'results' array");
+}
+
 #[test]
 fn test_status_json_unchanged() {
     let dir = setup_and_ingest();

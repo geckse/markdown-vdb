@@ -9,6 +9,7 @@ pub mod index;
 pub mod logging;
 pub mod parser;
 pub mod ingest;
+pub mod links;
 pub mod schema;
 pub mod search;
 pub mod tree;
@@ -23,6 +24,7 @@ pub use schema::{FieldType, Schema, SchemaField};
 pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
+pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
 pub use tree::{FileState, FileTree, FileTreeNode};
 
 /// Convenience alias used throughout the crate.
@@ -471,13 +473,58 @@ impl MarkdownVdb {
         }
 
         // Remove files that no longer exist on disk (only for full discovery, not single file).
+        let mut removed_paths: Vec<String> = Vec::new();
         if options.file.is_none() {
             for path_str in &existing_paths {
                 if !discovered_paths.contains(path_str) {
                     self.index.remove_file(path_str)?;
                     self.fts_index.remove_file(path_str)?;
                     result.files_removed += 1;
+                    removed_paths.push(path_str.clone());
                     debug!(path = %path_str, "removed deleted file from index");
+                }
+            }
+        }
+
+        // Build / update link graph.
+        if let Some(ref single_file) = options.file {
+            // Single-file ingest: update links for just this file.
+            let mut graph = self.index.get_link_graph().unwrap_or_else(|| links::LinkGraph {
+                forward: HashMap::new(),
+                last_updated: 0,
+            });
+            if let Some((md, _)) = parsed_files.get(single_file) {
+                links::update_file_links(&mut graph, md);
+            }
+            self.index.update_link_graph(Some(graph));
+        } else {
+            // Full ingest: build link graph from all parsed files.
+            // Also need to include skipped files that are still in the index.
+            // For simplicity, build from parsed files only (changed files).
+            // For a complete graph we'd need all files, but we build from what we parsed.
+            // Re-parse skipped files for link extraction.
+            let mut all_md_files: Vec<parser::MarkdownFile> = Vec::new();
+            for (md, _) in parsed_files.values() {
+                all_md_files.push(md.clone());
+            }
+            // Parse skipped files too (they weren't in parsed_files).
+            for path in &discovered {
+                if !parsed_files.contains_key(path) {
+                    if let Ok(md) = parser::parse_markdown_file(&self.root, path) {
+                        all_md_files.push(md);
+                    }
+                }
+            }
+            let graph = links::build_link_graph(&all_md_files);
+            self.index.update_link_graph(Some(graph));
+
+            // Remove links for deleted files.
+            if !removed_paths.is_empty() {
+                if let Some(mut graph) = self.index.get_link_graph() {
+                    for path_str in &removed_paths {
+                        links::remove_file_links(&mut graph, path_str);
+                    }
+                    self.index.update_link_graph(Some(graph));
                 }
             }
         }
@@ -682,6 +729,49 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 .collect()),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Query links originating from a specific file.
+    pub fn links(&self, path: &str) -> Result<links::LinkQueryResult> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        let indexed_files: std::collections::HashSet<String> =
+            self.index.get_file_hashes().keys().cloned().collect();
+        let backlink_map = links::compute_backlinks(&graph);
+        Ok(links::query_links(path, &graph, &backlink_map, &indexed_files))
+    }
+
+    /// Query backlinks pointing to a specific file.
+    pub fn backlinks(&self, path: &str) -> Result<Vec<links::ResolvedLink>> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        let indexed_files: std::collections::HashSet<String> =
+            self.index.get_file_hashes().keys().cloned().collect();
+        let backlink_map = links::compute_backlinks(&graph);
+        let entries = backlink_map.get(path).cloned().unwrap_or_default();
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                let state = if indexed_files.contains(&entry.source) {
+                    links::LinkState::Valid
+                } else {
+                    links::LinkState::Broken
+                };
+                links::ResolvedLink { entry, state }
+            })
+            .collect())
+    }
+
+    /// Find orphan files (no incoming or outgoing links).
+    pub fn orphans(&self) -> Result<Vec<links::OrphanFile>> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        let indexed_files: std::collections::HashSet<String> =
+            self.index.get_file_hashes().keys().cloned().collect();
+        Ok(links::find_orphans(&graph, &indexed_files))
     }
 
     /// Build a file tree showing sync state of all discovered files.
