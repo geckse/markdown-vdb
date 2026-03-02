@@ -3,7 +3,7 @@ title: "Deployment Guide"
 tags: [devops, kubernetes, deployment]
 category: documentation
 author: "Marcus Rivera"
-status: published
+status: draft
 ---
 
 # Deployment Guide

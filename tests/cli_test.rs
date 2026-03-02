@@ -59,7 +59,7 @@ fn setup_and_ingest() -> TempDir {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_status_json_without_index_exits_with_error() {
+fn test_status_json_without_index_returns_empty() {
     let dir = TempDir::new().unwrap();
     let output = mdvdb_bin()
         .args(["status", "--json"])
@@ -68,15 +68,15 @@ fn test_status_json_without_index_exits_with_error() {
         .expect("failed to execute mdvdb");
 
     assert!(
-        !output.status.success(),
-        "status --json without index should fail, got exit code {:?}",
+        output.status.success(),
+        "status --json on empty dir should succeed (lazy provider), got exit code {:?}",
         output.status.code()
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.is_empty(),
-        "expected error message on stderr"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("status JSON should be valid");
+    assert_eq!(parsed["document_count"], 0);
+    assert_eq!(parsed["chunk_count"], 0);
 }
 
 #[test]

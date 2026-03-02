@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -236,8 +237,10 @@ pub struct MarkdownVdb {
     root: PathBuf,
     /// Loaded configuration.
     config: Config,
-    /// Embedding provider instance (Arc for sharing with watcher).
-    provider: Arc<dyn EmbeddingProvider>,
+    /// Embedding provider instance, lazily initialized on first use.
+    /// Commands like `tree` and `status` never need embeddings,
+    /// so we defer creation to avoid requiring API keys for read-only ops.
+    provider: Mutex<Option<Arc<dyn EmbeddingProvider>>>,
     /// Vector index (Arc for sharing with watcher).
     index: Arc<Index>,
     /// Full-text search index (Arc for sharing with watcher).
@@ -275,8 +278,6 @@ impl MarkdownVdb {
         } else {
             root
         };
-
-        let provider: Arc<dyn EmbeddingProvider> = Arc::from(create_provider(&config)?);
 
         let embedding_config = EmbeddingConfig {
             provider: format!("{:?}", config.embedding_provider),
@@ -328,7 +329,7 @@ impl MarkdownVdb {
 
         info!(
             root = %root.display(),
-            provider = provider.name(),
+            provider_type = ?config.embedding_provider,
             dimensions = config.embedding_dimensions,
             "opened markdown-vdb"
         );
@@ -336,7 +337,7 @@ impl MarkdownVdb {
         Ok(Self {
             root,
             config,
-            provider,
+            provider: Mutex::new(None),
             index,
             fts_index,
         })
@@ -362,14 +363,28 @@ impl MarkdownVdb {
         Arc::clone(&self.index)
     }
 
+    /// Lazily initialize and return the embedding provider.
+    /// Fails if the provider cannot be created (e.g., missing API key).
+    fn ensure_provider(&self) -> Result<Arc<dyn EmbeddingProvider>> {
+        let mut guard = self.provider.lock();
+        if let Some(ref p) = *guard {
+            return Ok(Arc::clone(p));
+        }
+        let p: Arc<dyn EmbeddingProvider> = Arc::from(create_provider(&self.config)?);
+        *guard = Some(Arc::clone(&p));
+        Ok(p)
+    }
+
     /// Get a reference to the embedding provider.
-    pub fn provider(&self) -> &dyn EmbeddingProvider {
-        self.provider.as_ref()
+    /// Lazily creates the provider on first call.
+    pub fn provider(&self) -> Result<Arc<dyn EmbeddingProvider>> {
+        self.ensure_provider()
     }
 
     /// Get a shared reference to the embedding provider (for watcher integration).
-    pub fn provider_arc(&self) -> Arc<dyn EmbeddingProvider> {
-        Arc::clone(&self.provider)
+    /// Lazily creates the provider on first call.
+    pub fn provider_arc(&self) -> Result<Arc<dyn EmbeddingProvider>> {
+        self.ensure_provider()
     }
 
     /// Get a reference to the full-text search index.
@@ -571,7 +586,7 @@ impl MarkdownVdb {
             .collect();
 
         let embed_result = embedding::batch::embed_chunks(
-            self.provider.as_ref(),
+            self.ensure_provider()?.as_ref(),
             &all_batch_chunks,
             &embed_existing,
             &embed_current,
@@ -790,7 +805,7 @@ impl MarkdownVdb {
         search::search(
             &query,
             &self.index,
-            self.provider.as_ref(),
+            self.ensure_provider()?.as_ref(),
             Some(&self.fts_index),
             self.config.search_rrf_k,
             self.config.bm25_norm_k,
@@ -1008,7 +1023,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             &self.root,
             Arc::clone(&self.index),
             Arc::clone(&self.fts_index),
-            Arc::clone(&self.provider),
+            self.ensure_provider()?,
             event_callback,
         );
         w.watch(cancel).await
@@ -1243,7 +1258,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         let start = std::time::Instant::now();
         match tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            self.provider.embed_batch(&["test".to_string()]),
+            self.ensure_provider()?.embed_batch(&["test".to_string()]),
         )
         .await
         {
