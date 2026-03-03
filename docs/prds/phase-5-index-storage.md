@@ -273,6 +273,61 @@ If the index file exists but has an incompatible version or mismatched embedding
 - [ ] `cargo test` passes all index tests
 - [ ] `cargo clippy` reports no warnings
 
+## Addendum: V2 Index Format — F16 Quantization & zstd Compression
+
+### Motivation
+
+The V1 index grows large quickly due to F32 vectors (6KB per chunk at 1536 dimensions) and uncompressed rkyv metadata (full chunk text). V2 introduces two size optimizations that reduce the main index file by ~55% with no meaningful search quality impact.
+
+### V2 Header Extension
+
+V2 uses previously-reserved header bytes 42-47:
+
+```
+[Header (64 bytes)]
+  Bytes  0.. 6: Magic "MDVDB\x00"
+  Bytes  6..10: Version (u32 LE) — 2
+  Bytes 10..18: Metadata region offset (u64 LE)
+  Bytes 18..26: Metadata region size (u64 LE) — compressed size if zstd enabled
+  Bytes 26..34: HNSW region offset (u64 LE)
+  Bytes 34..42: HNSW region size (u64 LE)
+  Bytes 42..43: Quantization type (u8) — 0 = F32, 1 = F16
+  Bytes 43..44: Compression flags (u8) — bit 0: zstd metadata compression
+  Bytes 44..48: Uncompressed metadata size (u32 LE) — for zstd decompression buffer
+  Bytes 48..64: Reserved
+```
+
+### Defaults
+
+| Feature | Default | Opt-out |
+|---|---|---|
+| Vector quantization | F16 (2 bytes/dim) | `MDVDB_VECTOR_QUANTIZATION=f32` |
+| Metadata compression | zstd level 3 | `MDVDB_INDEX_COMPRESSION=false` |
+
+### Config
+
+Two new environment variables (dotenv-style, same priority chain as all other config):
+
+- `MDVDB_VECTOR_QUANTIZATION` — `f16` (default) or `f32`. Controls `usearch::ScalarKind` for the HNSW index.
+- `MDVDB_INDEX_COMPRESSION` — `true` (default) or `false`. Controls zstd compression of the rkyv metadata region.
+
+### Implementation Files
+
+- `src/config.rs` — `VectorQuantization` enum, `MDVDB_VECTOR_QUANTIZATION` / `MDVDB_INDEX_COMPRESSION` parsing
+- `src/index/storage.rs` — V2 header constants, `WriteOptions` struct, `scalar_kind_for()` helper, updated `create_hnsw()`, `write_index()`, `load_index()`
+- `src/index/state.rs` — `WriteOptions` field on `Index`, `_with_options` variants for `open`/`create`/`open_or_create`
+- `src/lib.rs` — Constructs `WriteOptions` from `Config` and passes to `Index`
+
+### Size Impact
+
+Per chunk at 1536 dimensions:
+
+| Component | V1 (F32, raw) | V2 (F16, zstd) | Savings |
+|---|---|---|---|
+| HNSW vector + graph | ~6,400 bytes | ~3,328 bytes | ~48% |
+| rkyv metadata | 100% | ~25-33% | ~67-75% |
+| **Total index file** | baseline | ~45% of V1 | **~55%** |
+
 ## Anti-Patterns to Avoid
 
 - **Do NOT serialize vectors with rkyv** — Vectors are stored in the `usearch` HNSW index, not in the rkyv metadata region. `usearch` handles its own serialization with native mmap support. Storing vectors twice wastes space and complicates updates.

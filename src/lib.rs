@@ -18,7 +18,7 @@ pub mod watcher;
 pub use error::Error;
 
 // Re-export key public types for convenience.
-pub use config::Config;
+pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
 pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
@@ -44,6 +44,7 @@ use tracing::{debug, info, warn};
 use crate::embedding::provider::{create_provider, EmbeddingProvider};
 use crate::fts::FtsIndex;
 use crate::index::state::Index;
+use crate::index::storage::WriteOptions;
 use crate::index::types::EmbeddingConfig;
 
 /// Phase of the ingestion pipeline, reported via progress callbacks.
@@ -313,7 +314,15 @@ impl MarkdownVdb {
         }
 
         let index_path = index_dir.join("index");
-        let index = Arc::new(Index::open_or_create(&index_path, &embedding_config)?);
+        let write_options = WriteOptions {
+            quantization: config.vector_quantization.clone(),
+            compress_metadata: config.index_compression,
+        };
+        let index = Arc::new(Index::open_or_create_with_options(
+            &index_path,
+            &embedding_config,
+            write_options,
+        )?);
 
         let fts_path = index_dir.join("fts");
         let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);

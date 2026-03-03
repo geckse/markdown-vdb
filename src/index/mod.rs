@@ -4,6 +4,7 @@ pub mod types;
 
 // Re-export key types for convenient access via `crate::index::*`
 pub use state::Index;
+pub use storage::WriteOptions;
 pub use types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
 
 // Re-export clustering types for convenient access

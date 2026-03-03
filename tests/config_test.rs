@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use mdvdb::config::{Config, EmbeddingProviderType};
+use mdvdb::config::{Config, EmbeddingProviderType, VectorQuantization};
 use mdvdb::Error;
 use serial_test::serial;
 use tempfile::TempDir;
@@ -32,6 +32,8 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_SEARCH_DECAY_HALF_LIFE",
     "MDVDB_CONFIG_HOME",
     "MDVDB_NO_USER_CONFIG",
+    "MDVDB_VECTOR_QUANTIZATION",
+    "MDVDB_INDEX_COMPRESSION",
 ];
 
 /// Clear all MDVDB-related env vars to ensure test isolation.
@@ -70,6 +72,8 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.bm25_norm_k, 1.5);
     assert!(!config.search_decay_enabled, "decay should be disabled by default");
     assert_eq!(config.search_decay_half_life, 90.0, "default half-life should be 90 days");
+    assert_eq!(config.vector_quantization, VectorQuantization::F16, "default quantization should be F16");
+    assert!(config.index_compression, "index compression should be enabled by default");
 }
 
 #[test]
@@ -696,6 +700,86 @@ fn decay_in_dotenv_file() {
 
     assert!(config.search_decay_enabled);
     assert_eq!(config.search_decay_half_life, 45.5);
+
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// Vector quantization and index compression config tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn quantization_f32_from_env() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_VECTOR_QUANTIZATION", "f32");
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(config.vector_quantization, VectorQuantization::F32);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn quantization_case_insensitive() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+
+    for variant in &["F16", "f16", "F32", "f32"] {
+        std::env::set_var("MDVDB_VECTOR_QUANTIZATION", variant);
+        let config = Config::load(tmp.path()).unwrap();
+        // Just verify it parses without error
+        assert!(
+            config.vector_quantization == VectorQuantization::F16
+                || config.vector_quantization == VectorQuantization::F32,
+            "Failed for variant: {variant}"
+        );
+        clear_env();
+    }
+}
+
+#[test]
+#[serial]
+fn invalid_quantization_rejected() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_VECTOR_QUANTIZATION", "f8");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "invalid quantization type should be rejected");
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn compression_disabled_via_env() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_INDEX_COMPRESSION", "false");
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert!(!config.index_compression, "compression should be disabled");
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn quantization_and_compression_in_dotenv() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join(".markdownvdb"),
+        "MDVDB_VECTOR_QUANTIZATION=f32\nMDVDB_INDEX_COMPRESSION=false\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(config.vector_quantization, VectorQuantization::F32);
+    assert!(!config.index_compression);
 
     clear_env();
 }

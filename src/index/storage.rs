@@ -5,6 +5,7 @@ use std::path::Path;
 use memmap2::Mmap;
 use usearch::Index;
 
+use crate::config::VectorQuantization;
 use crate::error::{Error, Result};
 use crate::index::types::IndexMetadata;
 
@@ -12,17 +13,53 @@ use crate::index::types::IndexMetadata;
 pub const MAGIC: &[u8; 6] = b"MDVDB\x00";
 
 /// Current index format version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Fixed header size in bytes.
 pub const HEADER_SIZE: usize = 64;
 
-/// Create a new HNSW index with default options for the given dimensionality.
-pub fn create_hnsw(dimensions: usize) -> Result<Index> {
+/// Quantization byte value: F32.
+const QUANT_F32: u8 = 0;
+
+/// Quantization byte value: F16.
+const QUANT_F16: u8 = 1;
+
+/// Compression flag: zstd.
+const COMPRESS_ZSTD: u8 = 0x01;
+
+/// Default zstd compression level.
+const ZSTD_LEVEL: i32 = 3;
+
+/// Options controlling how the index is written to disk.
+#[derive(Debug, Clone)]
+pub struct WriteOptions {
+    pub quantization: VectorQuantization,
+    pub compress_metadata: bool,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        Self {
+            quantization: VectorQuantization::F16,
+            compress_metadata: true,
+        }
+    }
+}
+
+/// Convert a `VectorQuantization` config value to the corresponding usearch `ScalarKind`.
+pub fn scalar_kind_for(q: &VectorQuantization) -> usearch::ScalarKind {
+    match q {
+        VectorQuantization::F16 => usearch::ScalarKind::F16,
+        VectorQuantization::F32 => usearch::ScalarKind::F32,
+    }
+}
+
+/// Create a new HNSW index with the given dimensionality and scalar kind.
+pub fn create_hnsw(dimensions: usize, quantization: usearch::ScalarKind) -> Result<Index> {
     let opts = usearch::IndexOptions {
         dimensions,
         metric: usearch::MetricKind::Cos,
-        quantization: usearch::ScalarKind::F32,
+        quantization,
         connectivity: 16,
         expansion_add: 128,
         expansion_search: 64,
@@ -32,10 +69,28 @@ pub fn create_hnsw(dimensions: usize) -> Result<Index> {
 }
 
 /// Write an index file atomically: serialize to `.tmp`, fsync, then rename.
-pub fn write_index(path: &Path, metadata: &IndexMetadata, hnsw: &Index) -> Result<()> {
+///
+/// Writes a V2 format header with quantization type and optional zstd compression
+/// of the rkyv metadata region.
+pub fn write_index(
+    path: &Path,
+    metadata: &IndexMetadata,
+    hnsw: &Index,
+    options: &WriteOptions,
+) -> Result<()> {
     // Serialize metadata via rkyv
-    let meta_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(metadata)
+    let meta_bytes_raw = rkyv::to_bytes::<rkyv::rancor::Error>(metadata)
         .map_err(|e| Error::Serialization(e.to_string()))?;
+
+    let uncompressed_meta_size = meta_bytes_raw.len() as u32;
+
+    // Optionally compress metadata with zstd
+    let meta_bytes: Vec<u8> = if options.compress_metadata {
+        zstd::bulk::compress(&meta_bytes_raw, ZSTD_LEVEL)
+            .map_err(|e| Error::Serialization(format!("zstd compress: {e}")))?
+    } else {
+        meta_bytes_raw.to_vec()
+    };
 
     // Serialize HNSW to buffer
     let hnsw_len = hnsw.serialized_length();
@@ -49,7 +104,7 @@ pub fn write_index(path: &Path, metadata: &IndexMetadata, hnsw: &Index) -> Resul
     let hnsw_offset: u64 = meta_offset + meta_size;
     let hnsw_size: u64 = hnsw_bytes.len() as u64;
 
-    // Build header (64 bytes)
+    // Build V2 header (64 bytes)
     let mut header = [0u8; HEADER_SIZE];
     header[..6].copy_from_slice(MAGIC);
     header[6..10].copy_from_slice(&VERSION.to_le_bytes());
@@ -57,7 +112,18 @@ pub fn write_index(path: &Path, metadata: &IndexMetadata, hnsw: &Index) -> Resul
     header[18..26].copy_from_slice(&meta_size.to_le_bytes());
     header[26..34].copy_from_slice(&hnsw_offset.to_le_bytes());
     header[34..42].copy_from_slice(&hnsw_size.to_le_bytes());
-    // bytes 42..64 reserved
+    // V2 extension fields (bytes 42..48)
+    header[42] = match options.quantization {
+        VectorQuantization::F16 => QUANT_F16,
+        VectorQuantization::F32 => QUANT_F32,
+    };
+    header[43] = if options.compress_metadata {
+        COMPRESS_ZSTD
+    } else {
+        0
+    };
+    header[44..48].copy_from_slice(&uncompressed_meta_size.to_le_bytes());
+    // bytes 48..64 reserved
 
     // Write to tmp file, fsync, rename
     let tmp_path = path.with_extension("tmp");
@@ -110,18 +176,44 @@ pub fn load_index(path: &Path) -> Result<(IndexMetadata, Index)> {
         return Err(Error::IndexCorrupted("truncated file".into()));
     }
 
+    // Read extension fields
+    let quantization_byte = mmap[42];
+    let compression_flags = mmap[43];
+    let uncompressed_meta_size = u32::from_le_bytes(mmap[44..48].try_into().unwrap()) as usize;
+
+    // Determine HNSW ScalarKind from header
+    let scalar_kind = match quantization_byte {
+        QUANT_F32 => usearch::ScalarKind::F32,
+        QUANT_F16 => usearch::ScalarKind::F16,
+        other => {
+            return Err(Error::IndexCorrupted(format!(
+                "unknown quantization type: {other}"
+            )))
+        }
+    };
+
+    // Decompress metadata if zstd flag is set
+    let raw_meta_bytes = &mmap[meta_offset..meta_offset + meta_size];
+    let decompressed: Vec<u8>;
+    let meta_bytes: &[u8] = if compression_flags & COMPRESS_ZSTD != 0 {
+        decompressed = zstd::bulk::decompress(raw_meta_bytes, uncompressed_meta_size)
+            .map_err(|e| Error::Serialization(format!("zstd decompress: {e}")))?;
+        &decompressed
+    } else {
+        raw_meta_bytes
+    };
+
     // Deserialize metadata
-    let meta_bytes = &mmap[meta_offset..meta_offset + meta_size];
     let metadata: IndexMetadata =
         rkyv::from_bytes::<IndexMetadata, rkyv::rancor::Error>(meta_bytes)
             .map_err(|e| Error::Serialization(format!("rkyv deserialize: {e}")))?;
 
-    // Load HNSW — create an empty index then load state from the buffer
+    // Load HNSW with the correct ScalarKind
     let hnsw_bytes = &mmap[hnsw_offset..hnsw_offset + hnsw_size];
     let hnsw = Index::new(&usearch::IndexOptions {
         dimensions: metadata.embedding_config.dimensions,
         metric: usearch::MetricKind::Cos,
-        quantization: usearch::ScalarKind::F32,
+        quantization: scalar_kind,
         connectivity: 16,
         expansion_add: 128,
         expansion_search: 64,
@@ -160,7 +252,13 @@ mod tests {
 
     #[test]
     fn create_hnsw_returns_index() {
-        let idx = create_hnsw(128).unwrap();
+        let idx = create_hnsw(128, usearch::ScalarKind::F32).unwrap();
+        assert_eq!(idx.dimensions(), 128);
+    }
+
+    #[test]
+    fn create_hnsw_f16() {
+        let idx = create_hnsw(128, usearch::ScalarKind::F16).unwrap();
         assert_eq!(idx.dimensions(), 128);
     }
 
@@ -169,15 +267,99 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.idx");
         let meta = test_metadata();
-        let hnsw = create_hnsw(128).unwrap();
+        let hnsw = create_hnsw(128, usearch::ScalarKind::F16).unwrap();
         hnsw.reserve(10).unwrap();
 
-        write_index(&path, &meta, &hnsw).unwrap();
+        write_index(&path, &meta, &hnsw, &WriteOptions::default()).unwrap();
         assert!(path.exists());
 
         let (loaded_meta, _loaded_hnsw) = load_index(&path).unwrap();
         assert_eq!(loaded_meta.last_updated, 1234567890);
         assert_eq!(loaded_meta.embedding_config.provider, "Mock");
+    }
+
+    #[test]
+    fn roundtrip_v2_f16_compressed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let meta = test_metadata();
+        let hnsw = create_hnsw(128, usearch::ScalarKind::F16).unwrap();
+        hnsw.reserve(10).unwrap();
+
+        let options = WriteOptions {
+            quantization: VectorQuantization::F16,
+            compress_metadata: true,
+        };
+        write_index(&path, &meta, &hnsw, &options).unwrap();
+
+        let (loaded_meta, _) = load_index(&path).unwrap();
+        assert_eq!(loaded_meta.last_updated, 1234567890);
+        assert_eq!(loaded_meta.embedding_config.provider, "Mock");
+    }
+
+    #[test]
+    fn roundtrip_v2_f32_uncompressed() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let meta = test_metadata();
+        let hnsw = create_hnsw(128, usearch::ScalarKind::F32).unwrap();
+        hnsw.reserve(10).unwrap();
+
+        let options = WriteOptions {
+            quantization: VectorQuantization::F32,
+            compress_metadata: false,
+        };
+        write_index(&path, &meta, &hnsw, &options).unwrap();
+
+        let (loaded_meta, _) = load_index(&path).unwrap();
+        assert_eq!(loaded_meta.last_updated, 1234567890);
+    }
+
+    #[test]
+    fn v1_index_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.idx");
+        let mut data = vec![0u8; 128];
+        data[..6].copy_from_slice(b"MDVDB\x00");
+        data[6..10].copy_from_slice(&1u32.to_le_bytes()); // V1
+        fs::write(&path, &data).unwrap();
+        let result = load_index(&path);
+        assert!(matches!(result, Err(Error::IndexCorrupted(_))));
+    }
+
+    #[test]
+    fn v2_header_bytes_correct() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let meta = test_metadata();
+        let hnsw = create_hnsw(128, usearch::ScalarKind::F16).unwrap();
+        hnsw.reserve(10).unwrap();
+
+        let options = WriteOptions {
+            quantization: VectorQuantization::F16,
+            compress_metadata: true,
+        };
+        write_index(&path, &meta, &hnsw, &options).unwrap();
+
+        let raw = fs::read(&path).unwrap();
+        assert_eq!(&raw[..6], b"MDVDB\x00");
+        assert_eq!(u32::from_le_bytes(raw[6..10].try_into().unwrap()), VERSION);
+        assert_eq!(raw[42], QUANT_F16);
+        assert_eq!(raw[43], COMPRESS_ZSTD);
+        let uncomp = u32::from_le_bytes(raw[44..48].try_into().unwrap());
+        assert!(uncomp > 0);
+    }
+
+    #[test]
+    fn unknown_future_version_rejected() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("future.idx");
+        let mut data = vec![0u8; 128];
+        data[..6].copy_from_slice(b"MDVDB\x00");
+        data[6..10].copy_from_slice(&999u32.to_le_bytes());
+        fs::write(&path, &data).unwrap();
+        let result = load_index(&path);
+        assert!(matches!(result, Err(Error::IndexCorrupted(_))));
     }
 
     #[test]

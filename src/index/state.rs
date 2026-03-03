@@ -9,9 +9,9 @@ use tracing::debug;
 
 use crate::chunker::Chunk;
 use crate::error::{Error, Result};
-use crate::index::storage;
-use crate::clustering::ClusterState;
+use crate::index::storage::{self, WriteOptions};
 use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
+use crate::clustering::ClusterState;
 use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
@@ -29,11 +29,17 @@ struct IndexState {
 pub struct Index {
     path: PathBuf,
     state: RwLock<IndexState>,
+    write_options: WriteOptions,
 }
 
 impl Index {
-    /// Open an existing index file at the given path.
+    /// Open an existing index file at the given path with default write options.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_options(path, WriteOptions::default())
+    }
+
+    /// Open an existing index file at the given path with explicit write options.
+    pub fn open_with_options(path: &Path, write_options: WriteOptions) -> Result<Self> {
         let (metadata, hnsw) = storage::load_index(path)?;
 
         // Build id_to_key mapping and compute next_key from chunk IDs.
@@ -58,11 +64,21 @@ impl Index {
                 next_key,
                 dirty: false,
             }),
+            write_options,
         })
     }
 
-    /// Create a new, empty index file at the given path.
+    /// Create a new, empty index file at the given path with default write options.
     pub fn create(path: &Path, config: &EmbeddingConfig) -> Result<Self> {
+        Self::create_with_options(path, config, WriteOptions::default())
+    }
+
+    /// Create a new, empty index file at the given path with explicit write options.
+    pub fn create_with_options(
+        path: &Path,
+        config: &EmbeddingConfig,
+        write_options: WriteOptions,
+    ) -> Result<Self> {
         let metadata = IndexMetadata {
             chunks: HashMap::new(),
             files: HashMap::new(),
@@ -81,11 +97,12 @@ impl Index {
             file_mtimes: Some(HashMap::new()),
         };
 
-        let hnsw = storage::create_hnsw(config.dimensions)?;
+        let scalar_kind = storage::scalar_kind_for(&write_options.quantization);
+        let hnsw = storage::create_hnsw(config.dimensions, scalar_kind)?;
         hnsw.reserve(10)
             .map_err(|e| Error::Serialization(format!("usearch reserve: {e}")))?;
 
-        storage::write_index(path, &metadata, &hnsw)?;
+        storage::write_index(path, &metadata, &hnsw, &write_options)?;
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -96,14 +113,26 @@ impl Index {
                 next_key: 0,
                 dirty: false,
             }),
+            write_options,
         })
     }
 
     /// Open an existing index or create a new one if it doesn't exist.
     pub fn open_or_create(path: &Path, config: &EmbeddingConfig) -> Result<Self> {
-        match Self::open(path) {
+        Self::open_or_create_with_options(path, config, WriteOptions::default())
+    }
+
+    /// Open an existing index or create a new one, with explicit write options.
+    pub fn open_or_create_with_options(
+        path: &Path,
+        config: &EmbeddingConfig,
+        write_options: WriteOptions,
+    ) -> Result<Self> {
+        match Self::open_with_options(path, write_options.clone()) {
             Ok(index) => Ok(index),
-            Err(Error::IndexNotFound { .. }) => Self::create(path, config),
+            Err(Error::IndexNotFound { .. }) => {
+                Self::create_with_options(path, config, write_options)
+            }
             Err(e) => Err(e),
         }
     }
@@ -444,7 +473,8 @@ impl Index {
         let mut sorted_chunk_ids: Vec<&String> = state.metadata.chunks.keys().collect();
         sorted_chunk_ids.sort();
 
-        let new_hnsw = storage::create_hnsw(dims)?;
+        let scalar_kind = storage::scalar_kind_for(&self.write_options.quantization);
+        let new_hnsw = storage::create_hnsw(dims, scalar_kind)?;
         let n = sorted_chunk_ids.len();
         if n > 0 {
             new_hnsw
@@ -469,7 +499,7 @@ impl Index {
         state.id_to_key = new_id_to_key;
         state.next_key = n as u64;
 
-        storage::write_index(&self.path, &state.metadata, &state.hnsw)?;
+        storage::write_index(&self.path, &state.metadata, &state.hnsw, &self.write_options)?;
         state.dirty = false;
 
         debug!(path = %self.path.display(), "index saved");

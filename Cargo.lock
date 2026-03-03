@@ -1530,6 +1530,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "usearch",
+ "zstd",
 ]
 
 [[package]]

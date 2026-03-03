@@ -38,6 +38,8 @@ fn base_config() -> Config {
         bm25_norm_k: 1.5,
         search_decay_enabled: false,
         search_decay_half_life: 90.0,
+        vector_quantization: mdvdb::VectorQuantization::F16,
+        index_compression: true,
     }
 }
 

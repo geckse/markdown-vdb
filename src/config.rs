@@ -31,6 +31,27 @@ impl FromStr for EmbeddingProviderType {
     }
 }
 
+/// Supported vector quantization types for the HNSW index.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum VectorQuantization {
+    F16,
+    F32,
+}
+
+impl FromStr for VectorQuantization {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "f16" => Ok(Self::F16),
+            "f32" => Ok(Self::F32),
+            other => Err(Error::Config(format!(
+                "unknown vector quantization '{other}': expected f16 or f32"
+            ))),
+        }
+    }
+}
+
 /// Full configuration for mdvdb, loaded from environment / `.markdownvdb` file / defaults.
 #[derive(Debug, Clone, Serialize)]
 pub struct Config {
@@ -60,6 +81,10 @@ pub struct Config {
     pub search_decay_enabled: bool,
     /// Half-life in days for time decay. After this many days, a score is halved.
     pub search_decay_half_life: f64,
+    /// Vector quantization type for the HNSW index. Default: F16.
+    pub vector_quantization: VectorQuantization,
+    /// Whether to compress the metadata region with zstd. Default: true.
+    pub index_compression: bool,
 }
 
 impl Config {
@@ -151,6 +176,11 @@ impl Config {
 
         let search_decay_half_life = parse_env::<f64>("MDVDB_SEARCH_DECAY_HALF_LIFE", 90.0)?;
 
+        let vector_quantization = env_or_default("MDVDB_VECTOR_QUANTIZATION", "f16")
+            .parse::<VectorQuantization>()?;
+
+        let index_compression = parse_env_bool("MDVDB_INDEX_COMPRESSION", true)?;
+
         let config = Self {
             embedding_provider,
             embedding_model,
@@ -174,6 +204,8 @@ impl Config {
             bm25_norm_k,
             search_decay_enabled,
             search_decay_half_life,
+            vector_quantization,
+            index_compression,
         };
 
         config.validate()?;
@@ -341,6 +373,8 @@ mod tests {
             "MDVDB_BM25_NORM_K",
             "MDVDB_SEARCH_DECAY",
             "MDVDB_SEARCH_DECAY_HALF_LIFE",
+            "MDVDB_VECTOR_QUANTIZATION",
+            "MDVDB_INDEX_COMPRESSION",
         ];
         for var in &vars_to_clear {
             std::env::remove_var(var);
@@ -371,6 +405,8 @@ mod tests {
         assert_eq!(config.bm25_norm_k, 1.5);
         assert!(!config.search_decay_enabled);
         assert_eq!(config.search_decay_half_life, 90.0);
+        assert_eq!(config.vector_quantization, VectorQuantization::F16);
+        assert!(config.index_compression);
     }
 
     #[test]
@@ -541,6 +577,7 @@ mod tests {
             "MDVDB_SEARCH_DEFAULT_LIMIT", "MDVDB_SEARCH_MIN_SCORE",
             "MDVDB_SEARCH_MODE", "MDVDB_SEARCH_RRF_K", "MDVDB_BM25_NORM_K",
             "MDVDB_SEARCH_DECAY", "MDVDB_SEARCH_DECAY_HALF_LIFE",
+            "MDVDB_VECTOR_QUANTIZATION", "MDVDB_INDEX_COMPRESSION",
         ] {
             std::env::remove_var(var);
         }
