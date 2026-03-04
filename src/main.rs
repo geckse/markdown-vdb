@@ -292,7 +292,13 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    mdvdb::logging::init(cli.verbose)?;
+    // In JSON mode, suppress tracing logs to avoid any possibility of
+    // log output leaking into stdout and breaking JSON parsing.
+    if cli.json {
+        mdvdb::logging::init_silent()?;
+    } else {
+        mdvdb::logging::init(cli.verbose)?;
+    }
 
     let cwd = match &cli.root {
         Some(root) => root.clone(),

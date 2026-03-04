@@ -13,6 +13,17 @@ fn verbosity_to_level(verbosity: u8) -> Level {
     }
 }
 
+/// Initialise a silent tracing subscriber that discards all output.
+///
+/// Used in JSON mode so that log lines never leak into stdout/stderr
+/// and break structured output parsing.
+pub fn init_silent() -> Result<(), Error> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new("off"))
+        .try_init()
+        .map_err(|e| Error::Logging(e.to_string()))
+}
+
 /// Initialise the global tracing subscriber.
 ///
 /// `verbosity` controls the default log level (0 = warn … 3+ = trace).
