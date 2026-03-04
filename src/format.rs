@@ -13,6 +13,7 @@ use mdvdb::IngestResult;
 use mdvdb::{IngestPreview, PreviewFileStatus};
 use mdvdb::{CheckStatus, DoctorResult};
 use mdvdb::config::Config;
+use mdvdb::GraphData;
 
 /// Format a timestamp as a human-readable relative time string.
 ///
@@ -1011,6 +1012,50 @@ pub fn print_doctor(result: &DoctorResult) {
         result.passed.to_string().green().bold(),
         result.total
     );
+}
+
+/// Print a human-readable summary of graph data (nodes, edges, clusters).
+pub fn print_graph_summary(data: &GraphData) {
+    println!(
+        "\n  {} {}\n",
+        "●".cyan().bold(),
+        "Graph Data".bold()
+    );
+    println!(
+        "  {}     {}",
+        "Nodes:".cyan(),
+        data.nodes.len().to_string().yellow()
+    );
+    println!(
+        "  {}     {}",
+        "Edges:".cyan(),
+        data.edges.len().to_string().yellow()
+    );
+    println!(
+        "  {}  {}",
+        "Clusters:".cyan(),
+        data.clusters.len().to_string().yellow()
+    );
+
+    if !data.clusters.is_empty() {
+        println!();
+        for cluster in &data.clusters {
+            let label = if cluster.label.is_empty() {
+                "(unlabeled)"
+            } else {
+                &cluster.label
+            };
+            println!(
+                "    {} {} — {} ({} docs)",
+                "•".cyan(),
+                format!("Cluster {}", cluster.id).bold(),
+                label,
+                cluster.member_count.to_string().yellow()
+            );
+        }
+    }
+
+    println!();
 }
 
 #[cfg(test)]

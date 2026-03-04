@@ -115,6 +115,9 @@ enum Commands {
     /// Find orphan files with no links
     Orphans(OrphansArgs),
 
+    /// Show graph data (nodes, edges, clusters) for visualization
+    Graph(GraphArgs),
+
     /// Generate shell completions
     #[command(hide = true)]
     Completions(CompletionsArgs),
@@ -228,6 +231,9 @@ struct BacklinksArgs {
 
 #[derive(Parser)]
 struct OrphansArgs {}
+
+#[derive(Parser)]
+struct GraphArgs {}
 
 #[derive(Parser)]
 struct InitArgs {
@@ -628,6 +634,17 @@ async fn run() -> anyhow::Result<()> {
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_orphans(&result);
+            }
+        }
+        Some(Commands::Graph(_args)) => {
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+            let data = vdb.graph_data()?;
+
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &data)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_graph_summary(&data);
             }
         }
         Some(Commands::Watch(_args)) => {
