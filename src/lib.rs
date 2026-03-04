@@ -27,6 +27,7 @@ pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
 pub use tree::{FileState, FileTree, FileTreeNode};
 pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
+// Graph visualization types are defined in this file and automatically public.
 // Ingest progress and preview types are defined in this file and automatically public.
 
 /// Convenience alias used throughout the crate.
@@ -230,6 +231,48 @@ pub struct ClusterSummary {
     pub label: Option<String>,
     /// Top keywords extracted via TF-IDF.
     pub keywords: Vec<String>,
+}
+
+/// A node in the graph visualization representing an indexed file.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphNode {
+    /// Relative file path (unique ID).
+    pub path: String,
+    /// Cluster assignment, if any.
+    pub cluster_id: Option<usize>,
+}
+
+/// An edge in the graph visualization representing a markdown link.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphEdge {
+    /// Source file path.
+    pub source: String,
+    /// Target file path.
+    pub target: String,
+}
+
+/// A cluster in the graph visualization.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphCluster {
+    /// Cluster identifier.
+    pub id: usize,
+    /// Auto-generated label from top keywords.
+    pub label: String,
+    /// Cross-cluster TF-IDF keywords.
+    pub keywords: Vec<String>,
+    /// Number of members in this cluster.
+    pub member_count: usize,
+}
+
+/// Complete graph data combining nodes, edges, and clusters.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphData {
+    /// All indexed files as graph nodes.
+    pub nodes: Vec<GraphNode>,
+    /// Markdown link connections between files.
+    pub edges: Vec<GraphEdge>,
+    /// Cluster groupings with labels.
+    pub clusters: Vec<GraphCluster>,
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -1129,6 +1172,65 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 .collect()),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Return graph data combining indexed files, link edges, and cluster membership.
+    pub fn graph_data(&self) -> Result<GraphData> {
+        // 1. Get all indexed file paths
+        let file_hashes = self.index.get_file_hashes();
+        let indexed_paths: std::collections::HashSet<String> =
+            file_hashes.keys().cloned().collect();
+
+        // 2. Build path → cluster_id map from ClusterState
+        let cluster_state = self.index.get_clusters();
+        let mut path_to_cluster: HashMap<String, usize> = HashMap::new();
+        let mut clusters = Vec::new();
+        if let Some(ref state) = cluster_state {
+            for cluster in &state.clusters {
+                for member in &cluster.members {
+                    path_to_cluster.insert(member.clone(), cluster.id);
+                }
+                clusters.push(GraphCluster {
+                    id: cluster.id,
+                    label: cluster.label.clone(),
+                    keywords: cluster.keywords.clone(),
+                    member_count: cluster.members.len(),
+                });
+            }
+        }
+
+        // 3. Build nodes
+        let nodes: Vec<GraphNode> = indexed_paths
+            .iter()
+            .map(|path| GraphNode {
+                path: path.clone(),
+                cluster_id: path_to_cluster.get(path).copied(),
+            })
+            .collect();
+
+        // 4. Build edges from LinkGraph, filtering to indexed files only
+        let mut edges = Vec::new();
+        if let Some(link_graph) = self.index.get_link_graph() {
+            for (source, entries) in &link_graph.forward {
+                if !indexed_paths.contains(source) {
+                    continue;
+                }
+                for entry in entries {
+                    if indexed_paths.contains(&entry.target) {
+                        edges.push(GraphEdge {
+                            source: source.clone(),
+                            target: entry.target.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(GraphData {
+            nodes,
+            edges,
+            clusters,
+        })
     }
 
     /// Query links originating from a specific file.
