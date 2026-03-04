@@ -327,14 +327,86 @@ impl MarkdownVdb {
         let fts_path = index_dir.join("fts");
         let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
 
+        Self::finish_open(root, config, embedding_config, index, fts_index)
+    }
+
+    /// Open a markdown-vdb instance in read-only mode.
+    ///
+    /// Does not acquire the Tantivy writer lock, so it can run concurrently
+    /// with a watcher process. Write operations (ingest, watch) will fail.
+    pub fn open_readonly(root: &Path) -> Result<Self> {
+        let root = root.canonicalize().map_err(|e| {
+            Error::Config(format!(
+                "cannot canonicalize root '{}': {e}",
+                root.display()
+            ))
+        })?;
+
+        let config = Config::load(&root)?;
+        Self::open_readonly_with_config(root, config)
+    }
+
+    /// Open a markdown-vdb instance in read-only mode with an explicit config.
+    pub fn open_readonly_with_config(root: PathBuf, config: Config) -> Result<Self> {
+        let root = if root.is_relative() {
+            root.canonicalize().map_err(|e| {
+                Error::Config(format!(
+                    "cannot canonicalize root '{}': {e}",
+                    root.display()
+                ))
+            })?
+        } else {
+            root
+        };
+
+        let embedding_config = EmbeddingConfig {
+            provider: format!("{:?}", config.embedding_provider),
+            model: config.embedding_model.clone(),
+            dimensions: config.embedding_dimensions,
+        };
+
+        let index_dir = root.join(".markdownvdb");
+        if !index_dir.exists() {
+            std::fs::create_dir_all(&index_dir)?;
+        }
+
+        let index_path = index_dir.join("index");
+        let write_options = WriteOptions {
+            quantization: config.vector_quantization.clone(),
+            compress_metadata: config.index_compression,
+        };
+        let index = Arc::new(Index::open_or_create_with_options(
+            &index_path,
+            &embedding_config,
+            write_options,
+        )?);
+
+        let fts_path = index_dir.join("fts");
+        let fts_index = Arc::new(FtsIndex::open_readonly(&fts_path)?);
+
+        Self::finish_open(root, config, embedding_config, index, fts_index)
+    }
+
+    /// Shared constructor tail: validates config compatibility and builds the instance.
+    fn finish_open(
+        root: PathBuf,
+        config: Config,
+        embedding_config: EmbeddingConfig,
+        index: Arc<Index>,
+        fts_index: Arc<FtsIndex>,
+    ) -> Result<Self> {
         // Check config compatibility: dimensions must match.
         let status = index.status();
-        if status.embedding_config.dimensions != config.embedding_dimensions {
+        if status.embedding_config.dimensions != config.embedding_dimensions
+            && status.embedding_config.dimensions != 0
+        {
             return Err(Error::Config(format!(
                 "index was created with {} dimensions but config specifies {}",
                 status.embedding_config.dimensions, config.embedding_dimensions
             )));
         }
+
+        let _ = embedding_config; // used by callers for Index::open_or_create_with_options
 
         info!(
             root = %root.display(),

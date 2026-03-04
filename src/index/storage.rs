@@ -13,7 +13,7 @@ use crate::index::types::IndexMetadata;
 pub const MAGIC: &[u8; 6] = b"MDVDB\x00";
 
 /// Current index format version.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 1;
 
 /// Fixed header size in bytes.
 pub const HEADER_SIZE: usize = 64;
@@ -316,19 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_index_rejected() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("legacy.idx");
-        let mut data = vec![0u8; 128];
-        data[..6].copy_from_slice(b"MDVDB\x00");
-        data[6..10].copy_from_slice(&1u32.to_le_bytes()); // V1
-        fs::write(&path, &data).unwrap();
-        let result = load_index(&path);
-        assert!(matches!(result, Err(Error::IndexCorrupted(_))));
-    }
-
-    #[test]
-    fn v2_header_bytes_correct() {
+    fn header_bytes_correct() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.idx");
         let meta = test_metadata();

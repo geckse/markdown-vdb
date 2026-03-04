@@ -1,6 +1,6 @@
 ---
 title: "Feature Ideas & Brainstorming"
-tags: [ideas, roadmap, brainstorming]
+tags: [ideas, roadmap, brainstorming, ideas, new ideas]
 category: notes
 author: "Alex Park"
 status: draft
