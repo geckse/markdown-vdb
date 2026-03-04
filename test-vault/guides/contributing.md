@@ -1,6 +1,6 @@
 ---
 title: "Contributing Guide"
-tags: [contributing, workflow, standards]
+tags: [contributing, workflow, standards
 category: guides
 author: "Priya Sharma"
 ---

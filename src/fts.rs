@@ -43,11 +43,12 @@ struct FtsFields {
 pub struct FtsIndex {
     index: Index,
     fields: FtsFields,
-    writer: parking_lot::Mutex<IndexWriter>,
+    writer: Option<parking_lot::Mutex<IndexWriter>>,
 }
 
 impl FtsIndex {
     /// Open an existing Tantivy index or create a new one at the given directory.
+    /// Acquires an exclusive writer lock — use [`open_readonly`] for read-only access.
     pub fn open_or_create(path: &Path) -> Result<Self> {
         let (schema, fields) = build_schema();
 
@@ -65,7 +66,27 @@ impl FtsIndex {
         Ok(Self {
             index,
             fields,
-            writer: parking_lot::Mutex::new(writer),
+            writer: Some(parking_lot::Mutex::new(writer)),
+        })
+    }
+
+    /// Open an existing Tantivy index in read-only mode (no writer lock acquired).
+    /// Write operations (`upsert_chunks`, `remove_file`, `commit`, `delete_all`) will
+    /// return an error if called on a read-only instance.
+    pub fn open_readonly(path: &Path) -> Result<Self> {
+        let (schema, fields) = build_schema();
+
+        let index = if path.exists() && path.join("meta.json").exists() {
+            Index::open_in_dir(path).map_err(|e| Error::Fts(e.to_string()))?
+        } else {
+            std::fs::create_dir_all(path)?;
+            Index::create_in_dir(path, schema).map_err(|e| Error::Fts(e.to_string()))?
+        };
+
+        Ok(Self {
+            index,
+            fields,
+            writer: None,
         })
     }
 
@@ -74,7 +95,8 @@ impl FtsIndex {
     /// Deletes all existing chunks for the source path, then adds the new chunks.
     /// Call [`commit`] after all upserts are done.
     pub fn upsert_chunks(&self, source_path: &str, chunks: &[FtsChunkData]) -> Result<()> {
-        let writer = self.writer.lock();
+        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let writer = writer_mutex.lock();
         // Delete existing docs for this source path.
         let term = tantivy::Term::from_field_text(self.fields.source_path, source_path);
         writer.delete_term(term);
@@ -96,7 +118,8 @@ impl FtsIndex {
     ///
     /// Call [`commit`] after removals are done.
     pub fn remove_file(&self, source_path: &str) -> Result<()> {
-        let writer = self.writer.lock();
+        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let writer = writer_mutex.lock();
         let term = tantivy::Term::from_field_text(self.fields.source_path, source_path);
         writer.delete_term(term);
         Ok(())
@@ -150,7 +173,8 @@ impl FtsIndex {
 
     /// Commit all pending writes to the index and reload the reader.
     pub fn commit(&self) -> Result<()> {
-        let mut writer = self.writer.lock();
+        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let mut writer = writer_mutex.lock();
         writer.commit().map_err(|e| Error::Fts(e.to_string()))?;
         Ok(())
     }
@@ -169,7 +193,8 @@ impl FtsIndex {
 
     /// Delete all documents from the index.
     pub fn delete_all(&self) -> Result<()> {
-        let writer = self.writer.lock();
+        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let writer = writer_mutex.lock();
         writer.delete_all_documents().map_err(|e| Error::Fts(e.to_string()))?;
         Ok(())
     }
