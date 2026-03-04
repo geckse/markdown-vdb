@@ -191,6 +191,22 @@ Markdown files → Discovery → Parsing → Chunking → Embedding → Index (H
 
 **Key dependencies:** `usearch` (HNSW vectors), `tantivy` (BM25 lexical search), `rkyv` (zero-copy serde), `memmap2` (memory mapping), `tiktoken-rs` (tokenization), `pulldown-cmark` (markdown parsing), `linfa` (K-means clustering).
 
+## Comparison
+
+How mdvdb compares to other tools in the Markdown knowledge-base space:
+
+| Dimension | Obsidian | qmd (Markdown DB) | mdvdb |
+|---|---|---|---|
+| Core role | Desktop editor and PKM app for local Markdown; search is for humans, not a standalone DB. | CLI + library that turns Markdown into a searchable BM25/vector DB on SQLite. | CLI-first filesystem-native vector DB over Markdown; retrieval/memory layer for agents and RAG. Includes a decoupled desktop app. |
+| Storage model | Plain .md vault; no native vector index, only via plugins. | Collections in SQLite; Markdown content indexed into BM25 + vector tables. | Markdown on disk as source of truth; single memory-mapped index + BM25 segments, non-destructive. |
+| Retrieval granularity | Mostly file-level; heading/block granularity only via plugins. | Primarily document-level; chunking depends on collection config. | Section-level chunks by headings with token limits; results return heading hierarchy. |
+| Search modes | Keyword search + links; semantic only through plugins. | BM25, semantic, hybrid with LLM rerank. | Built-in hybrid (RRF), semantic, and lexical modes via flags/API. |
+| Agent/LLM friendliness | GUI-centric; agent use via ad-hoc plugins/integrations. | Built for CLI/skills; good for agents needing local semantic search. | Explicit agent focus: JSON everywhere, link-boosting, time-decay memory, Rust library API. |
+| Links & structure | Strong backlinks/graph UI for humans; ranking not link-aware by default. | Treats files as docs; link structure not a primary concern. | Parses wikilinks/links into a graph; links, backlinks, orphans, link-aware re-ranking. |
+| Recency handling | No formal time-decay; recency mostly via daily notes/sorting. | Quality via BM25/vector; no dedicated time-decay memory model. | Built-in exponential time decay with configurable half-life flags. |
+| Interface style | Desktop app (Win/macOS/Linux) with plugins. | Pure CLI and programmatic use. | CLI-first and decoupled; desktop app possible but not required. |
+| Index lifecycle | Internal to app; vector index only if plugins add it. | qmd manages collections and embeddings locally, no extra infra. | mdvdb ingest/watch, preview, diagnostics; one portable index file per knowledge base. |
+
 ## Project Status
 
 Development. Wait until 0.2.0 is released for actual use.

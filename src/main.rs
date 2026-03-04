@@ -315,7 +315,7 @@ async fn run() -> anyhow::Result<()> {
                 config.search_default_mode
             };
 
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
 
             let mut query = SearchQuery::new(&args.query);
             if let Some(limit) = args.limit {
@@ -470,7 +470,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Status(_args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let status = vdb.status();
 
             if json {
@@ -481,7 +481,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Schema(_args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let schema = vdb.schema()?;
 
             if json {
@@ -493,7 +493,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Clusters(_args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let clusters = vdb.clusters()?;
 
             if json {
@@ -504,7 +504,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Tree(args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let tree = vdb.file_tree()?;
 
             if json {
@@ -565,7 +565,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Get(args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy();
             let doc = vdb.get_document(&path_str)?;
 
@@ -577,7 +577,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Links(args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy().to_string();
             let result = vdb.links(&path_str)?;
 
@@ -593,7 +593,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Backlinks(args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy().to_string();
             let result = vdb.backlinks(&path_str)?;
 
@@ -610,7 +610,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Orphans(_args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let result = vdb.orphans()?;
 
             if json {
@@ -636,8 +636,8 @@ async fn run() -> anyhow::Result<()> {
 
             if json {
                 let msg = serde_json::json!({"status": "watching", "message": "File watching started"});
-                serde_json::to_writer_pretty(std::io::stdout(), &msg)?;
-                writeln!(std::io::stdout())?;
+                let line = serde_json::to_string(&msg)?;
+                println!("{line}");
             } else {
                 let dirs: Vec<String> = vdb.config().source_dirs.iter()
                     .map(|d| d.to_string_lossy().to_string())
@@ -679,7 +679,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Doctor(_args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let result = vdb.doctor().await?;
 
             if json {
