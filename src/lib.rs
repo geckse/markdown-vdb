@@ -233,22 +233,40 @@ pub struct ClusterSummary {
     pub keywords: Vec<String>,
 }
 
-/// A node in the graph visualization representing an indexed file.
+/// Graph detail level: document (file) or chunk.
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, clap::ValueEnum)]
+pub enum GraphLevel {
+    /// One node per file (default).
+    #[default]
+    Document,
+    /// One node per chunk within each file.
+    Chunk,
+}
+
+/// A node in the graph visualization representing an indexed file or chunk.
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphNode {
-    /// Relative file path (unique ID).
+    /// Unique identifier for this node (file path or chunk id).
+    pub id: String,
+    /// Relative file path.
     pub path: String,
+    /// Display label (e.g. heading text for chunks).
+    pub label: Option<String>,
+    /// Chunk index within the file, if this is a chunk-level node.
+    pub chunk_index: Option<usize>,
     /// Cluster assignment, if any.
     pub cluster_id: Option<usize>,
 }
 
-/// An edge in the graph visualization representing a markdown link.
+/// An edge in the graph visualization representing a link or similarity.
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphEdge {
-    /// Source file path.
+    /// Source node id.
     pub source: String,
-    /// Target file path.
+    /// Target node id.
     pub target: String,
+    /// Optional edge weight (e.g. cosine similarity).
+    pub weight: Option<f64>,
 }
 
 /// A cluster in the graph visualization.
@@ -273,6 +291,8 @@ pub struct GraphData {
     pub edges: Vec<GraphEdge>,
     /// Cluster groupings with labels.
     pub clusters: Vec<GraphCluster>,
+    /// The level of detail for this graph.
+    pub level: String,
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -1203,7 +1223,10 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         let nodes: Vec<GraphNode> = indexed_paths
             .iter()
             .map(|path| GraphNode {
+                id: path.clone(),
                 path: path.clone(),
+                label: None,
+                chunk_index: None,
                 cluster_id: path_to_cluster.get(path).copied(),
             })
             .collect();
@@ -1220,6 +1243,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                         edges.push(GraphEdge {
                             source: source.clone(),
                             target: entry.target.clone(),
+                            weight: None,
                         });
                     }
                 }
@@ -1230,6 +1254,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             nodes,
             edges,
             clusters,
+            level: "document".to_string(),
         })
     }
 
