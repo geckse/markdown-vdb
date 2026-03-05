@@ -1275,7 +1275,25 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             });
         }
 
-        // Build nodes
+        // Build path → cluster_id map from ClusterState
+        let cluster_state = self.index.get_clusters();
+        let mut path_to_cluster: HashMap<String, usize> = HashMap::new();
+        let mut clusters = Vec::new();
+        if let Some(ref state) = cluster_state {
+            for cluster in &state.clusters {
+                for member in &cluster.members {
+                    path_to_cluster.insert(member.clone(), cluster.id);
+                }
+                clusters.push(GraphCluster {
+                    id: cluster.id,
+                    label: cluster.label.clone(),
+                    keywords: cluster.keywords.clone(),
+                    member_count: cluster.members.len(),
+                });
+            }
+        }
+
+        // Build nodes — inherit cluster_id from parent document
         let nodes: Vec<GraphNode> = chunk_vectors
             .iter()
             .map(|cv| {
@@ -1289,7 +1307,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                     path: cv.source_path.clone(),
                     label,
                     chunk_index: Some(cv.chunk_index),
-                    cluster_id: None,
+                    cluster_id: path_to_cluster.get(&cv.source_path).copied(),
                 }
             })
             .collect();
@@ -1345,7 +1363,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         Ok(GraphData {
             nodes,
             edges,
-            clusters: Vec::new(),
+            clusters,
             level: "chunk".to_string(),
         })
     }
