@@ -1258,6 +1258,98 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         })
     }
 
+    /// Return chunk-level graph data with embedding-similarity edges.
+    ///
+    /// Each chunk becomes a node, and edges represent the top-k most similar
+    /// chunks across different files (intra-file edges are excluded).
+    pub fn graph_data_chunks(&self, k: usize) -> Result<GraphData> {
+        use std::collections::HashSet;
+
+        let chunk_vectors = self.index.get_chunk_vectors();
+        if chunk_vectors.is_empty() {
+            return Ok(GraphData {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                clusters: Vec::new(),
+                level: "chunk".to_string(),
+            });
+        }
+
+        // Build nodes
+        let nodes: Vec<GraphNode> = chunk_vectors
+            .iter()
+            .map(|cv| {
+                let label = if cv.heading_hierarchy.is_empty() {
+                    None
+                } else {
+                    Some(cv.heading_hierarchy.join(" > "))
+                };
+                GraphNode {
+                    id: cv.chunk_id.clone(),
+                    path: cv.source_path.clone(),
+                    label,
+                    chunk_index: Some(cv.chunk_index),
+                    cluster_id: None,
+                }
+            })
+            .collect();
+
+        // Build lookup from chunk_id to source_path for filtering
+        let chunk_source: HashMap<String, &str> = chunk_vectors
+            .iter()
+            .map(|cv| (cv.chunk_id.clone(), cv.source_path.as_str()))
+            .collect();
+
+        // Build edges: for each chunk, search kNN and keep top-k cross-file
+        let search_k = k + 20;
+        let mut seen_edges: HashSet<(String, String)> = HashSet::new();
+        let mut edges = Vec::new();
+
+        for cv in &chunk_vectors {
+            let results = self.index.search_vectors(&cv.vector, search_k)?;
+            let mut cross_file_count = 0;
+            for (neighbor_id, score) in &results {
+                if cross_file_count >= k {
+                    break;
+                }
+                // Skip self
+                if neighbor_id == &cv.chunk_id {
+                    continue;
+                }
+                // Skip intra-file
+                if let Some(&neighbor_path) = chunk_source.get(neighbor_id) {
+                    if neighbor_path == cv.source_path {
+                        continue;
+                    }
+                }
+                // Deduplicate bidirectional edges
+                let edge_key = if cv.chunk_id < *neighbor_id {
+                    (cv.chunk_id.clone(), neighbor_id.clone())
+                } else {
+                    (neighbor_id.clone(), cv.chunk_id.clone())
+                };
+                if seen_edges.contains(&edge_key) {
+                    cross_file_count += 1;
+                    continue;
+                }
+                seen_edges.insert(edge_key);
+                edges.push(GraphEdge {
+                    source: cv.chunk_id.clone(),
+                    target: neighbor_id.clone(),
+                    weight: Some(*score),
+                });
+                cross_file_count += 1;
+            }
+        }
+
+        Ok(GraphData {
+            nodes,
+            edges,
+            clusters: Vec::new(),
+            level: "chunk".to_string(),
+        })
+    }
+
     /// Query links originating from a specific file.
     pub fn links(&self, path: &str) -> Result<links::LinkQueryResult> {
         let graph = self.index.get_link_graph().ok_or_else(|| {
