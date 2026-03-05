@@ -22,3 +22,4 @@ logs/security/
 /app/node_modules
 /app/dist
 /app/out
+/node_modules
