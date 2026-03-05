@@ -60,7 +60,7 @@ fn test_graph_data_empty_index() {
     let root = dir.path();
 
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
-    let graph = vdb.graph_data().unwrap();
+    let graph = vdb.graph_data(None).unwrap();
 
     assert!(graph.nodes.is_empty(), "empty index should have no nodes");
     assert!(graph.edges.is_empty(), "empty index should have no edges");
@@ -79,7 +79,7 @@ async fn test_graph_data_with_files() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph_data().unwrap();
+    let graph = vdb.graph_data(None).unwrap();
 
     assert_eq!(graph.nodes.len(), 3, "should have 3 nodes");
     let paths: Vec<&str> = graph.nodes.iter().map(|n| n.path.as_str()).collect();
@@ -103,7 +103,7 @@ async fn test_graph_data_with_links() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph_data().unwrap();
+    let graph = vdb.graph_data(None).unwrap();
 
     assert_eq!(graph.nodes.len(), 3);
     assert_eq!(graph.edges.len(), 3, "should have 3 edges: a->b, a->c, b->c");
@@ -134,7 +134,7 @@ async fn test_graph_data_filters_broken_edges() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph_data().unwrap();
+    let graph = vdb.graph_data(None).unwrap();
 
     assert_eq!(graph.nodes.len(), 2);
     // Only a->b edge should exist; a->nonexistent should be filtered out
@@ -159,7 +159,7 @@ async fn test_graph_data_no_clusters() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph_data().unwrap();
+    let graph = vdb.graph_data(None).unwrap();
 
     assert_eq!(graph.nodes.len(), 2);
     assert!(graph.clusters.is_empty(), "no clusters when clustering disabled");
@@ -182,7 +182,7 @@ fn test_chunk_graph_empty_index() {
     let root = dir.path();
 
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
-    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
 
     assert!(graph.nodes.is_empty(), "empty index should have no nodes");
     assert!(graph.edges.is_empty(), "empty index should have no edges");
@@ -201,7 +201,7 @@ async fn test_chunk_graph_cross_file_edges() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
 
     assert_eq!(graph.level, "chunk");
     assert!(graph.nodes.len() >= 3, "should have at least 3 chunk nodes");
@@ -233,7 +233,7 @@ async fn test_chunk_graph_no_intra_file_edges() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
 
     // Multiple chunks from the same file
     assert!(
@@ -264,7 +264,7 @@ async fn test_chunk_graph_heading_labels() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
 
     assert!(!graph.nodes.is_empty(), "should have chunk nodes");
 
@@ -292,7 +292,7 @@ async fn test_chunk_graph_no_heading_labels() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
 
     assert!(!graph.nodes.is_empty(), "should have chunk nodes");
 
@@ -324,7 +324,7 @@ async fn test_chunk_graph_edge_weights() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
 
     for edge in &graph.edges {
         assert!(
@@ -351,7 +351,7 @@ async fn test_chunk_graph_single_file() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
 
     assert!(
         !graph.nodes.is_empty(),
@@ -375,14 +375,14 @@ async fn test_graph_dispatcher() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     // Document level should match graph_data()
-    let doc_graph = vdb.graph(GraphLevel::Document).unwrap();
-    let direct_graph = vdb.graph_data().unwrap();
+    let doc_graph = vdb.graph(GraphLevel::Document, None).unwrap();
+    let direct_graph = vdb.graph_data(None).unwrap();
     assert_eq!(doc_graph.level, "document");
     assert_eq!(doc_graph.nodes.len(), direct_graph.nodes.len());
     assert_eq!(doc_graph.edges.len(), direct_graph.edges.len());
 
     // Chunk level should return chunk-level data
-    let chunk_graph = vdb.graph(GraphLevel::Chunk).unwrap();
+    let chunk_graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
     assert_eq!(chunk_graph.level, "chunk");
     // Chunk nodes have chunk_index set
     for node in &chunk_graph.nodes {
@@ -405,7 +405,7 @@ async fn test_graph_data_backward_compat() {
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
-    let graph = vdb.graph_data().unwrap();
+    let graph = vdb.graph_data(None).unwrap();
 
     // New fields should have backward-compatible defaults
     assert_eq!(graph.level, "document");

@@ -237,6 +237,10 @@ struct GraphArgs {
     /// Graph granularity level
     #[arg(long, value_enum, default_value = "document")]
     level: GraphLevelArg,
+
+    /// Restrict graph to files under this path prefix
+    #[arg(long)]
+    path: Option<String>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -652,7 +656,7 @@ async fn run() -> anyhow::Result<()> {
                 GraphLevelArg::Document => GraphLevel::Document,
                 GraphLevelArg::Chunk => GraphLevel::Chunk,
             };
-            let data = vdb.graph(level)?;
+            let data = vdb.graph(level, args.path.as_deref())?;
 
             if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &data)?;
