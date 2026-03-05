@@ -1350,6 +1350,17 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         })
     }
 
+    /// Return graph data at the specified level.
+    ///
+    /// Routes `Document` to [`graph_data()`](Self::graph_data) and `Chunk` to
+    /// [`graph_data_chunks()`](Self::graph_data_chunks) with k=5.
+    pub fn graph(&self, level: GraphLevel) -> Result<GraphData> {
+        match level {
+            GraphLevel::Document => self.graph_data(),
+            GraphLevel::Chunk => self.graph_data_chunks(5),
+        }
+    }
+
     /// Query links originating from a specific file.
     pub fn links(&self, path: &str) -> Result<links::LinkQueryResult> {
         let graph = self.index.get_link_graph().ok_or_else(|| {
