@@ -1016,6 +1016,10 @@ pub fn print_doctor(result: &DoctorResult) {
 
 /// Print a human-readable summary of graph data (nodes, edges, clusters).
 pub fn print_graph_summary(data: &GraphData) {
+    let is_chunk = data.level == "chunk";
+    let level_display = if is_chunk { "Chunk" } else { "Document" };
+    let node_term = if is_chunk { "Chunks" } else { "Nodes" };
+
     println!(
         "\n  {} {}\n",
         "●".cyan().bold(),
@@ -1023,7 +1027,12 @@ pub fn print_graph_summary(data: &GraphData) {
     );
     println!(
         "  {}     {}",
-        "Nodes:".cyan(),
+        "Level:".cyan(),
+        level_display.to_string().yellow()
+    );
+    println!(
+        "  {}    {}",
+        format!("{node_term}:").cyan(),
         data.nodes.len().to_string().yellow()
     );
     println!(
@@ -1031,27 +1040,63 @@ pub fn print_graph_summary(data: &GraphData) {
         "Edges:".cyan(),
         data.edges.len().to_string().yellow()
     );
-    println!(
-        "  {}  {}",
-        "Clusters:".cyan(),
-        data.clusters.len().to_string().yellow()
-    );
 
-    if !data.clusters.is_empty() {
-        println!();
-        for cluster in &data.clusters {
-            let label = if cluster.label.is_empty() {
-                "(unlabeled)"
-            } else {
-                &cluster.label
-            };
+    if is_chunk {
+        // Show edge weight range
+        if !data.edges.is_empty() {
+            let weights: Vec<f64> = data.edges.iter()
+                .filter_map(|e| e.weight)
+                .collect();
+            if !weights.is_empty() {
+                let min_w = weights.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max_w = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                println!(
+                    "  {}   {:.4} — {:.4}",
+                    "Weights:".cyan(),
+                    min_w,
+                    max_w
+                );
+            }
+        }
+
+        // Show sample chunk labels
+        let labels: Vec<&str> = data.nodes.iter()
+            .filter_map(|n| n.label.as_deref())
+            .filter(|l| !l.is_empty())
+            .take(5)
+            .collect();
+        if !labels.is_empty() {
             println!(
-                "    {} {} — {} ({} docs)",
-                "•".cyan(),
-                format!("Cluster {}", cluster.id).bold(),
-                label,
-                cluster.member_count.to_string().yellow()
+                "\n  {}",
+                "Sample labels:".dimmed()
             );
+            for label in &labels {
+                println!("    {} {}", "•".cyan(), label);
+            }
+        }
+    } else {
+        println!(
+            "  {}  {}",
+            "Clusters:".cyan(),
+            data.clusters.len().to_string().yellow()
+        );
+
+        if !data.clusters.is_empty() {
+            println!();
+            for cluster in &data.clusters {
+                let label = if cluster.label.is_empty() {
+                    "(unlabeled)"
+                } else {
+                    &cluster.label
+                };
+                println!(
+                    "    {} {} — {} ({} docs)",
+                    "•".cyan(),
+                    format!("Cluster {}", cluster.id).bold(),
+                    label,
+                    cluster.member_count.to_string().yellow()
+                );
+            }
         }
     }
 
