@@ -94,3 +94,10 @@ Services use a circuit breaker for outbound calls to other services:
 - **Half-open** (testing): one request allowed through to test if the downstream is back
 
 Trip threshold: 5 failures in 30 seconds. Recovery probe: every 10 seconds.
+
+## See Also
+
+- [System Architecture](architecture.md) — service boundaries and communication patterns
+- [API Reference](api-reference.md#error-handling) — client-facing error format
+- [Incident Response Runbook](../runbooks/incident-response.md) — production incident procedures
+- [Security Best Practices](../guides/security-best-practices.md) — security-specific error handling

@@ -172,3 +172,5 @@ Common error codes:
 | `NOT_FOUND` | 404 | Resource does not exist |
 | `RATE_LIMITED` | 429 | Too many requests |
 | `INTERNAL_ERROR` | 500 | Server error — retry with backoff |
+
+For detailed error handling conventions including retry strategies and circuit breakers, see [Error Handling Patterns](error-handling.md). For the service architecture behind these endpoints, see [System Architecture](architecture.md).

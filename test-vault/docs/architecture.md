@@ -75,3 +75,12 @@ All services are containerized and deployed to Kubernetes. Each service has:
 - Horizontal pod autoscaling based on CPU and request latency
 - Liveness and readiness probes
 - Structured JSON logging shipped to a centralized log aggregator
+
+For full deployment procedures, see the [Deployment Guide](../docs/deployment.md). For error handling conventions across services, see [Error Handling Patterns](error-handling.md).
+
+## See Also
+
+- [API Reference](api-reference.md) — endpoints exposed by each service
+- [Incident Response Runbook](../runbooks/incident-response.md) — what to do when services fail
+- [Security Best Practices](../guides/security-best-practices.md) — auth and input validation standards
+- [Graph RAG Architecture](../knowledge-graph/graph-rag-architecture.md) — how this architecture feeds into AI-powered retrieval
