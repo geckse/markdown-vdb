@@ -87,10 +87,3 @@ If you suspect a security incident:
 - Data retention: user data deleted within 30 days of account closure
 - Annual penetration test by a third-party firm
 
-## See Also
-
-- [System Architecture](../docs/architecture.md#auth-service) — auth service design and token flow
-- [Error Handling Patterns](../docs/error-handling.md) — error propagation and trace IDs
-- [Incident Response Runbook](../runbooks/incident-response.md) — production incident procedures
-- [API Reference](../docs/api-reference.md#authentication) — auth endpoint documentation
-- [Contributing Guide](contributing.md) — code review and testing standards

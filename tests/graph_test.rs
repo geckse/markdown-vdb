@@ -281,6 +281,38 @@ async fn test_chunk_graph_heading_labels() {
 }
 
 #[tokio::test]
+async fn test_chunk_graph_no_heading_labels() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    // Content without any headings — chunks should have label = None
+    fs::write(root.join("plain.md"), "Just some plain text without headings.\n").unwrap();
+    fs::write(root.join("other.md"), "Another file with no headings at all.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let graph = vdb.graph(GraphLevel::Chunk).unwrap();
+
+    assert!(!graph.nodes.is_empty(), "should have chunk nodes");
+
+    for node in &graph.nodes {
+        // Without headings, label should be None
+        assert!(
+            node.label.is_none(),
+            "chunk node {} from file without headings should have label = None",
+            node.id
+        );
+        // chunk_index should still be set
+        assert!(
+            node.chunk_index.is_some(),
+            "chunk node {} should have chunk_index",
+            node.id
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_chunk_graph_edge_weights() {
     let dir = setup_dir();
     let root = dir.path();

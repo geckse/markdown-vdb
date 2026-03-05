@@ -90,13 +90,3 @@ Look for issues labeled `good-first-issue` in the issue tracker. These are scope
 - Request changes for bugs, security issues, or missing tests
 - Use comments (not request changes) for style preferences or suggestions
 
-## Useful Links
-
-- [API Reference](../docs/api-reference.md) — REST API documentation
-- [System Architecture](../docs/architecture.md) — service overview and design
-- [Deployment Guide](../docs/deployment.md) — how to deploy and operate
-- [Error Handling Patterns](../docs/error-handling.md) — error conventions across services
-- [Contributing Guide](../guides/contributing.md) — code standards and PR process
-- [Security Best Practices](../guides/security-best-practices.md) — mandatory security conventions
-- [Incident Response Runbook](../runbooks/incident-response.md) — for on-call
-- Slack: `#engineering`, `#incidents`, `#random`
