@@ -429,3 +429,241 @@ async fn test_graph_data_backward_compat() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cluster inheritance tests
+// ---------------------------------------------------------------------------
+
+fn mock_config_clustering() -> Config {
+    let mut cfg = mock_config();
+    cfg.clustering_enabled = true;
+    cfg
+}
+
+#[tokio::test]
+async fn test_chunk_graph_cluster_inheritance() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    // Need enough files for clustering to produce clusters
+    fs::write(root.join("a.md"), "# A\n\nRust programming language.\n").unwrap();
+    fs::write(root.join("b.md"), "# B\n\nPython data science.\n").unwrap();
+    fs::write(root.join("c.md"), "# C\n\nJavaScript frontend.\n").unwrap();
+    fs::write(root.join("d.md"), "# D\n\nDatabase optimization.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config_clustering()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let chunk_graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
+    let doc_graph = vdb.graph_data(None).unwrap();
+
+    // Chunk nodes should inherit cluster_id from their parent document
+    for chunk_node in &chunk_graph.nodes {
+        let doc_node = doc_graph.nodes.iter().find(|n| n.path == chunk_node.path);
+        if let Some(doc) = doc_node {
+            assert_eq!(
+                chunk_node.cluster_id, doc.cluster_id,
+                "chunk {} should inherit cluster_id from parent doc {}",
+                chunk_node.id, chunk_node.path
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_chunk_graph_clusters_populated() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::write(root.join("a.md"), "# A\n\nRust programming.\n").unwrap();
+    fs::write(root.join("b.md"), "# B\n\nPython science.\n").unwrap();
+    fs::write(root.join("c.md"), "# C\n\nJavaScript frontend.\n").unwrap();
+    fs::write(root.join("d.md"), "# D\n\nDatabase SQL.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config_clustering()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let chunk_graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
+
+    // clusters vec should be non-empty when clustering is enabled
+    assert!(
+        !chunk_graph.clusters.is_empty(),
+        "chunk graph should return populated clusters"
+    );
+
+    // Each cluster should have valid fields
+    for cluster in &chunk_graph.clusters {
+        assert!(!cluster.label.is_empty(), "cluster label should not be empty");
+        assert!(cluster.member_count > 0, "cluster should have members");
+    }
+}
+
+#[tokio::test]
+async fn test_chunk_graph_no_clusters_fallback() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::write(root.join("a.md"), "# A\n\nContent.\n").unwrap();
+    fs::write(root.join("b.md"), "# B\n\nContent.\n").unwrap();
+
+    // clustering_enabled is false in mock_config
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let chunk_graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
+
+    assert!(
+        chunk_graph.clusters.is_empty(),
+        "clusters should be empty when clustering disabled"
+    );
+    for node in &chunk_graph.nodes {
+        assert!(
+            node.cluster_id.is_none(),
+            "chunk node {} should have no cluster_id when clustering disabled",
+            node.id
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path filter tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_graph_data_path_filter() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/guide.md"), "# Guide\n\nGuide content.\n").unwrap();
+    fs::write(root.join("docs/api.md"), "# API\n\nAPI reference.\n").unwrap();
+    fs::write(root.join("readme.md"), "# Readme\n\nTop-level readme.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let graph = vdb.graph_data(Some("docs/")).unwrap();
+
+    assert_eq!(graph.nodes.len(), 2, "only docs/ files should be included");
+    for node in &graph.nodes {
+        assert!(
+            node.path.starts_with("docs/"),
+            "node {} should start with docs/",
+            node.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_chunk_graph_path_filter() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/guide.md"), "# Guide\n\nGuide content here.\n").unwrap();
+    fs::write(root.join("docs/api.md"), "# API\n\nAPI reference docs.\n").unwrap();
+    fs::write(root.join("readme.md"), "# Readme\n\nTop-level readme.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let graph = vdb.graph(GraphLevel::Chunk, Some("docs/")).unwrap();
+
+    assert!(!graph.nodes.is_empty(), "should have chunk nodes from docs/");
+    for node in &graph.nodes {
+        assert!(
+            node.path.starts_with("docs/"),
+            "chunk node {} has path {} outside docs/",
+            node.id, node.path
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_graph_path_filter_edges() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    // docs/a links to docs/b (both in filter) and to root.md (outside filter)
+    fs::write(
+        root.join("docs/a.md"),
+        "# A\n\nLink to [B](../docs/b.md) and [root](../root.md).\n",
+    )
+    .unwrap();
+    fs::write(root.join("docs/b.md"), "# B\n\nContent.\n").unwrap();
+    fs::write(root.join("root.md"), "# Root\n\nRoot content.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let graph = vdb.graph_data(Some("docs/")).unwrap();
+
+    // Only nodes from docs/
+    assert_eq!(graph.nodes.len(), 2);
+    // Edges should only include those where both endpoints are in docs/
+    for edge in &graph.edges {
+        assert!(
+            edge.source.starts_with("docs/"),
+            "edge source {} should be in docs/",
+            edge.source
+        );
+        assert!(
+            edge.target.starts_with("docs/"),
+            "edge target {} should be in docs/",
+            edge.target
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_graph_path_filter_none() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(root.join("docs/guide.md"), "# Guide\n\nGuide.\n").unwrap();
+    fs::write(root.join("readme.md"), "# Readme\n\nReadme.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let graph_all = vdb.graph_data(None).unwrap();
+    assert_eq!(graph_all.nodes.len(), 2, "None filter should return all files");
+
+    let paths: Vec<&str> = graph_all.nodes.iter().map(|n| n.path.as_str()).collect();
+    assert!(paths.contains(&"docs/guide.md"));
+    assert!(paths.contains(&"readme.md"));
+}
+
+#[tokio::test]
+async fn test_graph_dispatcher_path_filter() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/main.md"), "# Main\n\nMain module.\n").unwrap();
+    fs::write(root.join("src/lib.md"), "# Lib\n\nLib module.\n").unwrap();
+    fs::write(root.join("readme.md"), "# Readme\n\nTop level.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Document level with path filter
+    let doc_graph = vdb.graph(GraphLevel::Document, Some("src/")).unwrap();
+    assert_eq!(doc_graph.nodes.len(), 2, "document graph should have 2 src/ nodes");
+    for node in &doc_graph.nodes {
+        assert!(node.path.starts_with("src/"));
+    }
+
+    // Chunk level with path filter
+    let chunk_graph = vdb.graph(GraphLevel::Chunk, Some("src/")).unwrap();
+    assert!(!chunk_graph.nodes.is_empty(), "chunk graph should have src/ nodes");
+    for node in &chunk_graph.nodes {
+        assert!(
+            node.path.starts_with("src/"),
+            "chunk node {} should be in src/",
+            node.id
+        );
+    }
+}
