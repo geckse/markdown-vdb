@@ -1195,11 +1195,17 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
     }
 
     /// Return graph data combining indexed files, link edges, and cluster membership.
-    pub fn graph_data(&self) -> Result<GraphData> {
+    pub fn graph_data(&self, path_filter: Option<&str>) -> Result<GraphData> {
         // 1. Get all indexed file paths
         let file_hashes = self.index.get_file_hashes();
-        let indexed_paths: std::collections::HashSet<String> =
-            file_hashes.keys().cloned().collect();
+        let indexed_paths: std::collections::HashSet<String> = file_hashes
+            .keys()
+            .filter(|p| match path_filter {
+                Some(prefix) => p.starts_with(prefix),
+                None => true,
+            })
+            .cloned()
+            .collect();
 
         // 2. Build path → cluster_id map from ClusterState
         let cluster_state = self.index.get_clusters();
@@ -1262,10 +1268,16 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
     ///
     /// Each chunk becomes a node, and edges represent the top-k most similar
     /// chunks across different files (intra-file edges are excluded).
-    pub fn graph_data_chunks(&self, k: usize) -> Result<GraphData> {
+    pub fn graph_data_chunks(&self, k: usize, path_filter: Option<&str>) -> Result<GraphData> {
         use std::collections::HashSet;
 
-        let chunk_vectors = self.index.get_chunk_vectors();
+        let chunk_vectors: Vec<_> = self.index.get_chunk_vectors()
+            .into_iter()
+            .filter(|cv| match path_filter {
+                Some(prefix) => cv.source_path.starts_with(prefix),
+                None => true,
+            })
+            .collect();
         if chunk_vectors.is_empty() {
             return Ok(GraphData {
                 nodes: Vec::new(),
@@ -1275,7 +1287,25 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             });
         }
 
-        // Build nodes
+        // Build path → cluster_id map from ClusterState
+        let cluster_state = self.index.get_clusters();
+        let mut path_to_cluster: HashMap<String, usize> = HashMap::new();
+        let mut clusters = Vec::new();
+        if let Some(ref state) = cluster_state {
+            for cluster in &state.clusters {
+                for member in &cluster.members {
+                    path_to_cluster.insert(member.clone(), cluster.id);
+                }
+                clusters.push(GraphCluster {
+                    id: cluster.id,
+                    label: cluster.label.clone(),
+                    keywords: cluster.keywords.clone(),
+                    member_count: cluster.members.len(),
+                });
+            }
+        }
+
+        // Build nodes — inherit cluster_id from parent document
         let nodes: Vec<GraphNode> = chunk_vectors
             .iter()
             .map(|cv| {
@@ -1289,7 +1319,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                     path: cv.source_path.clone(),
                     label,
                     chunk_index: Some(cv.chunk_index),
-                    cluster_id: None,
+                    cluster_id: path_to_cluster.get(&cv.source_path).copied(),
                 }
             })
             .collect();
@@ -1345,7 +1375,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         Ok(GraphData {
             nodes,
             edges,
-            clusters: Vec::new(),
+            clusters,
             level: "chunk".to_string(),
         })
     }
@@ -1354,10 +1384,10 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
     ///
     /// Routes `Document` to [`graph_data()`](Self::graph_data) and `Chunk` to
     /// [`graph_data_chunks()`](Self::graph_data_chunks) with k=5.
-    pub fn graph(&self, level: GraphLevel) -> Result<GraphData> {
+    pub fn graph(&self, level: GraphLevel, path_filter: Option<&str>) -> Result<GraphData> {
         match level {
-            GraphLevel::Document => self.graph_data(),
-            GraphLevel::Chunk => self.graph_data_chunks(5),
+            GraphLevel::Document => self.graph_data(path_filter),
+            GraphLevel::Chunk => self.graph_data_chunks(5, path_filter),
         }
     }
 
