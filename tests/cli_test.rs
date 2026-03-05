@@ -1498,3 +1498,117 @@ fn test_completions_include_decay_flags() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("decay"), "fish completions should include decay");
 }
+
+// ---------------------------------------------------------------------------
+// Graph CLI tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_graph_document_json_output() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["graph", "--level", "document", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "graph --level document --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph JSON should be valid");
+
+    assert_eq!(json["level"], "document", "level should be 'document'");
+
+    let nodes = json["nodes"].as_array().expect("nodes should be an array");
+    assert!(!nodes.is_empty(), "should have at least one node");
+    for node in nodes {
+        assert!(node["id"].is_string(), "node should have 'id' field");
+        assert!(node["path"].is_string(), "node should have 'path' field");
+    }
+
+    let edges = json["edges"].as_array().expect("edges should be an array");
+    // With links between alpha->beta, alpha->gamma, beta->alpha there should be edges
+    assert!(!edges.is_empty(), "should have edges from markdown links");
+    for edge in edges {
+        assert!(edge["source"].is_string(), "edge should have 'source'");
+        assert!(edge["target"].is_string(), "edge should have 'target'");
+    }
+}
+
+#[test]
+fn test_graph_chunk_json_output() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["graph", "--level", "chunk", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "graph --level chunk --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph JSON should be valid");
+
+    assert_eq!(json["level"], "chunk", "level should be 'chunk'");
+
+    let nodes = json["nodes"].as_array().expect("nodes should be an array");
+    assert!(!nodes.is_empty(), "should have at least one chunk node");
+    for node in nodes {
+        assert!(node["id"].is_string(), "chunk node should have 'id' field");
+        assert!(
+            !node["chunk_index"].is_null(),
+            "chunk node should have 'chunk_index' field"
+        );
+    }
+
+    let edges = json["edges"].as_array().expect("edges should be an array");
+    // Chunk-level graph includes similarity edges which should have weights
+    for edge in edges {
+        assert!(edge["source"].is_string(), "edge should have 'source'");
+        assert!(edge["target"].is_string(), "edge should have 'target'");
+        if !edge["weight"].is_null() {
+            assert!(
+                edge["weight"].as_f64().is_some(),
+                "edge weight should be a number"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_graph_default_level_is_document() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["graph", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "graph --json (default level) should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph JSON should be valid");
+
+    assert_eq!(
+        json["level"], "document",
+        "default graph level should be 'document'"
+    );
+}

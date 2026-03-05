@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink};
 use mdvdb::search::{MetadataFilter, SearchMode, SearchQuery, SearchResult};
-use mdvdb::MarkdownVdb;
+use mdvdb::{GraphLevel, MarkdownVdb};
 
 /// Wrapped search output for JSON mode.
 #[derive(serde::Serialize)]
@@ -233,7 +233,17 @@ struct BacklinksArgs {
 struct OrphansArgs {}
 
 #[derive(Parser)]
-struct GraphArgs {}
+struct GraphArgs {
+    /// Graph granularity level
+    #[arg(long, value_enum, default_value = "document")]
+    level: GraphLevelArg,
+}
+
+#[derive(Clone, ValueEnum)]
+enum GraphLevelArg {
+    Document,
+    Chunk,
+}
 
 #[derive(Parser)]
 struct InitArgs {
@@ -636,9 +646,13 @@ async fn run() -> anyhow::Result<()> {
                 format::print_orphans(&result);
             }
         }
-        Some(Commands::Graph(_args)) => {
+        Some(Commands::Graph(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let data = vdb.graph_data()?;
+            let level = match args.level {
+                GraphLevelArg::Document => GraphLevel::Document,
+                GraphLevelArg::Chunk => GraphLevel::Chunk,
+            };
+            let data = vdb.graph(level)?;
 
             if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &data)?;

@@ -16,6 +16,21 @@ use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
 
+/// Information about a single chunk's vector embedding.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChunkVectorInfo {
+    /// The chunk ID (e.g. "path/to/file.md#0").
+    pub chunk_id: String,
+    /// Relative path to the source markdown file.
+    pub source_path: String,
+    /// Heading hierarchy leading to this chunk.
+    pub heading_hierarchy: Vec<String>,
+    /// 0-based index of this chunk within the file.
+    pub chunk_index: usize,
+    /// The embedding vector for this chunk.
+    pub vector: Vec<f32>,
+}
+
 /// Internal mutable state protected by the RwLock.
 struct IndexState {
     metadata: IndexMetadata,
@@ -391,6 +406,33 @@ impl Index {
                     *s *= scale;
                 }
                 result.insert(path.clone(), sum);
+            }
+        }
+
+        result
+    }
+
+    /// Get chunk-level vectors with metadata for graph visualization.
+    ///
+    /// Returns a vector of `ChunkVectorInfo` for every chunk that has a valid
+    /// embedding in the HNSW index.
+    pub fn get_chunk_vectors(&self) -> Vec<ChunkVectorInfo> {
+        let state = self.state.read();
+        let dims = state.metadata.embedding_config.dimensions;
+        let mut result = Vec::new();
+
+        for (chunk_id, chunk) in &state.metadata.chunks {
+            if let Some(&key) = state.id_to_key.get(chunk_id) {
+                let mut buf = vec![0.0f32; dims];
+                if state.hnsw.get(key, &mut buf).is_ok() {
+                    result.push(ChunkVectorInfo {
+                        chunk_id: chunk_id.clone(),
+                        source_path: chunk.source_path.clone(),
+                        heading_hierarchy: chunk.heading_hierarchy.clone(),
+                        chunk_index: chunk.chunk_index,
+                        vector: buf,
+                    });
+                }
             }
         }
 
