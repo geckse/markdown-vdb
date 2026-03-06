@@ -76,3 +76,23 @@
 # BM25 saturation normalization constant (a BM25 score equal to this maps to 0.5)
 # MDVDB_BM25_NORM_K=1.5
 
+# Boost results that are linked to/from top search matches
+# MDVDB_SEARCH_BOOST_LINKS=false
+
+# ── Time Decay ───────────────────────────────────────────────────────────────
+
+# Enable time decay to favor recently modified files in search results
+# MDVDB_SEARCH_DECAY=false
+
+# Half-life in days: after this many days, a file's score is halved
+# MDVDB_SEARCH_DECAY_HALF_LIFE=90.0
+
+# Comma-separated path prefixes excluded from decay (evergreen/pinned content)
+# Files matching these prefixes keep their full score even when decay is enabled.
+# MDVDB_SEARCH_DECAY_EXCLUDE=docs/reference,wiki/glossary
+
+# Comma-separated path prefixes where decay applies (whitelist mode)
+# When set, only files matching these prefixes get decay applied. Empty = all files.
+# Exclude takes precedence over include when both match a path.
+# MDVDB_SEARCH_DECAY_INCLUDE=journal,daily
+

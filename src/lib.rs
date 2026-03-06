@@ -955,6 +955,9 @@ impl MarkdownVdb {
             self.config.bm25_norm_k,
             self.config.search_decay_enabled,
             self.config.search_decay_half_life,
+            &self.config.search_decay_exclude,
+            &self.config.search_decay_include,
+            self.config.search_boost_links,
         )
         .await
     }

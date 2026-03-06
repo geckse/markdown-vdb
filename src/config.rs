@@ -81,6 +81,12 @@ pub struct Config {
     pub search_decay_enabled: bool,
     /// Half-life in days for time decay. After this many days, a score is halved.
     pub search_decay_half_life: f64,
+    /// Path prefixes excluded from time decay (immune to decay even when enabled).
+    pub search_decay_exclude: Vec<String>,
+    /// Path prefixes where time decay applies (whitelist). Empty = all files eligible.
+    pub search_decay_include: Vec<String>,
+    /// Whether link boosting is applied to search results by default.
+    pub search_boost_links: bool,
     /// Vector quantization type for the HNSW index. Default: F16.
     pub vector_quantization: VectorQuantization,
     /// Whether to compress the metadata region with zstd. Default: true.
@@ -176,6 +182,14 @@ impl Config {
 
         let search_decay_half_life = parse_env::<f64>("MDVDB_SEARCH_DECAY_HALF_LIFE", 90.0)?;
 
+        let search_decay_exclude =
+            parse_comma_list_string("MDVDB_SEARCH_DECAY_EXCLUDE", vec![]);
+
+        let search_decay_include =
+            parse_comma_list_string("MDVDB_SEARCH_DECAY_INCLUDE", vec![]);
+
+        let search_boost_links = parse_env_bool("MDVDB_SEARCH_BOOST_LINKS", false)?;
+
         let vector_quantization = env_or_default("MDVDB_VECTOR_QUANTIZATION", "f16")
             .parse::<VectorQuantization>()?;
 
@@ -204,6 +218,9 @@ impl Config {
             bm25_norm_k,
             search_decay_enabled,
             search_decay_half_life,
+            search_decay_exclude,
+            search_decay_include,
+            search_boost_links,
             vector_quantization,
             index_compression,
         };
@@ -373,6 +390,9 @@ mod tests {
             "MDVDB_BM25_NORM_K",
             "MDVDB_SEARCH_DECAY",
             "MDVDB_SEARCH_DECAY_HALF_LIFE",
+            "MDVDB_SEARCH_DECAY_EXCLUDE",
+            "MDVDB_SEARCH_DECAY_INCLUDE",
+            "MDVDB_SEARCH_BOOST_LINKS",
             "MDVDB_VECTOR_QUANTIZATION",
             "MDVDB_INDEX_COMPRESSION",
         ];
@@ -405,6 +425,9 @@ mod tests {
         assert_eq!(config.bm25_norm_k, 1.5);
         assert!(!config.search_decay_enabled);
         assert_eq!(config.search_decay_half_life, 90.0);
+        assert!(config.search_decay_exclude.is_empty());
+        assert!(config.search_decay_include.is_empty());
+        assert!(!config.search_boost_links);
         assert_eq!(config.vector_quantization, VectorQuantization::F16);
         assert!(config.index_compression);
     }
@@ -577,6 +600,8 @@ mod tests {
             "MDVDB_SEARCH_DEFAULT_LIMIT", "MDVDB_SEARCH_MIN_SCORE",
             "MDVDB_SEARCH_MODE", "MDVDB_SEARCH_RRF_K", "MDVDB_BM25_NORM_K",
             "MDVDB_SEARCH_DECAY", "MDVDB_SEARCH_DECAY_HALF_LIFE",
+            "MDVDB_SEARCH_DECAY_EXCLUDE", "MDVDB_SEARCH_DECAY_INCLUDE",
+            "MDVDB_SEARCH_BOOST_LINKS",
             "MDVDB_VECTOR_QUANTIZATION", "MDVDB_INDEX_COMPRESSION",
         ] {
             std::env::remove_var(var);

@@ -60,8 +60,8 @@ pub struct SearchQuery {
     pub min_score: f64,
     /// Metadata filters applied with AND logic.
     pub filters: Vec<MetadataFilter>,
-    /// Whether to boost results that are link neighbors of top results.
-    pub boost_links: bool,
+    /// Per-query override for link boosting (None = use config default).
+    pub boost_links: Option<bool>,
     /// Search mode: hybrid, semantic, or lexical.
     pub mode: SearchMode,
     /// Optional path prefix to restrict results to a directory subtree.
@@ -70,6 +70,10 @@ pub struct SearchQuery {
     pub decay: Option<bool>,
     /// Per-query override for decay half-life in days (None = use config default).
     pub decay_half_life: Option<f64>,
+    /// Per-query override for decay exclude patterns (None = use config default).
+    pub decay_exclude: Option<Vec<String>>,
+    /// Per-query override for decay include patterns (None = use config default).
+    pub decay_include: Option<Vec<String>>,
 }
 
 impl SearchQuery {
@@ -80,11 +84,13 @@ impl SearchQuery {
             limit: 10,
             min_score: 0.0,
             filters: Vec::new(),
-            boost_links: false,
+            boost_links: None,
             mode: SearchMode::default(),
             path_prefix: None,
             decay: None,
             decay_half_life: None,
+            decay_exclude: None,
+            decay_include: None,
         }
     }
 
@@ -112,9 +118,9 @@ impl SearchQuery {
         self
     }
 
-    /// Enable link-graph boosting: results linked to top results get a score boost.
+    /// Enable or disable link-graph boosting for this query.
     pub fn with_boost_links(mut self, boost: bool) -> Self {
-        self.boost_links = boost;
+        self.boost_links = Some(boost);
         self
     }
 
@@ -133,6 +139,18 @@ impl SearchQuery {
     /// Set the time decay half-life in days for this query.
     pub fn with_decay_half_life(mut self, days: f64) -> Self {
         self.decay_half_life = Some(days);
+        self
+    }
+
+    /// Set path prefixes excluded from time decay for this query.
+    pub fn with_decay_exclude(mut self, patterns: Vec<String>) -> Self {
+        self.decay_exclude = Some(patterns);
+        self
+    }
+
+    /// Set path prefixes where time decay applies (whitelist) for this query.
+    pub fn with_decay_include(mut self, patterns: Vec<String>) -> Self {
+        self.decay_include = Some(patterns);
         self
     }
 }
@@ -213,6 +231,22 @@ pub fn apply_time_decay(score: f64, modified_at: u64, half_life_days: f64, now: 
     score * multiplier
 }
 
+/// Determines whether decay should be applied to a file at the given path.
+///
+/// Returns `false` if the path matches any exclude prefix (highest priority),
+/// or if the include list is non-empty and the path matches no include prefix.
+fn should_apply_decay(path: &str, exclude: &[String], include: &[String]) -> bool {
+    // Exclude takes precedence
+    if exclude.iter().any(|p| path.starts_with(p.as_str())) {
+        return false;
+    }
+    // If include is non-empty, path must match at least one
+    if !include.is_empty() && !include.iter().any(|p| path.starts_with(p.as_str())) {
+        return false;
+    }
+    true
+}
+
 /// Execute a search query against the index, supporting hybrid, semantic, and lexical modes.
 ///
 /// Pipeline varies by mode:
@@ -231,6 +265,9 @@ pub async fn search(
     bm25_norm_k: f64,
     decay_enabled: bool,
     decay_half_life: f64,
+    decay_exclude: &[String],
+    decay_include: &[String],
+    boost_links_default: bool,
 ) -> Result<Vec<SearchResult>> {
     // Validate: empty query is a no-op.
     if query.query.trim().is_empty() {
@@ -302,6 +339,9 @@ pub async fn search(
     // Resolve decay settings: per-query overrides take priority over config.
     let should_decay = query.decay.unwrap_or(decay_enabled);
     let effective_half_life = query.decay_half_life.unwrap_or(decay_half_life);
+    let effective_decay_exclude = query.decay_exclude.as_deref().unwrap_or(decay_exclude);
+    let effective_decay_include = query.decay_include.as_deref().unwrap_or(decay_include);
+    let effective_boost_links = query.boost_links.unwrap_or(boost_links_default);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -314,6 +354,9 @@ pub async fn search(
         &ranked_candidates,
         should_decay,
         effective_half_life,
+        effective_decay_exclude,
+        effective_decay_include,
+        effective_boost_links,
         now,
     )?;
 
@@ -354,12 +397,16 @@ fn lexical_search(
 }
 
 /// Assemble SearchResult objects from ranked candidates, applying decay, filters, and min_score.
+#[allow(clippy::too_many_arguments)]
 fn assemble_results(
     query: &SearchQuery,
     index: &Index,
     candidates: &[(String, f64)],
     decay_enabled: bool,
     decay_half_life: f64,
+    decay_exclude: &[String],
+    decay_include: &[String],
+    boost_links: bool,
     now: u64,
 ) -> Result<Vec<SearchResult>> {
     let file_mtimes = index.get_file_mtimes();
@@ -383,8 +430,10 @@ fn assemble_results(
             continue;
         };
 
-        // Apply time decay if enabled.
-        let effective_score = if decay_enabled {
+        // Apply time decay if enabled and path is not excluded.
+        let effective_score = if decay_enabled
+            && should_apply_decay(&chunk.source_path, decay_exclude, decay_include)
+        {
             let modified = file_mtimes.get(&chunk.source_path)
                 .copied()
                 .unwrap_or(file.indexed_at);
@@ -442,7 +491,7 @@ fn assemble_results(
     }
 
     // Apply link-graph boosting if requested.
-    if query.boost_links && results.len() > 1 {
+    if boost_links && results.len() > 1 {
         if let Some(link_graph) = index.get_link_graph() {
             let backlinks = links::compute_backlinks(&link_graph);
 
@@ -912,21 +961,21 @@ mod tests {
     // --- boost_links field and builder tests ---
 
     #[test]
-    fn test_search_query_boost_links_default_false() {
+    fn test_search_query_boost_links_default_none() {
         let q = SearchQuery::new("test");
-        assert!(!q.boost_links);
+        assert!(q.boost_links.is_none());
     }
 
     #[test]
     fn test_search_query_with_boost_links() {
         let q = SearchQuery::new("test").with_boost_links(true);
-        assert!(q.boost_links);
+        assert_eq!(q.boost_links, Some(true));
     }
 
     #[test]
     fn test_search_query_with_boost_links_false() {
         let q = SearchQuery::new("test").with_boost_links(true).with_boost_links(false);
-        assert!(!q.boost_links);
+        assert_eq!(q.boost_links, Some(false));
     }
 
     #[test]
@@ -937,7 +986,7 @@ mod tests {
             .with_boost_links(true);
         assert_eq!(q.limit, 5);
         assert_eq!(q.min_score, 0.5);
-        assert!(q.boost_links);
+        assert_eq!(q.boost_links, Some(true));
     }
 
     // --- RRF tests ---
@@ -1197,6 +1246,8 @@ mod tests {
         let q = SearchQuery::new("test");
         assert!(q.decay.is_none());
         assert!(q.decay_half_life.is_none());
+        assert!(q.decay_exclude.is_none());
+        assert!(q.decay_include.is_none());
     }
 
     #[test]
@@ -1226,5 +1277,76 @@ mod tests {
         assert_eq!(q.decay, Some(true));
         assert_eq!(q.decay_half_life, Some(45.0));
         assert_eq!(q.limit, 5);
+    }
+
+    // --- SearchQuery decay_exclude/decay_include builder tests ---
+
+    #[test]
+    fn test_search_query_with_decay_exclude() {
+        let q = SearchQuery::new("test")
+            .with_decay_exclude(vec!["docs/reference".into(), "wiki/pinned".into()]);
+        assert_eq!(
+            q.decay_exclude,
+            Some(vec!["docs/reference".to_string(), "wiki/pinned".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_search_query_with_decay_include() {
+        let q = SearchQuery::new("test")
+            .with_decay_include(vec!["journal".into()]);
+        assert_eq!(q.decay_include, Some(vec!["journal".to_string()]));
+    }
+
+    // --- should_apply_decay tests ---
+
+    #[test]
+    fn test_should_apply_decay_empty_lists() {
+        assert!(should_apply_decay("docs/readme.md", &[], &[]));
+    }
+
+    #[test]
+    fn test_should_apply_decay_include_match() {
+        let include = vec!["journal/".to_string()];
+        assert!(should_apply_decay("journal/2024-01.md", &[], &include));
+    }
+
+    #[test]
+    fn test_should_apply_decay_include_no_match() {
+        let include = vec!["journal/".to_string()];
+        assert!(!should_apply_decay("docs/readme.md", &[], &include));
+    }
+
+    #[test]
+    fn test_should_apply_decay_exclude_match() {
+        let exclude = vec!["docs/reference".to_string()];
+        assert!(!should_apply_decay("docs/reference/api.md", &exclude, &[]));
+    }
+
+    #[test]
+    fn test_should_apply_decay_exclude_no_match() {
+        let exclude = vec!["docs/reference".to_string()];
+        assert!(should_apply_decay("docs/guides/setup.md", &exclude, &[]));
+    }
+
+    #[test]
+    fn test_should_apply_decay_exclude_overrides_include() {
+        let exclude = vec!["journal/pinned".to_string()];
+        let include = vec!["journal/".to_string()];
+        // Matches include but also matches exclude → excluded
+        assert!(!should_apply_decay("journal/pinned/important.md", &exclude, &include));
+        // Matches include and not exclude → included
+        assert!(should_apply_decay("journal/2024-01.md", &exclude, &include));
+    }
+
+    #[test]
+    fn test_should_apply_decay_multiple_patterns() {
+        let exclude = vec!["docs/reference".to_string(), "wiki/glossary".to_string()];
+        let include = vec!["docs/".to_string(), "wiki/".to_string()];
+        assert!(!should_apply_decay("docs/reference/api.md", &exclude, &include));
+        assert!(!should_apply_decay("wiki/glossary/terms.md", &exclude, &include));
+        assert!(should_apply_decay("docs/guides/setup.md", &exclude, &include));
+        assert!(should_apply_decay("wiki/articles/rust.md", &exclude, &include));
+        assert!(!should_apply_decay("notes/random.md", &exclude, &include));
     }
 }

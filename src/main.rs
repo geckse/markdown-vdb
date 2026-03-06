@@ -140,9 +140,13 @@ struct SearchArgs {
     #[arg(short, long)]
     filter: Vec<String>,
 
-    /// Boost results that are linked to/from the query matches
-    #[arg(long)]
+    /// Enable link boosting (favor results linked to/from top matches)
+    #[arg(long, conflicts_with = "no_boost_links")]
     boost_links: bool,
+
+    /// Disable link boosting (even if enabled in config)
+    #[arg(long, conflicts_with = "boost_links")]
+    no_boost_links: bool,
 
     /// Search mode: hybrid, semantic, or lexical
     #[arg(long, value_name = "MODE")]
@@ -171,6 +175,14 @@ struct SearchArgs {
     /// Half-life in days for time decay (how many days until score is halved)
     #[arg(long, value_name = "DAYS")]
     decay_half_life: Option<f64>,
+
+    /// Comma-separated path prefixes excluded from time decay
+    #[arg(long, value_name = "PATTERNS")]
+    decay_exclude: Option<String>,
+
+    /// Comma-separated path prefixes where time decay applies (whitelist)
+    #[arg(long, value_name = "PATTERNS")]
+    decay_include: Option<String>,
 }
 
 #[derive(Parser)]
@@ -355,6 +367,8 @@ async fn run() -> anyhow::Result<()> {
             }
             if args.boost_links {
                 query = query.with_boost_links(true);
+            } else if args.no_boost_links {
+                query = query.with_boost_links(false);
             }
             query = query.with_mode(mode);
             if let Some(ref path) = args.path {
@@ -367,6 +381,14 @@ async fn run() -> anyhow::Result<()> {
             }
             if let Some(half_life) = args.decay_half_life {
                 query = query.with_decay_half_life(half_life);
+            }
+            if let Some(ref patterns) = args.decay_exclude {
+                let list: Vec<String> = patterns.split(',').map(|s| s.trim().to_string()).collect();
+                query = query.with_decay_exclude(list);
+            }
+            if let Some(ref patterns) = args.decay_include {
+                let list: Vec<String> = patterns.split(',').map(|s| s.trim().to_string()).collect();
+                query = query.with_decay_include(list);
             }
 
             let effective_mode = query.mode;
@@ -752,7 +774,7 @@ _mdvdb() {
             COMPREPLY=($(compgen -W "--reindex --preview --file --full --help" -- "$cur"))
             ;;
         search)
-            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --decay-exclude --decay-include --help" -- "$cur"))
             ;;
         tree)
             COMPREPLY=($(compgen -W "--path --help" -- "$cur"))
@@ -820,13 +842,16 @@ _mdvdb() {
                         '--min-score[Minimum similarity score]:score:' \
                         '(-f --filter)'{-f,--filter}'[Metadata filter (KEY=VALUE)]:filter:' \
                         '--boost-links[Boost linked results]' \
+                        '--no-boost-links[Disable link boosting]' \
                         '--mode[Search mode]:mode:(hybrid semantic lexical)' \
                         '--semantic[Shorthand for --mode=semantic]' \
                         '--lexical[Shorthand for --mode=lexical]' \
                         '--path[Restrict to path prefix]:path:' \
                         '--decay[Enable time decay]' \
                         '--no-decay[Disable time decay]' \
-                        '--decay-half-life[Half-life in days]:days:'
+                        '--decay-half-life[Half-life in days]:days:' \
+                        '--decay-exclude[Path prefixes excluded from decay]:patterns:' \
+                        '--decay-include[Path prefixes where decay applies]:patterns:'
                     ;;
             esac
             ;;
@@ -869,6 +894,7 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l limit -s l -d 'Maxi
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l min-score -d 'Minimum similarity score'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l filter -s f -d 'Metadata filter (KEY=VALUE)'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l boost-links -d 'Boost linked results'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l no-boost-links -d 'Disable link boosting'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l mode -d 'Search mode' -r -a 'hybrid semantic lexical'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l semantic -d 'Shorthand for --mode=semantic'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l lexical -d 'Shorthand for --mode=lexical'
@@ -876,6 +902,8 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l path -d 'Restrict t
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay -d 'Enable time decay'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l no-decay -d 'Disable time decay'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-half-life -d 'Half-life in days' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-exclude -d 'Path prefixes excluded from decay' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-include -d 'Path prefixes where decay applies' -r
 
 # Init subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'
