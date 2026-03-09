@@ -243,6 +243,10 @@ struct WatchArgs {}
 struct LinksArgs {
     /// Path to the markdown file
     file_path: PathBuf,
+
+    /// Link traversal depth (1 = direct links, 2-3 = multi-hop)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=3), default_value = "1")]
+    depth: u8,
 }
 
 #[derive(Parser)]
@@ -644,17 +648,28 @@ async fn run() -> anyhow::Result<()> {
         Some(Commands::Links(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy().to_string();
-            let result = vdb.links(&path_str)?;
+            let depth = args.depth as usize;
 
-            if json {
-                let output = LinksOutput {
-                    file: path_str,
-                    links: result,
-                };
-                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
-                writeln!(std::io::stdout())?;
+            if depth > 1 {
+                let result = vdb.links_neighborhood(&path_str, depth)?;
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &result)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    format::print_link_neighborhood(&result);
+                }
             } else {
-                format::print_links(&result);
+                let result = vdb.links(&path_str)?;
+                if json {
+                    let output = LinksOutput {
+                        file: path_str,
+                        links: result,
+                    };
+                    serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    format::print_links(&result);
+                }
             }
         }
         Some(Commands::Backlinks(args)) => {

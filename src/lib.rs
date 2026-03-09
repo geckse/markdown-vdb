@@ -1411,6 +1411,19 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         Ok(links::query_links(path, &graph, &backlink_map, &indexed_files))
     }
 
+    /// Query the multi-hop link neighborhood of a file.
+    ///
+    /// Returns a tree-structured view of outgoing and incoming links
+    /// up to `depth` hops (clamped to 1–3).
+    pub fn links_neighborhood(&self, path: &str, depth: usize) -> Result<links::NeighborhoodResult> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        let indexed_files: std::collections::HashSet<String> =
+            self.index.get_file_hashes().keys().cloned().collect();
+        Ok(links::neighborhood(&graph, &indexed_files, path, depth))
+    }
+
     /// Query backlinks pointing to a specific file.
     pub fn backlinks(&self, path: &str) -> Result<Vec<links::ResolvedLink>> {
         let graph = self.index.get_link_graph().ok_or_else(|| {

@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use mdvdb::search::SearchResult;
 use mdvdb::schema::{FieldType, Schema};
-use mdvdb::links::{LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
+use mdvdb::links::{LinkQueryResult, LinkState, NeighborhoodResult, OrphanFile, ResolvedLink};
 use mdvdb::tree::FileTree;
 use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
@@ -1101,6 +1101,83 @@ pub fn print_graph_summary(data: &GraphData) {
     }
 
     println!();
+}
+
+/// Print a multi-hop link neighborhood with tree-structured output.
+///
+/// Shows outgoing and incoming link trees with depth indicators.
+/// Placeholder implementation — will be fully implemented in subtask-4-3.
+pub fn print_link_neighborhood(result: &NeighborhoodResult) {
+    println!(
+        "\n  {} {} (depth: outgoing={}, incoming={})\n",
+        "●".cyan().bold(),
+        result.file.bold(),
+        result.outgoing_depth_count,
+        result.incoming_depth_count,
+    );
+
+    // Outgoing tree
+    println!(
+        "  {} {} ({})",
+        "Outgoing:".cyan(),
+        result.outgoing_count.to_string().yellow(),
+        if result.outgoing_depth_count > 0 {
+            format!("{} level(s)", result.outgoing_depth_count)
+        } else {
+            "none".to_string()
+        }
+    );
+    for (i, node) in result.outgoing.iter().enumerate() {
+        let connector = if i == result.outgoing.len() - 1 { "└──" } else { "├──" };
+        let badge = match node.state {
+            LinkState::Broken => format!(" {}", "[broken]".red()),
+            _ => String::new(),
+        };
+        println!("    {} {}{}", connector.dimmed(), node.path, badge);
+        print_neighborhood_children(&node.children, "    ", i == result.outgoing.len() - 1);
+    }
+
+    // Incoming tree
+    println!(
+        "\n  {} {} ({})",
+        "Incoming:".cyan(),
+        result.incoming_count.to_string().yellow(),
+        if result.incoming_depth_count > 0 {
+            format!("{} level(s)", result.incoming_depth_count)
+        } else {
+            "none".to_string()
+        }
+    );
+    for (i, node) in result.incoming.iter().enumerate() {
+        let connector = if i == result.incoming.len() - 1 { "└──" } else { "├──" };
+        let badge = match node.state {
+            LinkState::Broken => format!(" {}", "[broken]".red()),
+            _ => String::new(),
+        };
+        println!("    {} {}{}", connector.dimmed(), node.path, badge);
+        print_neighborhood_children(&node.children, "    ", i == result.incoming.len() - 1);
+    }
+
+    println!();
+}
+
+/// Recursively print children of a neighborhood node with tree connectors.
+fn print_neighborhood_children(
+    children: &[mdvdb::links::NeighborhoodNode],
+    prefix: &str,
+    is_last_parent: bool,
+) {
+    let branch = if is_last_parent { "    " } else { "│   " };
+    let next_prefix = format!("{}{}", prefix, branch);
+    for (i, child) in children.iter().enumerate() {
+        let connector = if i == children.len() - 1 { "└──" } else { "├──" };
+        let badge = match child.state {
+            LinkState::Broken => format!(" {}", "[broken]".red()),
+            _ => String::new(),
+        };
+        println!("    {} {}{}", connector.dimmed(), child.path, badge);
+        print_neighborhood_children(&child.children, &next_prefix, i == children.len() - 1);
+    }
 }
 
 #[cfg(test)]
