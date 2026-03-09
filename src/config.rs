@@ -87,6 +87,12 @@ pub struct Config {
     pub search_decay_include: Vec<String>,
     /// Whether link boosting is applied to search results by default.
     pub search_boost_links: bool,
+    /// Number of link-graph hops used for link-boost scoring. Default: 1, range 1–3.
+    pub search_boost_hops: usize,
+    /// Number of graph hops to expand results (0 = disabled). Default: 0, range 0–3.
+    pub search_expand_graph: usize,
+    /// Maximum number of graph-expanded results to add. Default: 3, range 1–10.
+    pub search_expand_limit: usize,
     /// Vector quantization type for the HNSW index. Default: F16.
     pub vector_quantization: VectorQuantization,
     /// Whether to compress the metadata region with zstd. Default: true.
@@ -190,6 +196,12 @@ impl Config {
 
         let search_boost_links = parse_env_bool("MDVDB_SEARCH_BOOST_LINKS", false)?;
 
+        let search_boost_hops = parse_env::<usize>("MDVDB_SEARCH_BOOST_HOPS", 1)?;
+
+        let search_expand_graph = parse_env::<usize>("MDVDB_SEARCH_EXPAND_GRAPH", 0)?;
+
+        let search_expand_limit = parse_env::<usize>("MDVDB_SEARCH_EXPAND_LIMIT", 3)?;
+
         let vector_quantization = env_or_default("MDVDB_VECTOR_QUANTIZATION", "f16")
             .parse::<VectorQuantization>()?;
 
@@ -221,6 +233,9 @@ impl Config {
             search_decay_exclude,
             search_decay_include,
             search_boost_links,
+            search_boost_hops,
+            search_expand_graph,
+            search_expand_limit,
             vector_quantization,
             index_compression,
         };
@@ -259,6 +274,24 @@ impl Config {
             return Err(Error::Config(
                 "search_decay_half_life must be > 0".into(),
             ));
+        }
+        if !(1..=3).contains(&self.search_boost_hops) {
+            return Err(Error::Config(format!(
+                "search_boost_hops ({}) must be in [1, 3]",
+                self.search_boost_hops
+            )));
+        }
+        if self.search_expand_graph > 3 {
+            return Err(Error::Config(format!(
+                "search_expand_graph ({}) must be in [0, 3]",
+                self.search_expand_graph
+            )));
+        }
+        if !(1..=10).contains(&self.search_expand_limit) {
+            return Err(Error::Config(format!(
+                "search_expand_limit ({}) must be in [1, 10]",
+                self.search_expand_limit
+            )));
         }
         Ok(())
     }
@@ -393,6 +426,9 @@ mod tests {
             "MDVDB_SEARCH_DECAY_EXCLUDE",
             "MDVDB_SEARCH_DECAY_INCLUDE",
             "MDVDB_SEARCH_BOOST_LINKS",
+            "MDVDB_SEARCH_BOOST_HOPS",
+            "MDVDB_SEARCH_EXPAND_GRAPH",
+            "MDVDB_SEARCH_EXPAND_LIMIT",
             "MDVDB_VECTOR_QUANTIZATION",
             "MDVDB_INDEX_COMPRESSION",
         ];
@@ -428,6 +464,9 @@ mod tests {
         assert!(config.search_decay_exclude.is_empty());
         assert!(config.search_decay_include.is_empty());
         assert!(!config.search_boost_links);
+        assert_eq!(config.search_boost_hops, 1);
+        assert_eq!(config.search_expand_graph, 0);
+        assert_eq!(config.search_expand_limit, 3);
         assert_eq!(config.vector_quantization, VectorQuantization::F16);
         assert!(config.index_compression);
     }
@@ -602,6 +641,8 @@ mod tests {
             "MDVDB_SEARCH_DECAY", "MDVDB_SEARCH_DECAY_HALF_LIFE",
             "MDVDB_SEARCH_DECAY_EXCLUDE", "MDVDB_SEARCH_DECAY_INCLUDE",
             "MDVDB_SEARCH_BOOST_LINKS",
+            "MDVDB_SEARCH_BOOST_HOPS", "MDVDB_SEARCH_EXPAND_GRAPH",
+            "MDVDB_SEARCH_EXPAND_LIMIT",
             "MDVDB_VECTOR_QUANTIZATION", "MDVDB_INDEX_COMPRESSION",
         ] {
             std::env::remove_var(var);
