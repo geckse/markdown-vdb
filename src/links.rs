@@ -43,7 +43,7 @@ pub struct ResolvedLink {
 }
 
 /// Whether a link target is valid or broken.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub enum LinkState {
     /// Target file exists in the file set.
     Valid,
@@ -73,7 +73,7 @@ pub struct OrphanFile {
 ///
 /// Represents a linked file with its validity state and recursively
 /// discovered children (further links from this file).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct NeighborhoodNode {
     /// Relative path to this file.
     pub path: String,
@@ -87,7 +87,7 @@ pub struct NeighborhoodNode {
 ///
 /// Contains tree-structured outgoing (forward) and incoming (backlink)
 /// neighborhoods to configurable depth.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct NeighborhoodResult {
     /// The queried file path.
     pub file: String,
