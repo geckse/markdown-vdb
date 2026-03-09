@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::time::Instant;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -315,11 +316,14 @@ fn should_apply_decay(path: &str, exclude: &[String], include: &[String]) -> boo
 /// Execute a search query against the index, supporting hybrid, semantic, and lexical modes.
 ///
 /// Pipeline varies by mode:
-/// - **Semantic**: embed → HNSW search → filter → assemble → truncate
-/// - **Lexical**: BM25 search → normalize → filter → assemble → truncate (no embedding API call)
-/// - **Hybrid**: semantic + lexical in parallel → RRF fusion → normalize → filter → assemble → truncate
+/// - **Semantic**: embed → HNSW search → filter → assemble → truncate → boost → expand
+/// - **Lexical**: BM25 search → normalize → filter → assemble → truncate → boost → expand
+/// - **Hybrid**: semantic + lexical in parallel → RRF fusion → normalize → filter → assemble → truncate → boost → expand
 ///
 /// When `fts_index` is `None` and mode is Hybrid or Lexical, falls back to semantic-only.
+///
+/// Returns a `SearchResponse` containing ranked results, optional graph context items
+/// (from linked files), and timing information.
 #[allow(clippy::too_many_arguments)]
 pub async fn search(
     query: &SearchQuery,
@@ -333,12 +337,30 @@ pub async fn search(
     decay_exclude: &[String],
     decay_include: &[String],
     boost_links_default: bool,
-) -> Result<Vec<SearchResult>> {
+    boost_hops_default: usize,
+    expand_graph_default: usize,
+    expand_limit: usize,
+) -> Result<SearchResponse> {
+    let total_start = Instant::now();
+
     // Validate: empty query is a no-op.
     if query.query.trim().is_empty() {
         debug!("empty query, returning no results");
-        return Ok(Vec::new());
+        return Ok(SearchResponse {
+            results: Vec::new(),
+            graph_context: Vec::new(),
+            timings: SearchTimings {
+                total_ms: 0,
+                embedding_ms: None,
+                search_ms: 0,
+                boost_ms: None,
+                expansion_ms: None,
+            },
+        });
     }
+
+    // Determine effective expand_graph (needed before candidate retrieval for lexical mode).
+    let effective_expand_graph = query.expand_graph.unwrap_or(expand_graph_default);
 
     // Determine effective mode: fall back to semantic if no FTS index available.
     let effective_mode = match query.mode {
@@ -358,14 +380,26 @@ pub async fn search(
         _ => query.limit * 3,
     };
 
-    // Get ranked candidates based on mode.
+    // Get ranked candidates and query embedding based on mode.
+    let search_start = Instant::now();
+    let mut query_embedding: Option<Vec<f32>> = None;
     let mut ranked_candidates: Vec<(String, f64)> = match effective_mode {
         SearchMode::Semantic => {
-            semantic_search(query, index, provider, over_fetch).await?
+            let (candidates, qvec) =
+                semantic_search(query, index, provider, over_fetch).await?;
+            query_embedding = Some(qvec);
+            candidates
         }
         SearchMode::Lexical => {
             let fts = fts_index.unwrap(); // safe: checked above
-            lexical_search(query, fts, over_fetch)?
+            let results = lexical_search(query, fts, over_fetch)?;
+            // If graph expansion is needed, embed the query for HNSW lookup.
+            if effective_expand_graph > 0 {
+                let embeddings =
+                    provider.embed_batch(std::slice::from_ref(&query.query)).await?;
+                query_embedding = Some(embeddings[0].clone());
+            }
+            results
         }
         SearchMode::Hybrid => {
             let fts = fts_index.unwrap(); // safe: checked above
@@ -373,8 +407,9 @@ pub async fn search(
                 semantic_search(query, index, provider, over_fetch),
                 async { lexical_search(query, fts, over_fetch) }
             );
-            let semantic = semantic_results?;
+            let (semantic, qvec) = semantic_results?;
             let lexical = lexical_results?;
+            query_embedding = Some(qvec);
 
             debug!(
                 semantic_count = semantic.len(),
@@ -394,6 +429,8 @@ pub async fn search(
         SearchMode::Semantic => {} // already [0, 1] cosine similarity
     }
 
+    let search_elapsed = search_start.elapsed();
+
     debug!(
         candidates = ranked_candidates.len(),
         limit = query.limit,
@@ -407,12 +444,18 @@ pub async fn search(
     let effective_decay_exclude = query.decay_exclude.as_deref().unwrap_or(decay_exclude);
     let effective_decay_include = query.decay_include.as_deref().unwrap_or(decay_include);
     let effective_boost_links = query.boost_links.unwrap_or(boost_links_default);
+    let effective_boost_hops = query.boost_hops.unwrap_or(boost_hops_default);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // Filter, assemble results, and apply min_score.
+    // Pre-compute link graph data once (used for both boost and expansion).
+    let link_graph = index.get_link_graph();
+    let backlinks = link_graph.as_ref().map(links::compute_backlinks);
+
+    // Filter, assemble results, and apply min_score + multi-hop link boost.
+    let boost_start = Instant::now();
     let results = assemble_results(
         query,
         index,
@@ -422,30 +465,77 @@ pub async fn search(
         effective_decay_exclude,
         effective_decay_include,
         effective_boost_links,
+        effective_boost_hops,
+        link_graph.as_ref(),
+        backlinks.as_ref(),
         now,
     )?;
+    let boost_elapsed = boost_start.elapsed();
+
+    // Graph context expansion: find relevant chunks from linked files.
+    let expansion_start = Instant::now();
+    let graph_context = if effective_expand_graph > 0 {
+        if let (Some(lg), Some(bl), Some(qe)) = (&link_graph, &backlinks, &query_embedding) {
+            expand_graph_context(
+                index,
+                &results,
+                qe,
+                lg,
+                bl,
+                effective_expand_graph,
+                expand_limit,
+            )
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    let expansion_elapsed = expansion_start.elapsed();
 
     info!(
         query = %query.query,
         results = results.len(),
+        graph_context = graph_context.len(),
         mode = %effective_mode,
         "search complete"
     );
 
-    Ok(results)
+    Ok(SearchResponse {
+        results,
+        graph_context,
+        timings: SearchTimings {
+            total_ms: total_start.elapsed().as_millis() as u64,
+            embedding_ms: match effective_mode {
+                SearchMode::Lexical if query_embedding.is_none() => None,
+                _ => Some(search_elapsed.as_millis() as u64),
+            },
+            search_ms: search_elapsed.as_millis() as u64,
+            boost_ms: if effective_boost_links {
+                Some(boost_elapsed.as_millis() as u64)
+            } else {
+                None
+            },
+            expansion_ms: if effective_expand_graph > 0 {
+                Some(expansion_elapsed.as_millis() as u64)
+            } else {
+                None
+            },
+        },
+    })
 }
 
-/// Run semantic (HNSW) search and return ranked (chunk_id, score) pairs.
+/// Run semantic (HNSW) search and return ranked (chunk_id, score) pairs plus the query embedding.
 async fn semantic_search(
     query: &SearchQuery,
     index: &Index,
     provider: &dyn EmbeddingProvider,
     limit: usize,
-) -> Result<Vec<(String, f64)>> {
+) -> Result<(Vec<(String, f64)>, Vec<f32>)> {
     let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
-    let query_vector = &embeddings[0];
-    let candidates = index.search_vectors(query_vector, limit)?;
-    Ok(candidates)
+    let query_vector = embeddings[0].clone();
+    let candidates = index.search_vectors(&query_vector, limit)?;
+    Ok((candidates, query_vector))
 }
 
 /// Run lexical (BM25) search and return ranked (chunk_id, score) pairs.
@@ -461,7 +551,8 @@ fn lexical_search(
         .collect())
 }
 
-/// Assemble SearchResult objects from ranked candidates, applying decay, filters, and min_score.
+/// Assemble SearchResult objects from ranked candidates, applying decay, filters, min_score,
+/// and multi-hop link-graph boosting.
 #[allow(clippy::too_many_arguments)]
 fn assemble_results(
     query: &SearchQuery,
@@ -472,6 +563,9 @@ fn assemble_results(
     decay_exclude: &[String],
     decay_include: &[String],
     boost_links: bool,
+    boost_hops: usize,
+    link_graph: Option<&links::LinkGraph>,
+    backlinks: Option<&HashMap<String, Vec<links::LinkEntry>>>,
     now: u64,
 ) -> Result<Vec<SearchResult>> {
     let file_mtimes = index.get_file_mtimes();
@@ -499,7 +593,8 @@ fn assemble_results(
         let effective_score = if decay_enabled
             && should_apply_decay(&chunk.source_path, decay_exclude, decay_include)
         {
-            let modified = file_mtimes.get(&chunk.source_path)
+            let modified = file_mtimes
+                .get(&chunk.source_path)
                 .copied()
                 .unwrap_or(file.indexed_at);
             apply_time_decay(*score, modified, decay_half_life, now)
@@ -551,58 +646,242 @@ fn assemble_results(
 
     // When decay is applied, scores may reorder — re-sort and truncate.
     if decay_enabled && results.len() > 1 {
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(query.limit);
     }
 
-    // Apply link-graph boosting if requested.
+    // Apply multi-hop link-graph boosting if requested.
     if boost_links && results.len() > 1 {
-        if let Some(link_graph) = index.get_link_graph() {
-            let backlinks = links::compute_backlinks(&link_graph);
-
-            // Collect link neighbors of top 3 results.
+        if let (Some(graph), Some(bl)) = (link_graph, backlinks) {
+            // Collect top 3 result paths as BFS seeds.
             let top_paths: Vec<String> = results
                 .iter()
                 .take(3)
                 .map(|r| r.file.path.clone())
                 .collect();
 
-            let mut neighbor_paths: HashSet<String> = HashSet::new();
-            for path in &top_paths {
-                // Outgoing links from this file.
-                if let Some(entries) = link_graph.forward.get(path) {
-                    for entry in entries {
-                        neighbor_paths.insert(entry.target.clone());
-                    }
-                }
-                // Files linking to this file (backlinks).
-                if let Some(entries) = backlinks.get(path) {
-                    for entry in entries {
-                        neighbor_paths.insert(entry.source.clone());
-                    }
-                }
-            }
+            // BFS to find neighbors at configurable depth (1–3 hops).
+            let neighbors = links::bfs_neighbors(graph, bl, &top_paths, boost_hops);
 
-            // Remove the top paths themselves from neighbors to avoid self-boost.
-            for path in &top_paths {
-                neighbor_paths.remove(path);
-            }
-
-            // Boost neighbor results by 1.2x.
-            if !neighbor_paths.is_empty() {
+            if !neighbors.is_empty() {
                 for result in &mut results {
-                    if neighbor_paths.contains(&result.file.path) {
-                        result.score *= 1.2;
-                        debug!(path = %result.file.path, "boosted link neighbor score");
+                    if let Some(&distance) = neighbors.get(&result.file.path) {
+                        // Distance-decayed multiplier: 1.0 + 0.15 / 2^(distance - 1)
+                        // Hop 1: 1.150x, Hop 2: 1.075x, Hop 3: 1.0375x
+                        let multiplier =
+                            1.0 + 0.15 / 2.0_f64.powi((distance as i32) - 1);
+                        result.score *= multiplier;
+                        debug!(
+                            path = %result.file.path,
+                            distance = distance,
+                            multiplier = multiplier,
+                            "boosted link neighbor score (multi-hop)"
+                        );
                     }
                 }
                 // Re-sort by score descending.
-                results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
         }
     }
 
     Ok(results)
+}
+
+/// Expand graph context by finding relevant chunks from files linked to top search results.
+///
+/// For each file discovered via BFS around top result files (that isn't already in results),
+/// finds the best-matching chunk using HNSW similarity to the query embedding. Returns
+/// `GraphContextItem` entries grouped by hop distance, limited to `expand_limit` per hop.
+fn expand_graph_context(
+    index: &Index,
+    results: &[SearchResult],
+    query_embedding: &[f32],
+    link_graph: &links::LinkGraph,
+    backlinks: &HashMap<String, Vec<links::LinkEntry>>,
+    expand_depth: usize,
+    expand_limit: usize,
+) -> Vec<GraphContextItem> {
+    if results.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect result file paths to exclude from expansion.
+    let result_paths: HashSet<String> = results.iter().map(|r| r.file.path.clone()).collect();
+
+    // Use top result paths as seeds for BFS.
+    let seeds: Vec<String> = results
+        .iter()
+        .take(3)
+        .map(|r| r.file.path.clone())
+        .collect();
+
+    // BFS to find neighbor files at the expansion depth.
+    let neighbors = links::bfs_neighbors(link_graph, backlinks, &seeds, expand_depth);
+
+    // Filter out files already in results.
+    let expansion_targets: Vec<(String, usize)> = neighbors
+        .into_iter()
+        .filter(|(path, _)| !result_paths.contains(path))
+        .collect();
+
+    if expansion_targets.is_empty() {
+        return Vec::new();
+    }
+
+    // Build a set of target file paths for filtering HNSW results.
+    let target_set: HashSet<&str> = expansion_targets
+        .iter()
+        .map(|(p, _)| p.as_str())
+        .collect();
+
+    // Search HNSW for similar chunks, then filter to expansion targets.
+    let search_limit = (expansion_targets.len() * 10).max(100);
+    let hnsw_results = match index.search_vectors(query_embedding, search_limit) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    // Find best chunk per target file (highest HNSW score).
+    let mut best_chunks: HashMap<String, (String, f64)> = HashMap::new();
+    for (chunk_id, score) in &hnsw_results {
+        let Some(chunk) = index.get_chunk(chunk_id) else {
+            continue;
+        };
+        if !target_set.contains(chunk.source_path.as_str()) {
+            continue;
+        }
+        let entry = best_chunks
+            .entry(chunk.source_path.clone())
+            .or_insert_with(|| (String::new(), f64::NEG_INFINITY));
+        if *score > entry.1 {
+            *entry = (chunk_id.clone(), *score);
+        }
+    }
+
+    // Also check target files' chunk_ids directly for any that weren't in HNSW results.
+    // This ensures we don't miss files whose chunks didn't appear in the limited HNSW search.
+    for (path, _) in &expansion_targets {
+        if best_chunks.contains_key(path) {
+            continue; // Already found via HNSW
+        }
+        // Try to find any chunk for this file as a fallback (score 0.0).
+        if let Some(file) = index.get_file_metadata(path) {
+            if let Some(first_chunk_id) = file.chunk_ids.first() {
+                if index.get_chunk(first_chunk_id).is_some() {
+                    best_chunks.insert(path.clone(), (first_chunk_id.clone(), 0.0));
+                }
+            }
+        }
+    }
+
+    // Group targets by hop distance and apply per-hop limit.
+    let mut by_hop: HashMap<usize, Vec<(String, f64)>> = HashMap::new();
+    for (path, distance) in &expansion_targets {
+        if let Some((_, score)) = best_chunks.get(path) {
+            by_hop
+                .entry(*distance)
+                .or_default()
+                .push((path.clone(), *score));
+        }
+    }
+
+    let file_mtimes = index.get_file_mtimes();
+    let mut items: Vec<GraphContextItem> = Vec::new();
+
+    for (hop, mut files) in by_hop {
+        // Sort by score descending within each hop.
+        files.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        files.truncate(expand_limit);
+
+        for (path, _) in files {
+            let Some((chunk_id, _)) = best_chunks.get(&path) else {
+                continue;
+            };
+            let Some(chunk) = index.get_chunk(chunk_id) else {
+                continue;
+            };
+            let Some(file) = index.get_file_metadata(&path) else {
+                continue;
+            };
+
+            let modified_at = file_mtimes.get(&path).copied();
+            let frontmatter: Option<Value> = file
+                .frontmatter
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok());
+
+            // Find which seed file this neighbor is linked from.
+            let linked_from = find_linked_from(&seeds, &path, link_graph, backlinks);
+
+            items.push(GraphContextItem {
+                chunk: SearchResultChunk {
+                    chunk_id: chunk_id.clone(),
+                    heading_hierarchy: chunk.heading_hierarchy.clone(),
+                    content: chunk.content.clone(),
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                },
+                file: SearchResultFile {
+                    path: path.clone(),
+                    frontmatter,
+                    file_size: file.file_size,
+                    path_components: path.split('/').map(String::from).collect(),
+                    modified_at,
+                },
+                linked_from,
+                hop_distance: hop,
+            });
+        }
+    }
+
+    // Sort by hop_distance ascending, then by path for determinism.
+    items.sort_by(|a, b| {
+        a.hop_distance
+            .cmp(&b.hop_distance)
+            .then_with(|| a.file.path.cmp(&b.file.path))
+    });
+
+    items
+}
+
+/// Find which seed file has a link connection to the target file.
+///
+/// Checks for direct forward or backward links between each seed and the target.
+/// Falls back to the first seed if no direct connection exists (multi-hop case).
+fn find_linked_from(
+    seeds: &[String],
+    target: &str,
+    graph: &links::LinkGraph,
+    backlinks: &HashMap<String, Vec<links::LinkEntry>>,
+) -> String {
+    for seed in seeds {
+        // Check if seed has a forward link to target.
+        if let Some(entries) = graph.forward.get(seed) {
+            if entries.iter().any(|e| e.target == target) {
+                return seed.clone();
+            }
+        }
+        // Check if target links to seed (seed has a backlink from target).
+        if let Some(entries) = backlinks.get(seed) {
+            if entries.iter().any(|e| e.source == target) {
+                return seed.clone();
+            }
+        }
+    }
+    // Fallback: first seed.
+    seeds.first().cloned().unwrap_or_default()
 }
 
 /// Reciprocal Rank Fusion: merges two ranked lists into a single scored list.
