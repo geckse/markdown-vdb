@@ -993,10 +993,10 @@ async fn test_search_response_has_all_fields() {
         response.graph_context.is_empty(),
         "graph_context should be empty by default"
     );
-    // timings should be present (total_ms is always populated).
+    // timings should be present (total_secs is always populated).
     // Just verify the struct is accessible and has the expected fields.
-    let _total = response.timings.total_ms;
-    let _search = response.timings.search_ms;
+    let _total = response.timings.total_secs;
+    let _search = response.timings.vector_search_secs;
 }
 
 #[tokio::test]

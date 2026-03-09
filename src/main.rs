@@ -9,8 +9,8 @@ use colored::Colorize;
 use serde_json::Value;
 
 use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink};
-use mdvdb::search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult};
-use mdvdb::{GraphLevel, MarkdownVdb};
+use mdvdb::search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings};
+use mdvdb::{GraphLevel, IngestTimings, MarkdownVdb};
 
 /// Wrapped search output for JSON mode.
 #[derive(serde::Serialize)]
@@ -19,8 +19,26 @@ struct SearchOutput {
     query: String,
     total_results: usize,
     mode: SearchMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timings: Option<SearchTimings>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     graph_context: Vec<GraphContextItem>,
+}
+
+/// Wrapped ingest output for JSON mode (verbosity-gated timings).
+#[derive(serde::Serialize)]
+struct IngestOutput {
+    files_indexed: usize,
+    files_skipped: usize,
+    files_removed: usize,
+    chunks_created: usize,
+    api_calls: usize,
+    files_failed: usize,
+    errors: Vec<mdvdb::IngestError>,
+    duration_secs: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timings: Option<IngestTimings>,
+    cancelled: bool,
 }
 
 /// Wrapped links output for JSON mode.
@@ -119,6 +137,10 @@ enum Commands {
 
     /// Show graph data (nodes, edges, clusters) for visualization
     Graph(GraphArgs),
+
+    /// Dump chunks as JSON (for benchmarking — ensures identical chunking)
+    #[command(hide = true)]
+    Chunks(ChunksArgs),
 
     /// Generate shell completions
     #[command(hide = true)]
@@ -288,6 +310,20 @@ struct ConfigArgs {}
 #[derive(Parser)]
 struct DoctorArgs {}
 
+#[derive(Parser)]
+struct ChunksArgs {
+    /// Directory containing markdown files to chunk
+    dir: PathBuf,
+
+    /// Maximum tokens per chunk
+    #[arg(long, default_value = "512")]
+    max_tokens: usize,
+
+    /// Overlap tokens for sub-split chunks
+    #[arg(long, default_value = "50")]
+    overlap_tokens: usize,
+}
+
 #[derive(Clone, ValueEnum)]
 enum ShellType {
     Bash,
@@ -340,7 +376,9 @@ async fn run() -> anyhow::Result<()> {
 
     // In JSON mode, suppress tracing logs to avoid any possibility of
     // log output leaking into stdout and breaking JSON parsing.
-    if cli.json {
+    // In JSON mode, suppress tracing logs to keep stdout clean for JSON parsing.
+    // Exception: if verbose is set, allow logs to stderr even in JSON mode.
+    if cli.json && cli.verbose == 0 {
         mdvdb::logging::init_silent()?;
     } else {
         mdvdb::logging::init(cli.verbose)?;
@@ -420,6 +458,7 @@ async fn run() -> anyhow::Result<()> {
                     query: args.query.clone(),
                     results: response.results,
                     mode: effective_mode,
+                    timings: if cli.verbose > 0 { Some(response.timings) } else { None },
                     graph_context: response.graph_context,
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
@@ -428,6 +467,17 @@ async fn run() -> anyhow::Result<()> {
                 format::print_search_results(&response.results, &args.query);
                 if !response.graph_context.is_empty() {
                     format::print_graph_context(&response.graph_context);
+                }
+                if cli.verbose > 0 {
+                    eprintln!(
+                        "  [timing] embed={:.0}ms hnsw={:.0}ms bm25={:.0}ms fusion={:.0}ms assemble={:.0}ms total={:.0}ms",
+                        response.timings.embed_secs * 1000.0,
+                        response.timings.vector_search_secs * 1000.0,
+                        response.timings.lexical_search_secs * 1000.0,
+                        response.timings.fusion_secs * 1000.0,
+                        response.timings.assemble_secs * 1000.0,
+                        response.timings.total_secs * 1000.0,
+                    );
                 }
             }
         }
@@ -535,10 +585,35 @@ async fn run() -> anyhow::Result<()> {
             let result = vdb.ingest(options).await?;
 
             if json {
-                serde_json::to_writer_pretty(std::io::stdout(), &result)?;
+                let output = IngestOutput {
+                    files_indexed: result.files_indexed,
+                    files_skipped: result.files_skipped,
+                    files_removed: result.files_removed,
+                    chunks_created: result.chunks_created,
+                    api_calls: result.api_calls,
+                    files_failed: result.files_failed,
+                    errors: result.errors.clone(),
+                    duration_secs: result.duration_secs,
+                    timings: if cli.verbose > 0 { result.timings.clone() } else { None },
+                    cancelled: result.cancelled,
+                };
+                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_ingest_result(&result);
+                if cli.verbose > 0 {
+                    if let Some(ref t) = result.timings {
+                        eprintln!(
+                            "  [timing] discover={:.0}ms parse={:.0}ms embed={:.0}ms upsert={:.0}ms save={:.0}ms total={:.0}ms",
+                            t.discover_secs * 1000.0,
+                            t.parse_secs * 1000.0,
+                            t.embed_secs * 1000.0,
+                            t.upsert_secs * 1000.0,
+                            t.save_secs * 1000.0,
+                            t.total_secs * 1000.0,
+                        );
+                    }
+                }
             }
         }
         Some(Commands::Status(_args)) => {
@@ -786,6 +861,50 @@ async fn run() -> anyhow::Result<()> {
             } else {
                 format::print_doctor(&result);
             }
+        }
+        Some(Commands::Chunks(args)) => {
+            use mdvdb::chunker::chunk_document;
+            use mdvdb::parser::parse_markdown_file;
+
+            let dir = args.dir.canonicalize()?;
+            let mut md_files: Vec<_> = std::fs::read_dir(&dir)?
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|ext| ext == "md")
+                })
+                .map(|e| e.file_name().into())
+                .collect::<Vec<std::path::PathBuf>>();
+            md_files.sort();
+
+            let mut all_chunks: Vec<serde_json::Value> = Vec::new();
+
+            for file_name in &md_files {
+                let parsed = parse_markdown_file(&dir, file_name)?;
+                let chunks = chunk_document(&parsed, args.max_tokens, args.overlap_tokens)?;
+                for chunk in &chunks {
+                    let content_hash = {
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(chunk.content.as_bytes());
+                        format!("{:x}", hasher.finalize())
+                    };
+                    all_chunks.push(serde_json::json!({
+                        "content": chunk.content,
+                        "heading_hierarchy": chunk.heading_hierarchy,
+                        "chunk_index": chunk.chunk_index,
+                        "is_sub_split": chunk.is_sub_split,
+                        "file_path": file_name.to_string_lossy(),
+                        "content_hash": content_hash,
+                        "start_char": 0,
+                        "end_char": 0,
+                    }));
+                }
+            }
+
+            serde_json::to_writer(std::io::stdout(), &all_chunks)?;
+            writeln!(std::io::stdout())?;
         }
         Some(Commands::Completions(args)) => {
             // Shell completion generation.

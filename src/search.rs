@@ -255,22 +255,21 @@ pub struct GraphContextItem {
     pub hop_distance: usize,
 }
 
-/// Timing information for search operations.
+/// Per-query timing breakdown for search operations.
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchTimings {
-    /// Total time for the search operation in milliseconds.
-    pub total_ms: u64,
-    /// Time spent computing embeddings in milliseconds (None for lexical mode).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub embedding_ms: Option<u64>,
-    /// Time spent on vector/text search in milliseconds.
-    pub search_ms: u64,
-    /// Time spent on link boosting in milliseconds (None if not applied).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub boost_ms: Option<u64>,
-    /// Time spent on graph context expansion in milliseconds (None if not applied).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expansion_ms: Option<u64>,
+    /// Time spent calling the embedding provider to embed the query.
+    pub embed_secs: f64,
+    /// Time spent in HNSW vector search (usearch). 0 if lexical-only.
+    pub vector_search_secs: f64,
+    /// Time spent in BM25 lexical search (tantivy). 0 if semantic-only.
+    pub lexical_search_secs: f64,
+    /// Time spent in RRF fusion + score normalization. 0 if not hybrid.
+    pub fusion_secs: f64,
+    /// Time spent assembling results (filtering, decay, link boosting).
+    pub assemble_secs: f64,
+    /// Total wall-clock time.
+    pub total_secs: f64,
 }
 
 /// Wrapper response for search operations, containing ranked results,
@@ -350,11 +349,12 @@ pub async fn search(
             results: Vec::new(),
             graph_context: Vec::new(),
             timings: SearchTimings {
-                total_ms: 0,
-                embedding_ms: None,
-                search_ms: 0,
-                boost_ms: None,
-                expansion_ms: None,
+                embed_secs: 0.0,
+                vector_search_secs: 0.0,
+                lexical_search_secs: 0.0,
+                fusion_secs: 0.0,
+                assemble_secs: 0.0,
+                total_secs: 0.0,
             },
         });
     }
@@ -380,23 +380,33 @@ pub async fn search(
         _ => query.limit * 3,
     };
 
+    // Track per-phase timing.
+    let mut embed_secs = 0.0_f64;
+    let mut vector_search_secs = 0.0_f64;
+    let mut lexical_search_secs = 0.0_f64;
+    let mut fusion_secs = 0.0_f64;
+
     // Get ranked candidates and query embedding based on mode.
-    let search_start = Instant::now();
     let mut query_embedding: Option<Vec<f32>> = None;
     let mut ranked_candidates: Vec<(String, f64)> = match effective_mode {
         SearchMode::Semantic => {
-            let (candidates, qvec) =
+            let (candidates, qvec, es, vs) =
                 semantic_search(query, index, provider, over_fetch).await?;
+            embed_secs = es;
+            vector_search_secs = vs;
             query_embedding = Some(qvec);
             candidates
         }
         SearchMode::Lexical => {
             let fts = fts_index.unwrap(); // safe: checked above
-            let results = lexical_search(query, fts, over_fetch)?;
+            let (results, ls) = lexical_search(query, fts, over_fetch)?;
+            lexical_search_secs = ls;
             // If graph expansion is needed, embed the query for HNSW lookup.
             if effective_expand_graph > 0 {
+                let t0 = Instant::now();
                 let embeddings =
                     provider.embed_batch(std::slice::from_ref(&query.query)).await?;
+                embed_secs = t0.elapsed().as_secs_f64();
                 query_embedding = Some(embeddings[0].clone());
             }
             results
@@ -407,8 +417,11 @@ pub async fn search(
                 semantic_search(query, index, provider, over_fetch),
                 async { lexical_search(query, fts, over_fetch) }
             );
-            let (semantic, qvec) = semantic_results?;
-            let lexical = lexical_results?;
+            let (semantic, qvec, es, vs) = semantic_results?;
+            let (lexical, ls) = lexical_results?;
+            embed_secs = es;
+            vector_search_secs = vs;
+            lexical_search_secs = ls;
             query_embedding = Some(qvec);
 
             debug!(
@@ -418,7 +431,10 @@ pub async fn search(
                 "fusing semantic and lexical results via RRF"
             );
 
-            reciprocal_rank_fusion(&semantic, &lexical, rrf_k)
+            let fusion_start = Instant::now();
+            let fused = reciprocal_rank_fusion(&semantic, &lexical, rrf_k);
+            fusion_secs = fusion_start.elapsed().as_secs_f64();
+            fused
         }
     };
 
@@ -428,8 +444,6 @@ pub async fn search(
         SearchMode::Hybrid => normalize_rrf_scores(&mut ranked_candidates, rrf_k, 2),
         SearchMode::Semantic => {} // already [0, 1] cosine similarity
     }
-
-    let search_elapsed = search_start.elapsed();
 
     debug!(
         candidates = ranked_candidates.len(),
@@ -455,7 +469,7 @@ pub async fn search(
     let backlinks = link_graph.as_ref().map(links::compute_backlinks);
 
     // Filter, assemble results, and apply min_score + multi-hop link boost.
-    let boost_start = Instant::now();
+    let assemble_start = Instant::now();
     let results = assemble_results(
         query,
         index,
@@ -470,10 +484,8 @@ pub async fn search(
         backlinks.as_ref(),
         now,
     )?;
-    let boost_elapsed = boost_start.elapsed();
 
     // Graph context expansion: find relevant chunks from linked files.
-    let expansion_start = Instant::now();
     let graph_context = if effective_expand_graph > 0 {
         if let (Some(lg), Some(bl), Some(qe)) = (&link_graph, &backlinks, &query_embedding) {
             expand_graph_context(
@@ -491,7 +503,9 @@ pub async fn search(
     } else {
         Vec::new()
     };
-    let expansion_elapsed = expansion_start.elapsed();
+    let assemble_secs = assemble_start.elapsed().as_secs_f64();
+
+    let total_secs = total_start.elapsed().as_secs_f64();
 
     info!(
         query = %query.query,
@@ -501,54 +515,61 @@ pub async fn search(
         "search complete"
     );
 
+    let timings = SearchTimings {
+        embed_secs,
+        vector_search_secs,
+        lexical_search_secs,
+        fusion_secs,
+        assemble_secs,
+        total_secs,
+    };
+
     Ok(SearchResponse {
         results,
         graph_context,
-        timings: SearchTimings {
-            total_ms: total_start.elapsed().as_millis() as u64,
-            embedding_ms: match effective_mode {
-                SearchMode::Lexical if query_embedding.is_none() => None,
-                _ => Some(search_elapsed.as_millis() as u64),
-            },
-            search_ms: search_elapsed.as_millis() as u64,
-            boost_ms: if effective_boost_links {
-                Some(boost_elapsed.as_millis() as u64)
-            } else {
-                None
-            },
-            expansion_ms: if effective_expand_graph > 0 {
-                Some(expansion_elapsed.as_millis() as u64)
-            } else {
-                None
-            },
-        },
+        timings,
     })
 }
 
-/// Run semantic (HNSW) search and return ranked (chunk_id, score) pairs plus the query embedding.
+/// Run semantic (HNSW) search and return ranked (chunk_id, score) pairs plus the query embedding and timing.
+///
+/// Returns `(candidates, query_vector, embed_secs, vector_search_secs)`.
 async fn semantic_search(
     query: &SearchQuery,
     index: &Index,
     provider: &dyn EmbeddingProvider,
     limit: usize,
-) -> Result<(Vec<(String, f64)>, Vec<f32>)> {
+) -> Result<(Vec<(String, f64)>, Vec<f32>, f64, f64)> {
+    let t0 = Instant::now();
     let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
+    let embed_secs = t0.elapsed().as_secs_f64();
+
+    let t1 = Instant::now();
     let query_vector = embeddings[0].clone();
     let candidates = index.search_vectors(&query_vector, limit)?;
-    Ok((candidates, query_vector))
+    let vector_search_secs = t1.elapsed().as_secs_f64();
+
+    Ok((candidates, query_vector, embed_secs, vector_search_secs))
 }
 
-/// Run lexical (BM25) search and return ranked (chunk_id, score) pairs.
+/// Run lexical (BM25) search and return ranked (chunk_id, score) pairs plus timing.
+///
+/// Returns `(candidates, lexical_search_secs)`.
 fn lexical_search(
     query: &SearchQuery,
     fts_index: &FtsIndex,
     limit: usize,
-) -> Result<Vec<(String, f64)>> {
+) -> Result<(Vec<(String, f64)>, f64)> {
+    let t0 = Instant::now();
     let fts_results = fts_index.search(&query.query, limit)?;
-    Ok(fts_results
-        .into_iter()
-        .map(|r| (r.chunk_id, r.score as f64))
-        .collect())
+    let lexical_search_secs = t0.elapsed().as_secs_f64();
+    Ok((
+        fts_results
+            .into_iter()
+            .map(|r| (r.chunk_id, r.score as f64))
+            .collect(),
+        lexical_search_secs,
+    ))
 }
 
 /// Assemble SearchResult objects from ranked candidates, applying decay, filters, min_score,

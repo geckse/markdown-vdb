@@ -868,9 +868,9 @@ async fn test_search_returns_search_response() {
 
     // Verify the SearchResponse struct has all expected fields.
     assert!(!response.results.is_empty(), "search should return results");
-    // Verify timings are populated (total_ms is u64, so always >= 0; just check it exists).
-    let _total = response.timings.total_ms;
-    let _search = response.timings.search_ms;
+    // Verify timings are populated (total_secs is f64, so always >= 0; just check it exists).
+    let _total = response.timings.total_secs;
+    let _search = response.timings.vector_search_secs;
     // graph_context should be empty when expand_graph is 0 (default).
     assert!(response.graph_context.is_empty(), "graph_context should be empty without expansion");
 }
@@ -893,8 +893,8 @@ async fn test_search_response_json_serialization() {
     assert!(parsed["results"].is_array(), "'results' should be an array");
     assert!(parsed.get("timings").is_some(), "should have 'timings' key");
     assert!(parsed["timings"].is_object(), "'timings' should be an object");
-    assert!(parsed["timings"].get("total_ms").is_some(), "timings should have 'total_ms'");
-    assert!(parsed["timings"].get("search_ms").is_some(), "timings should have 'search_ms'");
+    assert!(parsed["timings"].get("total_secs").is_some(), "timings should have 'total_secs'");
+    assert!(parsed["timings"].get("embed_secs").is_some(), "timings should have 'embed_secs'");
 
     // graph_context is empty, so it should be skipped due to skip_serializing_if.
     assert!(

@@ -29,6 +29,7 @@ pub fn init_silent() -> Result<(), Error> {
 /// `verbosity` controls the default log level (0 = warn … 3+ = trace).
 /// The `RUST_LOG` environment variable, when set, overrides the verbosity
 /// flag entirely.
+/// Logs always go to stderr so they never contaminate stdout (important for JSON mode).
 pub fn init(verbosity: u8) -> Result<(), Error> {
     let filter = if std::env::var("RUST_LOG").is_ok() {
         EnvFilter::from_default_env()
@@ -38,6 +39,7 @@ pub fn init(verbosity: u8) -> Result<(), Error> {
     };
 
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .try_init()
         .map_err(|e| Error::Logging(e.to_string()))
