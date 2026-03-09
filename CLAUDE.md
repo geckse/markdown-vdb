@@ -189,6 +189,8 @@ cargo run -- search "query" --json  # Test search
 
 ## PRD Reference
 
+NEVER EVER REMOVE ANY PRDS.
+
 Full specifications for all 18 phases live in `docs/prds/`. These document the design intent and acceptance criteria for each subsystem.
 
 | Phase | PRD | Summary |
