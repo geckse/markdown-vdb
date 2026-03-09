@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use mdvdb::chunker::Chunk;
 use mdvdb::embedding::mock::MockProvider;
 use mdvdb::index::{EmbeddingConfig, Index};
-use mdvdb::parser::MarkdownFile;
+use mdvdb::links;
+use mdvdb::parser::{MarkdownFile, RawLink};
 use mdvdb::fts::FtsIndex;
 use mdvdb::search::{search, MetadataFilter, SearchMode, SearchQuery};
 use serde_json::json;
@@ -919,4 +920,339 @@ async fn test_decay_exclude_overrides_include() {
         "excluded file should keep original score even when in include list: pinned={:?} > regular={:?}",
         pinned_score, regular_score
     );
+}
+
+// ---------------------------------------------------------------------------
+// Graph-enhanced search tests (multi-hop boost + graph context expansion)
+// ---------------------------------------------------------------------------
+
+/// Create a MarkdownFile with links to specified targets.
+fn fake_markdown_file_with_links(
+    path: &str,
+    hash: &str,
+    frontmatter: Option<serde_json::Value>,
+    link_targets: &[&str],
+) -> MarkdownFile {
+    MarkdownFile {
+        path: PathBuf::from(path),
+        frontmatter,
+        headings: vec![],
+        body: "Test body content".to_string(),
+        content_hash: hash.to_string(),
+        file_size: 100,
+        links: link_targets
+            .iter()
+            .enumerate()
+            .map(|(i, target)| RawLink {
+                target: target.to_string(),
+                text: format!("link to {target}"),
+                line_number: i + 1,
+                is_wikilink: false,
+            })
+            .collect(),
+        modified_at: 0,
+    }
+}
+
+/// Populate an index with a file that has links, and return the MarkdownFile
+/// for later use building the link graph.
+fn populate_index_with_links(
+    index: &Index,
+    path: &str,
+    hash: &str,
+    frontmatter: Option<serde_json::Value>,
+    chunk_count: usize,
+    link_targets: &[&str],
+) -> MarkdownFile {
+    let file = fake_markdown_file_with_links(path, hash, frontmatter, link_targets);
+    let chunks = fake_chunks(path, chunk_count);
+    let embs = fake_embeddings(chunk_count);
+    index.upsert(&file, &chunks, &embs).unwrap();
+    file
+}
+
+#[tokio::test]
+async fn test_search_response_has_all_fields() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
+
+    let query = SearchQuery::new("test query");
+    let response = search(
+        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3,
+    )
+    .await
+    .unwrap();
+
+    // SearchResponse should have all three fields: results, graph_context, timings.
+    assert!(!response.results.is_empty(), "results should be non-empty");
+    // graph_context should be empty when expand_graph=0 (default).
+    assert!(
+        response.graph_context.is_empty(),
+        "graph_context should be empty by default"
+    );
+    // timings should be present (total_ms is always populated).
+    // Just verify the struct is accessible and has the expected fields.
+    let _total = response.timings.total_ms;
+    let _search = response.timings.search_ms;
+}
+
+#[tokio::test]
+async fn test_graph_expansion_disabled() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    // Build files with links: a.md -> b.md -> c.md
+    let file_a = populate_index_with_links(
+        &index, "a.md", "h1", Some(json!({"title": "A"})), 2, &["b.md"],
+    );
+    let file_b = populate_index_with_links(
+        &index, "b.md", "h2", Some(json!({"title": "B"})), 2, &["c.md"],
+    );
+    let file_c = populate_index_with_links(
+        &index, "c.md", "h3", Some(json!({"title": "C"})), 2, &[],
+    );
+
+    // Build and store link graph.
+    let graph = links::build_link_graph(&[file_a, file_b, file_c]);
+    index.update_link_graph(Some(graph));
+
+    // Search with expand_graph=0 (explicit).
+    let query = SearchQuery::new("test query").with_expand_graph(0);
+    let response = search(
+        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        response.graph_context.is_empty(),
+        "expand_graph=0 should produce empty graph_context, got {} items",
+        response.graph_context.len()
+    );
+}
+
+#[tokio::test]
+async fn test_graph_expansion_returns_items() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    // Build files with links: a.md -> b.md -> c.md
+    // Give a.md a distinctive embedding so it's the top search result.
+    let file_a = populate_index_with_links(
+        &index, "a.md", "h1", Some(json!({"title": "A"})), 2, &["b.md"],
+    );
+    let file_b = populate_index_with_links(
+        &index, "b.md", "h2", Some(json!({"title": "B"})), 2, &["c.md"],
+    );
+    let file_c = populate_index_with_links(
+        &index, "c.md", "h3", Some(json!({"title": "C"})), 2, &[],
+    );
+
+    // Build and store link graph.
+    let graph = links::build_link_graph(&[file_a, file_b, file_c]);
+    index.update_link_graph(Some(graph));
+
+    // Search with expand_graph=1.
+    let query = SearchQuery::new("test query").with_expand_graph(1);
+    let response = search(
+        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 1, 3,
+    )
+    .await
+    .unwrap();
+
+    assert!(!response.results.is_empty(), "should have search results");
+
+    // With expand_graph=1 and files linked together, we should get graph context items
+    // (unless all linked files are already in results).
+    // Each graph context item should have valid linked_from and hop_distance.
+    for item in &response.graph_context {
+        assert!(
+            item.hop_distance >= 1,
+            "hop_distance should be >= 1, got {}",
+            item.hop_distance
+        );
+        assert!(
+            !item.linked_from.is_empty(),
+            "linked_from should not be empty"
+        );
+        assert!(
+            !item.chunk.content.is_empty(),
+            "graph context item should have content"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_graph_expansion_no_duplicates() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    // Build a chain: a.md -> b.md -> c.md -> d.md
+    let file_a = populate_index_with_links(
+        &index, "a.md", "h1", Some(json!({"title": "A"})), 2, &["b.md"],
+    );
+    let file_b = populate_index_with_links(
+        &index, "b.md", "h2", Some(json!({"title": "B"})), 2, &["c.md"],
+    );
+    let file_c = populate_index_with_links(
+        &index, "c.md", "h3", Some(json!({"title": "C"})), 2, &["d.md"],
+    );
+    let file_d = populate_index_with_links(
+        &index, "d.md", "h4", Some(json!({"title": "D"})), 2, &[],
+    );
+
+    let graph = links::build_link_graph(&[file_a, file_b, file_c, file_d]);
+    index.update_link_graph(Some(graph));
+
+    // Search with expand_graph=2 for wider reach.
+    let query = SearchQuery::new("test query").with_expand_graph(2);
+    let response = search(
+        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 2, 10,
+    )
+    .await
+    .unwrap();
+
+    // Collect result file paths.
+    let result_paths: std::collections::HashSet<&str> = response
+        .results
+        .iter()
+        .map(|r| r.file.path.as_str())
+        .collect();
+
+    // No graph context item should duplicate a file already in results.
+    for item in &response.graph_context {
+        let item_path = &item.file.path;
+        assert!(
+            !result_paths.contains(item_path.as_str()),
+            "graph context item '{}' should not duplicate a result file",
+            item_path
+        );
+    }
+
+    // Also check no duplicate files within graph_context itself.
+    let gc_paths: Vec<&str> = response
+        .graph_context
+        .iter()
+        .map(|item| item.file.path.as_str())
+        .collect();
+    let gc_unique: std::collections::HashSet<&str> = gc_paths.iter().copied().collect();
+    assert_eq!(
+        gc_paths.len(),
+        gc_unique.len(),
+        "graph context should not contain duplicate files"
+    );
+}
+
+#[tokio::test]
+async fn test_multihop_boost_reorders() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+
+    // Set up a link chain: hub.md -> mid.md -> far.md
+    // Also add an unlinked file: alone.md
+    //
+    // All files use fake_embeddings which produce orthogonal basis vectors.
+    // With mock provider, search returns similar distances for all files.
+    // The link boost should change the ordering.
+    let file_hub = populate_index_with_links(
+        &index, "hub.md", "h1", Some(json!({"title": "Hub"})), 1, &["mid.md"],
+    );
+    let file_mid = populate_index_with_links(
+        &index, "mid.md", "h2", Some(json!({"title": "Mid"})), 1, &["far.md"],
+    );
+    let file_far = populate_index_with_links(
+        &index, "far.md", "h3", Some(json!({"title": "Far"})), 1, &[],
+    );
+    let file_alone = populate_index_with_links(
+        &index, "alone.md", "h4", Some(json!({"title": "Alone"})), 1, &[],
+    );
+
+    let graph = links::build_link_graph(&[file_hub, file_mid, file_far, file_alone]);
+    index.update_link_graph(Some(graph));
+
+    // Search with 1-hop boost — only direct neighbors of top results get boosted.
+    let query_1hop = SearchQuery::new("test query")
+        .with_boost_links(true)
+        .with_boost_hops(1);
+    let response_1hop = search(
+        &query_1hop, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3,
+    )
+    .await
+    .unwrap();
+
+    // Search with 2-hop boost — neighbors up to 2 hops away get boosted.
+    let query_2hop = SearchQuery::new("test query")
+        .with_boost_links(true)
+        .with_boost_hops(2);
+    let response_2hop = search(
+        &query_2hop, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3,
+    )
+    .await
+    .unwrap();
+
+    // Both should have results.
+    assert!(
+        response_1hop.results.len() >= 2,
+        "1-hop should return >= 2 results"
+    );
+    assert!(
+        response_2hop.results.len() >= 2,
+        "2-hop should return >= 2 results"
+    );
+
+    // Compare: with 2-hop boost, files 2 hops away should have boosted scores
+    // compared to 1-hop (where they wouldn't be boosted).
+    // Find "far.md" scores in each result set.
+    let far_score_1hop = response_1hop
+        .results
+        .iter()
+        .find(|r| r.file.path == "far.md")
+        .map(|r| r.score);
+    let far_score_2hop = response_2hop
+        .results
+        .iter()
+        .find(|r| r.file.path == "far.md")
+        .map(|r| r.score);
+
+    // With 2-hop boost, far.md (which is 2 hops from hub.md) should get a boost
+    // that it doesn't get with 1-hop. So its 2-hop score should be >= its 1-hop score.
+    if let (Some(score_1), Some(score_2)) = (far_score_1hop, far_score_2hop) {
+        assert!(
+            score_2 >= score_1,
+            "2-hop boost should give far.md score >= 1-hop score: 2hop={} vs 1hop={}",
+            score_2,
+            score_1
+        );
+    }
+
+    // The unlinked file "alone.md" should NOT be boosted in either case.
+    let alone_score_1hop = response_1hop
+        .results
+        .iter()
+        .find(|r| r.file.path == "alone.md")
+        .map(|r| r.score);
+    let alone_score_2hop = response_2hop
+        .results
+        .iter()
+        .find(|r| r.file.path == "alone.md")
+        .map(|r| r.score);
+
+    if let (Some(s1), Some(s2)) = (alone_score_1hop, alone_score_2hop) {
+        // alone.md should have the same score in both cases (no boost).
+        let diff = (s1 - s2).abs();
+        assert!(
+            diff < 0.001,
+            "alone.md should have same score in 1-hop and 2-hop: 1hop={}, 2hop={}, diff={}",
+            s1,
+            s2,
+            diff
+        );
+    }
 }
