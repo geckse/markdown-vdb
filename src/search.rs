@@ -74,6 +74,10 @@ pub struct SearchQuery {
     pub decay_exclude: Option<Vec<String>>,
     /// Per-query override for decay include patterns (None = use config default).
     pub decay_include: Option<Vec<String>>,
+    /// Per-query override for link boost hop depth (None = use config default).
+    pub boost_hops: Option<usize>,
+    /// Per-query override for graph context expansion depth (None = use config default).
+    pub expand_graph: Option<usize>,
 }
 
 impl SearchQuery {
@@ -91,6 +95,8 @@ impl SearchQuery {
             decay_half_life: None,
             decay_exclude: None,
             decay_include: None,
+            boost_hops: None,
+            expand_graph: None,
         }
     }
 
@@ -151,6 +157,18 @@ impl SearchQuery {
     /// Set path prefixes where time decay applies (whitelist) for this query.
     pub fn with_decay_include(mut self, patterns: Vec<String>) -> Self {
         self.decay_include = Some(patterns);
+        self
+    }
+
+    /// Set the link boost hop depth for this query (1–3).
+    pub fn with_boost_hops(mut self, hops: usize) -> Self {
+        self.boost_hops = Some(hops);
+        self
+    }
+
+    /// Set the graph context expansion depth for this query (0–3).
+    pub fn with_expand_graph(mut self, depth: usize) -> Self {
+        self.expand_graph = Some(depth);
         self
     }
 }
@@ -218,6 +236,53 @@ pub struct SearchResultFile {
     pub path_components: Vec<String>,
     /// Filesystem modification time as Unix timestamp, if available.
     pub modified_at: Option<u64>,
+}
+
+/// A graph context item representing a chunk from a file linked to a search result.
+///
+/// These are injected as supplementary context, separate from the ranked results,
+/// when graph context expansion is enabled.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphContextItem {
+    /// The matched chunk from the linked file.
+    pub chunk: SearchResultChunk,
+    /// File-level metadata for the linked file.
+    pub file: SearchResultFile,
+    /// Path of the result file this item is linked from.
+    pub linked_from: String,
+    /// Number of link hops from the result file (1 = direct link).
+    pub hop_distance: usize,
+}
+
+/// Timing information for search operations.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchTimings {
+    /// Total time for the search operation in milliseconds.
+    pub total_ms: u64,
+    /// Time spent computing embeddings in milliseconds (None for lexical mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_ms: Option<u64>,
+    /// Time spent on vector/text search in milliseconds.
+    pub search_ms: u64,
+    /// Time spent on link boosting in milliseconds (None if not applied).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boost_ms: Option<u64>,
+    /// Time spent on graph context expansion in milliseconds (None if not applied).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expansion_ms: Option<u64>,
+}
+
+/// Wrapper response for search operations, containing ranked results,
+/// optional graph context items, and timing information.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResponse {
+    /// Ranked search results ordered by relevance score.
+    pub results: Vec<SearchResult>,
+    /// Supplementary chunks from linked files (graph context expansion).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub graph_context: Vec<GraphContextItem>,
+    /// Timing breakdown for the search operation.
+    pub timings: SearchTimings,
 }
 
 /// Apply exponential time decay to a score based on file age.
