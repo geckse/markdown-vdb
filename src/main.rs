@@ -185,6 +185,14 @@ struct SearchArgs {
     /// Comma-separated path prefixes where time decay applies (whitelist)
     #[arg(long, value_name = "PATTERNS")]
     decay_include: Option<String>,
+
+    /// Number of link hops for graph-aware boosting (1-3, requires --boost-links)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=3), requires = "boost_links")]
+    hops: Option<u8>,
+
+    /// Graph expansion depth for context (0-3, 0 disables)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=3))]
+    expand: Option<u8>,
 }
 
 #[derive(Parser)]
@@ -391,6 +399,12 @@ async fn run() -> anyhow::Result<()> {
             if let Some(ref patterns) = args.decay_include {
                 let list: Vec<String> = patterns.split(',').map(|s| s.trim().to_string()).collect();
                 query = query.with_decay_include(list);
+            }
+            if let Some(hops) = args.hops {
+                query = query.with_boost_hops(hops as usize);
+            }
+            if let Some(expand) = args.expand {
+                query = query.with_expand_graph(expand as usize);
             }
 
             let effective_mode = query.mode;
@@ -777,7 +791,7 @@ _mdvdb() {
             COMPREPLY=($(compgen -W "--reindex --preview --file --full --help" -- "$cur"))
             ;;
         search)
-            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --decay-exclude --decay-include --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --decay-exclude --decay-include --hops --expand --help" -- "$cur"))
             ;;
         tree)
             COMPREPLY=($(compgen -W "--path --help" -- "$cur"))
@@ -854,7 +868,9 @@ _mdvdb() {
                         '--no-decay[Disable time decay]' \
                         '--decay-half-life[Half-life in days]:days:' \
                         '--decay-exclude[Path prefixes excluded from decay]:patterns:' \
-                        '--decay-include[Path prefixes where decay applies]:patterns:'
+                        '--decay-include[Path prefixes where decay applies]:patterns:' \
+                        '--hops[Number of link hops for graph boosting (1-3)]:hops:' \
+                        '--expand[Graph expansion depth for context (0-3)]:depth:'
                     ;;
             esac
             ;;
@@ -907,6 +923,8 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l no-decay -d 'Disabl
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-half-life -d 'Half-life in days' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-exclude -d 'Path prefixes excluded from decay' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-include -d 'Path prefixes where decay applies' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l hops -d 'Number of link hops for graph boosting (1-3)' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l expand -d 'Graph expansion depth for context (0-3)' -r
 
 # Init subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'
