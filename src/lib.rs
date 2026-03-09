@@ -24,7 +24,10 @@ pub use schema::{FieldType, Schema, SchemaField};
 pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
-pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
+pub use links::{
+    LinkEntry, LinkGraph, LinkQueryResult, LinkState, NeighborhoodNode, NeighborhoodResult,
+    OrphanFile, ResolvedLink,
+};
 pub use tree::{FileState, FileTree, FileTreeNode};
 pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
 // Graph visualization types are defined in this file and automatically public.
