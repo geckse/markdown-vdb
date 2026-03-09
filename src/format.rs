@@ -2,7 +2,7 @@ use colored::Colorize;
 use serde_json::Value;
 use std::time::SystemTime;
 
-use mdvdb::search::SearchResult;
+use mdvdb::search::{GraphContextItem, SearchResult};
 use mdvdb::schema::{FieldType, Schema};
 use mdvdb::links::{LinkQueryResult, LinkState, NeighborhoodResult, OrphanFile, ResolvedLink};
 use mdvdb::tree::FileTree;
@@ -232,6 +232,69 @@ pub fn print_search_results(results: &[SearchResult], query: &str) {
 
         println!();
     }
+}
+
+/// Print graph context items grouped by hop distance.
+///
+/// Shows a separator per hop level and for each item: an arrow, the linked-from
+/// file path, section heading, line range, and a content preview.
+pub fn print_graph_context(items: &[GraphContextItem]) {
+    if items.is_empty() {
+        return;
+    }
+
+    // Collect unique hop distances, sorted.
+    let mut hops: Vec<usize> = items.iter().map(|i| i.hop_distance).collect();
+    hops.sort_unstable();
+    hops.dedup();
+
+    for hop in hops {
+        let hop_items: Vec<&GraphContextItem> =
+            items.iter().filter(|i| i.hop_distance == hop).collect();
+
+        let hop_label = if hop == 1 { "1 hop" } else { &format!("{hop} hops") };
+        println!(
+            "\n  {}",
+            format!("─── Graph Context ({hop_label}) ───").dimmed()
+        );
+
+        for item in &hop_items {
+            // Arrow + linked-from path + target file path
+            println!(
+                "\n  {} {} {} {}",
+                "→".cyan().bold(),
+                item.linked_from.dimmed(),
+                "→".dimmed(),
+                item.file.path.bold()
+            );
+
+            // Section heading
+            if !item.chunk.heading_hierarchy.is_empty() {
+                println!(
+                    "     {} {}",
+                    "Section:".dimmed(),
+                    item.chunk.heading_hierarchy.join(" > ").cyan()
+                );
+            }
+
+            // Line range
+            let line_range = format!("{}-{}", item.chunk.start_line, item.chunk.end_line);
+            println!(
+                "     {} {}",
+                "Lines:".dimmed(),
+                line_range
+            );
+
+            // Content preview (first 150 chars, dimmed)
+            let preview: String = item.chunk.content.chars().take(150).collect();
+            let preview = preview.replace('\n', " ");
+            if !preview.is_empty() {
+                println!("     {}", preview.dimmed());
+            }
+        }
+    }
+
+    println!();
 }
 
 /// Print ingest results with colored formatting to stdout.
@@ -1105,8 +1168,8 @@ pub fn print_graph_summary(data: &GraphData) {
 
 /// Print a multi-hop link neighborhood with tree-structured output.
 ///
-/// Shows outgoing and incoming link trees with depth indicators.
-/// Placeholder implementation — will be fully implemented in subtask-4-3.
+/// Shows outgoing and incoming link trees with ├──/└── connectors,
+/// depth indentation, and [broken] badges.
 pub fn print_link_neighborhood(result: &NeighborhoodResult) {
     println!(
         "\n  {} {} (depth: outgoing={}, incoming={})\n",
@@ -1127,14 +1190,20 @@ pub fn print_link_neighborhood(result: &NeighborhoodResult) {
             "none".to_string()
         }
     );
-    for (i, node) in result.outgoing.iter().enumerate() {
-        let connector = if i == result.outgoing.len() - 1 { "└──" } else { "├──" };
-        let badge = match node.state {
-            LinkState::Broken => format!(" {}", "[broken]".red()),
-            _ => String::new(),
-        };
-        println!("    {} {}{}", connector.dimmed(), node.path, badge);
-        print_neighborhood_children(&node.children, "    ", i == result.outgoing.len() - 1);
+    if result.outgoing.is_empty() {
+        println!("  {} {}", "└──".dimmed(), "(none)".dimmed());
+    } else {
+        for (i, node) in result.outgoing.iter().enumerate() {
+            let is_last = i == result.outgoing.len() - 1;
+            let connector = if is_last { "└──" } else { "├──" };
+            let badge = match node.state {
+                LinkState::Broken => format!(" {}", "[broken]".red()),
+                _ => String::new(),
+            };
+            println!("  {} {}{}", connector.dimmed(), node.path.bold(), badge);
+            let child_prefix = if is_last { "      " } else { "  │   " };
+            print_neighborhood_children(&node.children, child_prefix);
+        }
     }
 
     // Incoming tree
@@ -1148,35 +1217,50 @@ pub fn print_link_neighborhood(result: &NeighborhoodResult) {
             "none".to_string()
         }
     );
-    for (i, node) in result.incoming.iter().enumerate() {
-        let connector = if i == result.incoming.len() - 1 { "└──" } else { "├──" };
-        let badge = match node.state {
-            LinkState::Broken => format!(" {}", "[broken]".red()),
-            _ => String::new(),
-        };
-        println!("    {} {}{}", connector.dimmed(), node.path, badge);
-        print_neighborhood_children(&node.children, "    ", i == result.incoming.len() - 1);
+    if result.incoming.is_empty() {
+        println!("  {} {}", "└──".dimmed(), "(none)".dimmed());
+    } else {
+        for (i, node) in result.incoming.iter().enumerate() {
+            let is_last = i == result.incoming.len() - 1;
+            let connector = if is_last { "└──" } else { "├──" };
+            let badge = match node.state {
+                LinkState::Broken => format!(" {}", "[broken]".red()),
+                _ => String::new(),
+            };
+            println!("  {} {}{}", connector.dimmed(), node.path.bold(), badge);
+            let child_prefix = if is_last { "      " } else { "  │   " };
+            print_neighborhood_children(&node.children, child_prefix);
+        }
     }
 
+    // Summary
+    println!();
+    println!(
+        "  {} outgoing, {} incoming",
+        result.outgoing_count.to_string().yellow(),
+        result.incoming_count.to_string().yellow()
+    );
     println!();
 }
 
 /// Recursively print children of a neighborhood node with tree connectors.
+///
+/// Uses the accumulated `prefix` string for proper depth indentation,
+/// appending `│   ` or `    ` depending on position in the tree.
 fn print_neighborhood_children(
     children: &[mdvdb::links::NeighborhoodNode],
     prefix: &str,
-    is_last_parent: bool,
 ) {
-    let branch = if is_last_parent { "    " } else { "│   " };
-    let next_prefix = format!("{}{}", prefix, branch);
     for (i, child) in children.iter().enumerate() {
-        let connector = if i == children.len() - 1 { "└──" } else { "├──" };
+        let is_last = i == children.len() - 1;
+        let connector = if is_last { "└──" } else { "├──" };
         let badge = match child.state {
             LinkState::Broken => format!(" {}", "[broken]".red()),
             _ => String::new(),
         };
-        println!("    {} {}{}", connector.dimmed(), child.path, badge);
-        print_neighborhood_children(&child.children, &next_prefix, i == children.len() - 1);
+        println!("{}{} {}{}", prefix, connector.dimmed(), child.path, badge);
+        let next_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+        print_neighborhood_children(&child.children, &next_prefix);
     }
 }
 

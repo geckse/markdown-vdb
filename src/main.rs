@@ -426,6 +426,9 @@ async fn run() -> anyhow::Result<()> {
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_search_results(&response.results, &args.query);
+                if !response.graph_context.is_empty() {
+                    format::print_graph_context(&response.graph_context);
+                }
             }
         }
         Some(Commands::Ingest(args)) => {
