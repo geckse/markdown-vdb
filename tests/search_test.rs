@@ -117,7 +117,7 @@ async fn test_basic_search() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(!results.is_empty(), "should return results");
     assert!(results.len() <= 10, "default limit is 10");
@@ -139,7 +139,7 @@ async fn test_min_score_filtering() {
 
     // Very high min_score should filter out everything
     let query = SearchQuery::new("test query").with_min_score(0.9999);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     // All results (if any) must meet the threshold
     for r in &results {
@@ -158,7 +158,7 @@ async fn test_limit_capping() {
     populate_index(&index, "b.md", "h2", Some(json!({"title": "B"})), 5);
 
     let query = SearchQuery::new("test").with_limit(3);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(results.len() <= 3, "should respect limit of 3, got {}", results.len());
 }
@@ -177,7 +177,7 @@ async fn test_metadata_filter_equals() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -200,7 +200,7 @@ async fn test_metadata_filter_in() {
             field: "category".into(),
             values: vec![json!("rust"), json!("go")],
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         let cat = r.file.frontmatter.as_ref().unwrap()["category"].as_str().unwrap();
@@ -223,7 +223,7 @@ async fn test_metadata_filter_range() {
             min: Some(json!(2023)),
             max: Some(json!(2025)),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         let year = r.file.frontmatter.as_ref().unwrap()["year"].as_i64().unwrap();
@@ -244,7 +244,7 @@ async fn test_metadata_filter_exists() {
         .with_filter(MetadataFilter::Exists {
             field: "author".into(),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -272,7 +272,7 @@ async fn test_combined_and_filters() {
             min: Some(json!(2023)),
             max: Some(json!(2025)),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -289,7 +289,7 @@ async fn test_empty_index_returns_no_results() {
     let provider = mock_provider();
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(results.is_empty(), "empty index should return no results");
 }
@@ -303,7 +303,7 @@ async fn test_empty_query_returns_no_results() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(results.is_empty(), "empty query should return no results");
 }
@@ -359,7 +359,7 @@ async fn test_search_with_fts_hybrid_mode() {
     );
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Hybrid);
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(!results.is_empty(), "hybrid search should return results");
 }
@@ -386,7 +386,7 @@ async fn test_search_lexical_mode() {
     );
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(!results.is_empty(), "lexical search should return results");
 }
@@ -400,7 +400,7 @@ async fn test_search_semantic_mode_explicit() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("test query").with_mode(SearchMode::Semantic);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(!results.is_empty(), "semantic search should return results");
 }
@@ -415,7 +415,7 @@ async fn test_search_hybrid_fallback_without_fts() {
 
     // Hybrid mode without FTS index should fall back to semantic
     let query = SearchQuery::new("test query").with_mode(SearchMode::Hybrid);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(!results.is_empty(), "hybrid without fts should fall back to semantic");
 }
@@ -443,7 +443,7 @@ async fn test_search_mode_with_filter() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -476,7 +476,7 @@ async fn test_lexical_search_no_embedding_call() {
     let initial_calls = provider.call_count();
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
-    let _results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (_results, _timings) = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert_eq!(
         provider.call_count(),
@@ -532,11 +532,11 @@ async fn test_hybrid_combines_both_signals() {
 
     // Hybrid search for "Rust programming" — should find results from both signals.
     let query_hybrid = SearchQuery::new("Rust programming").with_mode(SearchMode::Hybrid);
-    let hybrid_results = search(&query_hybrid, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (hybrid_results, _timings) = search(&query_hybrid, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     // Lexical search for the same query.
     let query_lexical = SearchQuery::new("Rust programming").with_mode(SearchMode::Lexical);
-    let lexical_results = search(&query_lexical, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (lexical_results, _timings) = search(&query_lexical, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     // Both should return results.
     assert!(!hybrid_results.is_empty(), "hybrid should return results");
@@ -564,7 +564,7 @@ async fn test_path_prefix_filters_results() {
     populate_index(&index, "notes/todo.md", "h3", Some(json!({"title": "Todo"})), 2);
 
     let query = SearchQuery::new("test").with_path_prefix("docs/");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(!results.is_empty(), "should return results from docs/");
     for r in &results {
@@ -585,7 +585,7 @@ async fn test_path_prefix_no_match() {
     populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
 
     let query = SearchQuery::new("test").with_path_prefix("nonexistent/");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(results.is_empty(), "nonexistent prefix should return no results");
 }
@@ -606,7 +606,7 @@ async fn test_path_prefix_combined_with_metadata_filter() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         assert!(
@@ -640,7 +640,7 @@ async fn test_decay_disabled_does_not_change_results() {
 
     // Search without decay.
     let query = SearchQuery::new("test query");
-    let results_no_decay = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results_no_decay, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
     assert!(!results_no_decay.is_empty());
 
     // All scores should be unaffected by age (same content gets same score).
@@ -667,7 +667,7 @@ async fn test_decay_enabled_penalizes_old_files() {
 
     // Search with decay enabled.
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false).await.unwrap();
 
     assert!(results.len() >= 2, "should return results for both files");
 
@@ -700,7 +700,7 @@ async fn test_decay_per_query_override_enables() {
 
     // Config says decay disabled (false), but query enables it.
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
     let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
@@ -728,7 +728,7 @@ async fn test_decay_per_query_override_disables() {
 
     // Config says decay enabled (true), but query disables it.
     let query = SearchQuery::new("test query").with_decay(false);
-    let results_no_decay = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false).await.unwrap();
+    let (results_no_decay, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false).await.unwrap();
 
     // Without decay, both should have comparable scores (same mock embeddings).
     let recent = results_no_decay.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
@@ -756,7 +756,7 @@ async fn test_decay_custom_half_life() {
 
     // Very short half-life (7 days) should punish 90-day old file severely.
     let query = SearchQuery::new("test query").with_decay(true).with_decay_half_life(7.0);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
     let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
@@ -781,7 +781,7 @@ async fn test_decay_modified_at_in_results() {
     populate_index_with_mtime(&index, "doc.md", "h1", None, 1, mtime);
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false).await.unwrap();
 
     assert!(!results.is_empty());
     assert_eq!(results[0].file.modified_at, Some(mtime), "modified_at should be populated in results");
@@ -803,7 +803,7 @@ async fn test_decay_scores_in_valid_range() {
     populate_index_with_mtime(&index, "c.md", "h3", None, 1, now - 365 * 86400);
 
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false).await.unwrap();
+    let (results, _timings) = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false).await.unwrap();
 
     for r in &results {
         assert!(r.score >= 0.0, "score should be >= 0, got {}", r.score);
@@ -832,7 +832,7 @@ async fn test_decay_exclude_preserves_score() {
 
     // Search with decay enabled but docs/reference excluded.
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(
+    let (results, _timings) = search(
         &query, &index, &provider, None, 60.0, 1.5, true, 90.0,
         &exclude, &[], false,
     ).await.unwrap();
@@ -868,7 +868,7 @@ async fn test_decay_include_only_affects_matching_paths() {
 
     // Search with decay enabled but only for journal/ paths.
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(
+    let (results, _timings) = search(
         &query, &index, &provider, None, 60.0, 1.5, true, 90.0,
         &[], &include, false,
     ).await.unwrap();
@@ -904,7 +904,7 @@ async fn test_decay_exclude_overrides_include() {
     let include = vec!["journal/".to_string()];
 
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(
+    let (results, _timings) = search(
         &query, &index, &provider, None, 60.0, 1.5, true, 90.0,
         &exclude, &include, false,
     ).await.unwrap();

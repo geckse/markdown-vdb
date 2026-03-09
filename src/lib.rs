@@ -21,7 +21,7 @@ pub use error::Error;
 pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
+pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
@@ -139,6 +139,23 @@ impl std::fmt::Debug for IngestOptions {
     }
 }
 
+/// Per-phase timing breakdown for ingestion operations.
+#[derive(Debug, Clone, Serialize)]
+pub struct IngestTimings {
+    /// Time spent discovering markdown files.
+    pub discover_secs: f64,
+    /// Time spent parsing files, computing hashes, and chunking.
+    pub parse_secs: f64,
+    /// Time spent calling the embedding provider API.
+    pub embed_secs: f64,
+    /// Time spent upserting chunks into the vector index and FTS.
+    pub upsert_secs: f64,
+    /// Time spent saving the index to disk and committing FTS.
+    pub save_secs: f64,
+    /// Total wall-clock time (equals duration_secs).
+    pub total_secs: f64,
+}
+
 /// Result of an ingestion operation.
 #[derive(Debug, Clone, Serialize)]
 pub struct IngestResult {
@@ -158,6 +175,9 @@ pub struct IngestResult {
     pub errors: Vec<IngestError>,
     /// Wall-clock duration of the ingestion in seconds.
     pub duration_secs: f64,
+    /// Per-phase timing breakdown (always populated; CLI decides whether to display).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timings: Option<IngestTimings>,
     /// Whether the ingestion was cancelled before completion.
     pub cancelled: bool,
 }
@@ -561,6 +581,7 @@ impl MarkdownVdb {
 
         emit(&IngestPhase::Discovering);
 
+        let discover_start = std::time::Instant::now();
         let disco = discovery::FileDiscovery::new(&self.root, &self.config);
 
         // Discover files to process.
@@ -577,6 +598,7 @@ impl MarkdownVdb {
         } else {
             disco.discover()?
         };
+        let discover_secs = discover_start.elapsed().as_secs_f64();
 
         info!(files = discovered.len(), "discovered markdown files");
 
@@ -588,7 +610,7 @@ impl MarkdownVdb {
                 files_indexed: 0, files_skipped: 0, files_removed: 0,
                 chunks_created: 0, api_calls: 0, files_failed: 0,
                 errors: Vec::new(), duration_secs: start_time.elapsed().as_secs_f64(),
-                cancelled: true,
+                timings: None, cancelled: true,
             });
         }
 
@@ -625,6 +647,7 @@ impl MarkdownVdb {
             files_failed: 0,
             errors: Vec::new(),
             duration_secs: 0.0,
+            timings: None,
             cancelled: false,
         };
 
@@ -636,6 +659,7 @@ impl MarkdownVdb {
         let mut discovered_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        let parse_start = std::time::Instant::now();
         let total_files = discovered.len();
         for (file_idx, path) in discovered.iter().enumerate() {
             let path_str = path.to_string_lossy().to_string();
@@ -710,6 +734,8 @@ impl MarkdownVdb {
             parsed_files.insert(path.clone(), (md, chunks));
         }
 
+        let parse_secs = parse_start.elapsed().as_secs_f64();
+
         // Check cancellation after parsing.
         if is_cancelled() {
             result.cancelled = true;
@@ -729,6 +755,7 @@ impl MarkdownVdb {
             .map(|c| (c.source_path.clone(), "changed".to_string()))
             .collect();
 
+        let embed_start = std::time::Instant::now();
         let embed_result = embedding::batch::embed_chunks(
             self.ensure_provider()?.as_ref(),
             &all_batch_chunks,
@@ -738,6 +765,7 @@ impl MarkdownVdb {
             None,
         )
         .await?;
+        let embed_secs = embed_start.elapsed().as_secs_f64();
 
         result.api_calls = embed_result.api_calls;
 
@@ -751,6 +779,7 @@ impl MarkdownVdb {
         }
 
         // Upsert files with their embeddings.
+        let upsert_start = std::time::Instant::now();
         for (path, (md, chunks)) in &parsed_files {
             let embeddings: Vec<Vec<f32>> = chunks
                 .iter()
@@ -872,8 +901,11 @@ impl MarkdownVdb {
             }
         }
 
+        let upsert_secs = upsert_start.elapsed().as_secs_f64();
+
         // Save vector index first (atomic write-rename), then commit FTS.
         emit(&IngestPhase::Saving);
+        let save_start = std::time::Instant::now();
         self.index.save()?;
         self.fts_index.commit()?;
 
@@ -924,7 +956,17 @@ impl MarkdownVdb {
             }
         }
 
+        let save_secs = save_start.elapsed().as_secs_f64();
+
         result.duration_secs = start_time.elapsed().as_secs_f64();
+        result.timings = Some(IngestTimings {
+            discover_secs,
+            parse_secs,
+            embed_secs,
+            upsert_secs,
+            save_secs,
+            total_secs: result.duration_secs,
+        });
 
         emit(&IngestPhase::Done);
 
@@ -945,7 +987,7 @@ impl MarkdownVdb {
     pub async fn search(
         &self,
         query: search::SearchQuery,
-    ) -> Result<Vec<search::SearchResult>> {
+    ) -> Result<(Vec<search::SearchResult>, search::SearchTimings)> {
         search::search(
             &query,
             &self.index,
