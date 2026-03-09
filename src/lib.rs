@@ -21,7 +21,7 @@ pub use error::Error;
 pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile};
+pub use search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{
@@ -948,7 +948,7 @@ impl MarkdownVdb {
     pub async fn search(
         &self,
         query: search::SearchQuery,
-    ) -> Result<Vec<search::SearchResult>> {
+    ) -> Result<search::SearchResponse> {
         search::search(
             &query,
             &self.index,
@@ -961,6 +961,9 @@ impl MarkdownVdb {
             &self.config.search_decay_exclude,
             &self.config.search_decay_include,
             self.config.search_boost_links,
+            self.config.search_boost_hops,
+            self.config.search_expand_graph,
+            self.config.search_expand_limit,
         )
         .await
     }

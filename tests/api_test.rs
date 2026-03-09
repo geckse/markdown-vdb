@@ -125,7 +125,7 @@ async fn test_search_returns_results() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("rust programming");
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "search should return results after ingest");
     let r = &results[0];
@@ -326,7 +326,7 @@ async fn test_search_hybrid_mode_via_api() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("rust programming").with_mode(SearchMode::Hybrid);
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "hybrid search should return results");
     assert!(results[0].score > 0.0, "results should have positive scores");
@@ -338,7 +338,7 @@ async fn test_search_semantic_mode_via_api() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("rust").with_mode(SearchMode::Semantic);
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "semantic search should return results");
 }
@@ -349,7 +349,7 @@ async fn test_search_lexical_mode_via_api() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("systems programming language").with_mode(SearchMode::Lexical);
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "lexical search should return results for matching terms");
 }
@@ -371,7 +371,7 @@ async fn test_search_default_mode_is_hybrid() {
 
     // Default SearchQuery should use hybrid (from config)
     let query = SearchQuery::new("rust");
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "default mode search should return results");
 }
@@ -492,7 +492,7 @@ async fn test_search_with_path_prefix() {
 
     // Search scoped to docs/ directory
     let query = SearchQuery::new("programming").with_path_prefix("docs/");
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     // All results should be within docs/
     for r in &results {
@@ -732,7 +732,7 @@ async fn test_search_works_after_full_reindex() {
     // Initial ingest and search
     vdb.ingest(IngestOptions::default()).await.unwrap();
     let query = SearchQuery::new("rust programming");
-    let results1 = vdb.search(query).await.unwrap();
+    let results1 = vdb.search(query).await.unwrap().results;
     assert!(!results1.is_empty(), "search should return results after first ingest");
 
     // Full reindex
@@ -741,7 +741,7 @@ async fn test_search_works_after_full_reindex() {
 
     // Search again — should still work
     let query2 = SearchQuery::new("rust programming");
-    let results2 = vdb.search(query2).await.unwrap();
+    let results2 = vdb.search(query2).await.unwrap().results;
     assert!(!results2.is_empty(), "search should return results after full reindex");
     assert!(results2[0].score > 0.0, "results should have positive scores after reindex");
 }
@@ -764,7 +764,7 @@ async fn test_multiple_reindex_cycles() {
         assert!(status.vector_count > 0, "cycle {cycle}: should have vectors");
 
         let query = SearchQuery::new("test document");
-        let results = vdb.search(query).await.unwrap();
+        let results = vdb.search(query).await.unwrap().results;
         assert!(!results.is_empty(), "cycle {cycle}: search should return results");
     }
 }
@@ -779,7 +779,7 @@ async fn test_search_with_decay_enabled() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("test document").with_decay(true);
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     // Decay should not break search.
     assert!(!results.is_empty(), "search with decay should return results");
@@ -796,7 +796,7 @@ async fn test_search_with_decay_disabled() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("test document").with_decay(false);
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty());
     for r in &results {
@@ -822,7 +822,7 @@ async fn test_search_decay_with_custom_half_life() {
     let query = SearchQuery::new("test document")
         .with_decay(true)
         .with_decay_half_life(7.0);
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty());
     for r in &results {
@@ -850,6 +850,6 @@ async fn test_decay_config_enabled_via_config() {
 
     // Without per-query override, should use config's decay.
     let query = SearchQuery::new("doc");
-    let results = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
     assert!(!results.is_empty());
 }

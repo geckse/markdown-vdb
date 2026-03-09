@@ -9,7 +9,7 @@ use colored::Colorize;
 use serde_json::Value;
 
 use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink};
-use mdvdb::search::{MetadataFilter, SearchMode, SearchQuery, SearchResult};
+use mdvdb::search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult};
 use mdvdb::{GraphLevel, MarkdownVdb};
 
 /// Wrapped search output for JSON mode.
@@ -19,6 +19,8 @@ struct SearchOutput {
     query: String,
     total_results: usize,
     mode: SearchMode,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    graph_context: Vec<GraphContextItem>,
 }
 
 /// Wrapped links output for JSON mode.
@@ -392,19 +394,20 @@ async fn run() -> anyhow::Result<()> {
             }
 
             let effective_mode = query.mode;
-            let results = vdb.search(query).await?;
+            let response = vdb.search(query).await?;
 
             if json {
                 let output = SearchOutput {
-                    total_results: results.len(),
+                    total_results: response.results.len(),
                     query: args.query.clone(),
-                    results,
+                    results: response.results,
                     mode: effective_mode,
+                    graph_context: response.graph_context,
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
             } else {
-                format::print_search_results(&results, &args.query);
+                format::print_search_results(&response.results, &args.query);
             }
         }
         Some(Commands::Ingest(args)) => {
