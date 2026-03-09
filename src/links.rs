@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -190,6 +190,64 @@ pub fn compute_backlinks(graph: &LinkGraph) -> HashMap<String, Vec<LinkEntry>> {
     }
 
     backlinks
+}
+
+/// BFS traversal through forward links AND backlinks from seed files.
+///
+/// Returns a map from discovered file path to its minimum hop distance.
+/// Seeds are excluded from output. Cycle-safe via visited set.
+/// `max_depth` is clamped to `min(max_depth, 3)`.
+pub fn bfs_neighbors(
+    graph: &LinkGraph,
+    backlinks: &HashMap<String, Vec<LinkEntry>>,
+    seeds: &[String],
+    max_depth: usize,
+) -> HashMap<String, usize> {
+    let max_depth = max_depth.min(3);
+    if max_depth == 0 || seeds.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut result: HashMap<String, usize> = HashMap::new();
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+
+    // Initialize with seeds
+    for seed in seeds {
+        if visited.insert(seed.clone()) {
+            queue.push_back((seed.clone(), 0));
+        }
+    }
+
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+
+        let next_depth = depth + 1;
+
+        // Traverse forward links
+        if let Some(entries) = graph.forward.get(&current) {
+            for entry in entries {
+                if visited.insert(entry.target.clone()) {
+                    result.insert(entry.target.clone(), next_depth);
+                    queue.push_back((entry.target.clone(), next_depth));
+                }
+            }
+        }
+
+        // Traverse backlinks
+        if let Some(entries) = backlinks.get(&current) {
+            for entry in entries {
+                if visited.insert(entry.source.clone()) {
+                    result.insert(entry.source.clone(), next_depth);
+                    queue.push_back((entry.source.clone(), next_depth));
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Query links for a specific file, classifying outgoing links as valid or broken.
@@ -538,5 +596,186 @@ mod tests {
 
         remove_file_links(&mut graph, "a.md");
         assert!(!graph.forward.contains_key("a.md"));
+    }
+
+    // --- bfs_neighbors tests ---
+
+    #[test]
+    fn bfs_1_hop() {
+        // a -> b -> c
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            1,
+        );
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors["b.md"], 1);
+    }
+
+    #[test]
+    fn bfs_2_hops() {
+        // a -> b -> c -> d
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("c.md", vec![make_link("d", "D", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            2,
+        );
+
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["c.md"], 2);
+        // d.md should NOT be included (3 hops away, but max_depth=2)
+        assert!(!neighbors.contains_key("d.md"));
+    }
+
+    #[test]
+    fn bfs_3_hops() {
+        // a -> b -> c -> d -> e
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("c.md", vec![make_link("d", "D", 1, false)]),
+            make_file("d.md", vec![make_link("e", "E", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            3,
+        );
+
+        assert_eq!(neighbors.len(), 3);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["c.md"], 2);
+        assert_eq!(neighbors["d.md"], 3);
+        assert!(!neighbors.contains_key("e.md"));
+    }
+
+    #[test]
+    fn bfs_cycle_safe() {
+        // a -> b -> c -> a (cycle), plus d -> e -> a for deeper test
+        // We use a longer chain to verify cycles are handled:
+        // a -> b -> c -> d -> a (cycle)
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("c.md", vec![make_link("d", "D", 1, false)]),
+            make_file("d.md", vec![make_link("a", "A", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        // With max_depth 3, BFS should not loop forever
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            3,
+        );
+
+        // a is seed (excluded). Bidirectional traversal:
+        // hop 1: b.md (forward a->b), d.md (backlink d->a)
+        // hop 2: c.md (forward b->c) — d already visited
+        // hop 3: nothing new (c->d already visited, d->a already visited)
+        // a is never re-added since it's in visited set
+        assert_eq!(neighbors.len(), 3);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["d.md"], 1);
+        assert_eq!(neighbors["c.md"], 2);
+    }
+
+    #[test]
+    fn bfs_disconnected() {
+        // a -> b, c is isolated
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            3,
+        );
+
+        // Only b.md reachable, c.md is disconnected and not reachable
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors["b.md"], 1);
+        assert!(!neighbors.contains_key("c.md"));
+    }
+
+    #[test]
+    fn bfs_bidirectional() {
+        // a -> b, c -> a (backlink from c to a)
+        // From a: forward gives b at hop 1, backlink gives c at hop 1
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("c.md", vec![make_link("a", "A", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            1,
+        );
+
+        // b.md via forward link, c.md via backlink (c links to a, so a has backlink from c)
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["c.md"], 1);
+    }
+
+    #[test]
+    fn bfs_empty_seeds() {
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(&graph, &backlinks, &[], 2);
+
+        assert!(neighbors.is_empty());
+    }
+
+    #[test]
+    fn bfs_empty_graph() {
+        let graph = build_link_graph(&[]);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            2,
+        );
+
+        assert!(neighbors.is_empty());
     }
 }
