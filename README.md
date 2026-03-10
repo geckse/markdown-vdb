@@ -77,7 +77,7 @@ mdvdb watch
 
 ```bash
 # Build from source
-git clone https://github.com/gecko/markdown-vdb.git
+git clone https://github.com/geckse/markdown-vdb.git
 cd markdown-vdb
 cargo install --path .
 ```
