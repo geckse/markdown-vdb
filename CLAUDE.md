@@ -2,7 +2,7 @@
 
 A filesystem-native vector database built around Markdown files. Rust, zero infrastructure, optimized for AI agents.
 
-All 18 implementation phases are complete and passing (567 tests, clippy clean).
+All 18 implementation phases plus graph-enhanced search are complete and passing (612 tests, clippy clean).
 
 ## Architecture
 
@@ -46,9 +46,9 @@ src/
 ├── discovery.rs         # File scanning with ignore patterns
 ├── parser.rs            # Markdown parsing: frontmatter, headings, body
 ├── chunker.rs           # Heading-based chunking + token size guard
-├── search.rs            # Query pipeline, metadata filtering, time decay, results
+├── search.rs            # Query pipeline, metadata filtering, time decay, graph expansion, results
 ├── fts.rs               # Full-text search (Tantivy BM25 wrapper)
-├── links.rs             # Link graph extraction, backlinks, orphan detection
+├── links.rs             # Link graph extraction, backlinks, orphan detection, multi-hop BFS, neighborhood
 ├── tree.rs              # File tree with sync status indicators
 ├── schema.rs            # Auto-infer + overlay schema system
 ├── clustering.rs        # K-means, nearest-centroid, rebalancing, TF-IDF labels
@@ -75,6 +75,8 @@ tests/
 ├── config_test.rs       # Configuration loading tests
 ├── discovery_test.rs    # File discovery tests
 ├── embedding_test.rs    # Embedding provider tests
+├── fts_test.rs          # Full-text search (Tantivy BM25) tests
+├── graph_test.rs        # Graph traversal + multi-hop search tests
 ├── index_test.rs        # Index storage + mtime tests
 ├── ingest_test.rs       # Ingestion pipeline tests
 ├── links_test.rs        # Link graph + backlinks tests
@@ -99,7 +101,7 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Embeddings:** Trait-based pluggable providers. Batch-first (up to 4 concurrent). Skip unchanged files via SHA-256 hash.
 - **Chunking:** Primary split by headings, secondary token-count size guard. Deterministic `"path#index"` IDs.
 - **Clustering:** Document-level vectors (averaged chunk vectors per file). K-means with cross-cluster TF-IDF keyword extraction.
-- **CLI output:** stdout for data (JSON with `--json`, human-readable otherwise), stderr for errors/logs. Search JSON uses wrapped format: `{"results": [...], "query": "...", "total_results": N}`.
+- **CLI output:** stdout for data (JSON with `--json`, human-readable otherwise), stderr for errors/logs. Search JSON uses wrapped format: `{"results": [...], "query": "...", "total_results": N}`. When `--expand` is used, includes `"graph_context": [...]` with linked-file chunks.
 
 ## Key Conventions
 
@@ -135,7 +137,7 @@ MarkdownVdb::open_with_config(root, cfg)   // Open with explicit config
 MarkdownVdb::init(path)                    // Create .markdownvdb config file
 
 vdb.ingest(options)     // Index markdown files (full or incremental)
-vdb.search(query)       // Search with filters, decay, mode selection
+vdb.search(query)       // Search with filters, decay, graph expansion → SearchResponse
 vdb.preview(reindex, file) // Dry-run: what would ingest do
 vdb.status()            // Index stats (doc/chunk/vector counts)
 vdb.schema()            // Inferred metadata schema
@@ -143,18 +145,19 @@ vdb.clusters()          // Document clusters with labels
 vdb.file_tree()         // File tree with sync status
 vdb.get_document(path)  // Single document info + frontmatter + modified_at
 vdb.links(path)         // Outgoing + incoming links for a file
+vdb.links_neighborhood(path, depth) // Multi-hop link tree (depth 1-3)
 vdb.orphans()           // Files with no links
 vdb.doctor()            // Diagnostic checks
 vdb.watch(cancel)       // File watcher with CancellationToken
 vdb.config()            // Access current config
 ```
 
-Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`.
+Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `SearchResponse`, `GraphContextItem`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`, `NeighborhoodNode`, `NeighborhoodResult`.
 
 ## Development Workflow
 
 ```bash
-cargo test               # Run all 567 tests
+cargo test               # Run all 612 tests
 cargo clippy --all-targets  # Lint (must be clean)
 cargo build --release    # Release build
 cargo run -- ingest      # Test ingest locally
@@ -213,3 +216,4 @@ Full specifications for all 18 phases live in `docs/prds/`. These document the d
 | 16 | `phase-16-settings-in-user-location.md` | User-level config at `~/.mdvdb/config` |
 | 17 | `phase-17-interactive-ingest-progress.md` | Rich progress display, `--preview`, `--reindex`, Ctrl+C cancellation |
 | 18 | `phase-18-time-decay.md` | Optional time-based decay for search scores (exponential half-life) |
+| 21 | *(spec)* | Multi-hop graph traversal: BFS link boost, graph context expansion, deep neighborhood |

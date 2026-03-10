@@ -466,6 +466,9 @@ mod tests {
             search_decay_exclude: vec![],
             search_decay_include: vec![],
             search_boost_links: false,
+            search_boost_hops: 1,
+            search_expand_graph: 0,
+            search_expand_limit: 3,
             vector_quantization: crate::config::VectorQuantization::F16,
             index_compression: true,
         };

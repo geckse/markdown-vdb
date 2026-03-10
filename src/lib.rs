@@ -21,10 +21,13 @@ pub use error::Error;
 pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
+pub use search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
-pub use links::{LinkEntry, LinkGraph, LinkQueryResult, LinkState, OrphanFile, ResolvedLink};
+pub use links::{
+    LinkEntry, LinkGraph, LinkQueryResult, LinkState, NeighborhoodNode, NeighborhoodResult,
+    OrphanFile, ResolvedLink,
+};
 pub use tree::{FileState, FileTree, FileTreeNode};
 pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
 // Graph visualization types are defined in this file and automatically public.
@@ -987,7 +990,7 @@ impl MarkdownVdb {
     pub async fn search(
         &self,
         query: search::SearchQuery,
-    ) -> Result<(Vec<search::SearchResult>, search::SearchTimings)> {
+    ) -> Result<search::SearchResponse> {
         search::search(
             &query,
             &self.index,
@@ -1000,6 +1003,9 @@ impl MarkdownVdb {
             &self.config.search_decay_exclude,
             &self.config.search_decay_include,
             self.config.search_boost_links,
+            self.config.search_boost_hops,
+            self.config.search_expand_graph,
+            self.config.search_expand_limit,
         )
         .await
     }
@@ -1445,6 +1451,19 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             self.index.get_file_hashes().keys().cloned().collect();
         let backlink_map = links::compute_backlinks(&graph);
         Ok(links::query_links(path, &graph, &backlink_map, &indexed_files))
+    }
+
+    /// Query the multi-hop link neighborhood of a file.
+    ///
+    /// Returns a tree-structured view of outgoing and incoming links
+    /// up to `depth` hops (clamped to 1–3).
+    pub fn links_neighborhood(&self, path: &str, depth: usize) -> Result<links::NeighborhoodResult> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        let indexed_files: std::collections::HashSet<String> =
+            self.index.get_file_hashes().keys().cloned().collect();
+        Ok(links::neighborhood(&graph, &indexed_files, path, depth))
     }
 
     /// Query backlinks pointing to a specific file.

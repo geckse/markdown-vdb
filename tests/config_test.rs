@@ -34,6 +34,10 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_NO_USER_CONFIG",
     "MDVDB_VECTOR_QUANTIZATION",
     "MDVDB_INDEX_COMPRESSION",
+    "MDVDB_SEARCH_BOOST_LINKS",
+    "MDVDB_SEARCH_BOOST_HOPS",
+    "MDVDB_SEARCH_EXPAND_GRAPH",
+    "MDVDB_SEARCH_EXPAND_LIMIT",
 ];
 
 /// Clear all MDVDB-related env vars to ensure test isolation.
@@ -74,6 +78,9 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.search_decay_half_life, 90.0, "default half-life should be 90 days");
     assert_eq!(config.vector_quantization, VectorQuantization::F16, "default quantization should be F16");
     assert!(config.index_compression, "index compression should be enabled by default");
+    assert_eq!(config.search_boost_hops, 1, "default boost hops should be 1");
+    assert_eq!(config.search_expand_graph, 0, "default expand graph should be 0 (disabled)");
+    assert_eq!(config.search_expand_limit, 3, "default expand limit should be 3");
 }
 
 #[test]
@@ -780,6 +787,118 @@ fn quantization_and_compression_in_dotenv() {
     let config = Config::load(tmp.path()).unwrap();
     assert_eq!(config.vector_quantization, VectorQuantization::F32);
     assert!(!config.index_compression);
+
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// Graph traversal config tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn config_boost_hops_parse() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_BOOST_HOPS", "2");
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(config.search_boost_hops, 2);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn config_boost_hops_rejects_zero() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_BOOST_HOPS", "0");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "boost_hops of 0 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("search_boost_hops"),
+        "error should mention search_boost_hops: {}",
+        err_msg
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn config_boost_hops_rejects_four() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_BOOST_HOPS", "4");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "boost_hops of 4 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("search_boost_hops"),
+        "error should mention search_boost_hops: {}",
+        err_msg
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn config_expand_graph_rejects_four() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_EXPAND_GRAPH", "4");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "expand_graph of 4 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("search_expand_graph"),
+        "error should mention search_expand_graph: {}",
+        err_msg
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn config_expand_limit_rejects_zero() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_EXPAND_LIMIT", "0");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "expand_limit of 0 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("search_expand_limit"),
+        "error should mention search_expand_limit: {}",
+        err_msg
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn config_expand_limit_rejects_eleven() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_SEARCH_EXPAND_LIMIT", "11");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "expand_limit of 11 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("search_expand_limit"),
+        "error should mention search_expand_limit: {}",
+        err_msg
+    );
 
     clear_env();
 }

@@ -9,7 +9,7 @@ use colored::Colorize;
 use serde_json::Value;
 
 use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink};
-use mdvdb::search::{MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings};
+use mdvdb::search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings};
 use mdvdb::{GraphLevel, IngestTimings, MarkdownVdb};
 
 /// Wrapped search output for JSON mode.
@@ -21,6 +21,8 @@ struct SearchOutput {
     mode: SearchMode,
     #[serde(skip_serializing_if = "Option::is_none")]
     timings: Option<SearchTimings>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    graph_context: Vec<GraphContextItem>,
 }
 
 /// Wrapped ingest output for JSON mode (verbosity-gated timings).
@@ -205,6 +207,14 @@ struct SearchArgs {
     /// Comma-separated path prefixes where time decay applies (whitelist)
     #[arg(long, value_name = "PATTERNS")]
     decay_include: Option<String>,
+
+    /// Number of link hops for graph-aware boosting (1-3, requires --boost-links)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=3), requires = "boost_links")]
+    hops: Option<u8>,
+
+    /// Graph expansion depth for context (0-3, 0 disables)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=3))]
+    expand: Option<u8>,
 }
 
 #[derive(Parser)]
@@ -255,6 +265,10 @@ struct WatchArgs {}
 struct LinksArgs {
     /// Path to the markdown file
     file_path: PathBuf,
+
+    /// Link traversal depth (1 = direct links, 2-3 = multi-hop)
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(1..=3), default_value = "1")]
+    depth: u8,
 }
 
 #[derive(Parser)]
@@ -360,6 +374,8 @@ async fn run() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // In JSON mode, suppress tracing logs to avoid any possibility of
+    // log output leaking into stdout and breaking JSON parsing.
     // In JSON mode, suppress tracing logs to keep stdout clean for JSON parsing.
     // Exception: if verbose is set, allow logs to stderr even in JSON mode.
     if cli.json && cli.verbose == 0 {
@@ -426,31 +442,41 @@ async fn run() -> anyhow::Result<()> {
                 let list: Vec<String> = patterns.split(',').map(|s| s.trim().to_string()).collect();
                 query = query.with_decay_include(list);
             }
+            if let Some(hops) = args.hops {
+                query = query.with_boost_hops(hops as usize);
+            }
+            if let Some(expand) = args.expand {
+                query = query.with_expand_graph(expand as usize);
+            }
 
             let effective_mode = query.mode;
-            let (results, timings) = vdb.search(query).await?;
+            let response = vdb.search(query).await?;
 
             if json {
                 let output = SearchOutput {
-                    total_results: results.len(),
+                    total_results: response.results.len(),
                     query: args.query.clone(),
-                    results,
+                    results: response.results,
                     mode: effective_mode,
-                    timings: if cli.verbose > 0 { Some(timings) } else { None },
+                    timings: if cli.verbose > 0 { Some(response.timings) } else { None },
+                    graph_context: response.graph_context,
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
             } else {
-                format::print_search_results(&results, &args.query);
+                format::print_search_results(&response.results, &args.query);
+                if !response.graph_context.is_empty() {
+                    format::print_graph_context(&response.graph_context);
+                }
                 if cli.verbose > 0 {
                     eprintln!(
                         "  [timing] embed={:.0}ms hnsw={:.0}ms bm25={:.0}ms fusion={:.0}ms assemble={:.0}ms total={:.0}ms",
-                        timings.embed_secs * 1000.0,
-                        timings.vector_search_secs * 1000.0,
-                        timings.lexical_search_secs * 1000.0,
-                        timings.fusion_secs * 1000.0,
-                        timings.assemble_secs * 1000.0,
-                        timings.total_secs * 1000.0,
+                        response.timings.embed_secs * 1000.0,
+                        response.timings.vector_search_secs * 1000.0,
+                        response.timings.lexical_search_secs * 1000.0,
+                        response.timings.fusion_secs * 1000.0,
+                        response.timings.assemble_secs * 1000.0,
+                        response.timings.total_secs * 1000.0,
                     );
                 }
             }
@@ -700,17 +726,28 @@ async fn run() -> anyhow::Result<()> {
         Some(Commands::Links(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy().to_string();
-            let result = vdb.links(&path_str)?;
+            let depth = args.depth as usize;
 
-            if json {
-                let output = LinksOutput {
-                    file: path_str,
-                    links: result,
-                };
-                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
-                writeln!(std::io::stdout())?;
+            if depth > 1 {
+                let result = vdb.links_neighborhood(&path_str, depth)?;
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &result)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    format::print_link_neighborhood(&result);
+                }
             } else {
-                format::print_links(&result);
+                let result = vdb.links(&path_str)?;
+                if json {
+                    let output = LinksOutput {
+                        file: path_str,
+                        links: result,
+                    };
+                    serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    format::print_links(&result);
+                }
             }
         }
         Some(Commands::Backlinks(args)) => {
@@ -891,7 +928,7 @@ _mdvdb() {
             COMPREPLY=($(compgen -W "--reindex --preview --file --full --help" -- "$cur"))
             ;;
         search)
-            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --decay-exclude --decay-include --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --decay-exclude --decay-include --hops --expand --help" -- "$cur"))
             ;;
         tree)
             COMPREPLY=($(compgen -W "--path --help" -- "$cur"))
@@ -968,7 +1005,9 @@ _mdvdb() {
                         '--no-decay[Disable time decay]' \
                         '--decay-half-life[Half-life in days]:days:' \
                         '--decay-exclude[Path prefixes excluded from decay]:patterns:' \
-                        '--decay-include[Path prefixes where decay applies]:patterns:'
+                        '--decay-include[Path prefixes where decay applies]:patterns:' \
+                        '--hops[Number of link hops for graph boosting (1-3)]:hops:' \
+                        '--expand[Graph expansion depth for context (0-3)]:depth:'
                     ;;
             esac
             ;;
@@ -1021,6 +1060,8 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l no-decay -d 'Disabl
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-half-life -d 'Half-life in days' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-exclude -d 'Path prefixes excluded from decay' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-include -d 'Path prefixes where decay applies' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l hops -d 'Number of link hops for graph boosting (1-3)' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l expand -d 'Graph expansion depth for context (0-3)' -r
 
 # Init subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'

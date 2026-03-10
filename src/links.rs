@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,7 +43,7 @@ pub struct ResolvedLink {
 }
 
 /// Whether a link target is valid or broken.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub enum LinkState {
     /// Target file exists in the file set.
     Valid,
@@ -67,6 +67,42 @@ pub struct LinkQueryResult {
 pub struct OrphanFile {
     /// Relative path to the orphan file.
     pub path: String,
+}
+
+/// A node in a tree-structured link neighborhood.
+///
+/// Represents a linked file with its validity state and recursively
+/// discovered children (further links from this file).
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct NeighborhoodNode {
+    /// Relative path to this file.
+    pub path: String,
+    /// Whether this file exists in the known file set.
+    pub state: LinkState,
+    /// Children discovered by following links from this file.
+    pub children: Vec<NeighborhoodNode>,
+}
+
+/// Result of a deep neighborhood query for a file.
+///
+/// Contains tree-structured outgoing (forward) and incoming (backlink)
+/// neighborhoods to configurable depth.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct NeighborhoodResult {
+    /// The queried file path.
+    pub file: String,
+    /// Tree of outgoing (forward) links from this file.
+    pub outgoing: Vec<NeighborhoodNode>,
+    /// Tree of incoming (backlinks) to this file.
+    pub incoming: Vec<NeighborhoodNode>,
+    /// Total count of unique outgoing links (all depths).
+    pub outgoing_count: usize,
+    /// Total count of unique incoming links (all depths).
+    pub incoming_count: usize,
+    /// Number of depth levels explored for outgoing links.
+    pub outgoing_depth_count: usize,
+    /// Number of depth levels explored for incoming links.
+    pub incoming_depth_count: usize,
 }
 
 /// Resolve a raw link target relative to the source file's directory.
@@ -192,6 +228,64 @@ pub fn compute_backlinks(graph: &LinkGraph) -> HashMap<String, Vec<LinkEntry>> {
     backlinks
 }
 
+/// BFS traversal through forward links AND backlinks from seed files.
+///
+/// Returns a map from discovered file path to its minimum hop distance.
+/// Seeds are excluded from output. Cycle-safe via visited set.
+/// `max_depth` is clamped to `min(max_depth, 3)`.
+pub fn bfs_neighbors(
+    graph: &LinkGraph,
+    backlinks: &HashMap<String, Vec<LinkEntry>>,
+    seeds: &[String],
+    max_depth: usize,
+) -> HashMap<String, usize> {
+    let max_depth = max_depth.min(3);
+    if max_depth == 0 || seeds.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut result: HashMap<String, usize> = HashMap::new();
+    let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+
+    // Initialize with seeds
+    for seed in seeds {
+        if visited.insert(seed.clone()) {
+            queue.push_back((seed.clone(), 0));
+        }
+    }
+
+    while let Some((current, depth)) = queue.pop_front() {
+        if depth >= max_depth {
+            continue;
+        }
+
+        let next_depth = depth + 1;
+
+        // Traverse forward links
+        if let Some(entries) = graph.forward.get(&current) {
+            for entry in entries {
+                if visited.insert(entry.target.clone()) {
+                    result.insert(entry.target.clone(), next_depth);
+                    queue.push_back((entry.target.clone(), next_depth));
+                }
+            }
+        }
+
+        // Traverse backlinks
+        if let Some(entries) = backlinks.get(&current) {
+            for entry in entries {
+                if visited.insert(entry.source.clone()) {
+                    result.insert(entry.source.clone(), next_depth);
+                    queue.push_back((entry.source.clone(), next_depth));
+                }
+            }
+        }
+    }
+
+    result
+}
+
 /// Query links for a specific file, classifying outgoing links as valid or broken.
 ///
 /// `known_files` is the set of all known file paths (relative).
@@ -300,6 +394,168 @@ pub fn remove_file_links(graph: &mut LinkGraph, file_path: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+}
+
+/// Explore the link neighborhood of a file as a tree structure.
+///
+/// Builds tree-structured outgoing (forward links recursively) and incoming
+/// (backlinks recursively) neighborhoods. Cycle detection is per-branch
+/// to prevent infinite recursion while still allowing a file to appear in
+/// multiple branches. Depth is clamped to 1-3.
+pub fn neighborhood(
+    graph: &LinkGraph,
+    known_files: &HashSet<String>,
+    file: &str,
+    depth: usize,
+) -> NeighborhoodResult {
+    let depth = depth.clamp(1, 3);
+    let backlinks = compute_backlinks(graph);
+
+    // Build outgoing tree (following forward links)
+    let mut outgoing_visited = HashSet::new();
+    outgoing_visited.insert(file.to_string());
+    let outgoing = build_outgoing_tree(graph, known_files, file, depth, &mut outgoing_visited);
+    let outgoing_count = count_nodes(&outgoing);
+    let outgoing_depth_count = max_depth(&outgoing);
+
+    // Build incoming tree (following backlinks)
+    let mut incoming_visited = HashSet::new();
+    incoming_visited.insert(file.to_string());
+    let incoming = build_incoming_tree(&backlinks, known_files, file, depth, &mut incoming_visited);
+    let incoming_count = count_nodes(&incoming);
+    let incoming_depth_count = max_depth(&incoming);
+
+    NeighborhoodResult {
+        file: file.to_string(),
+        outgoing,
+        incoming,
+        outgoing_count,
+        incoming_count,
+        outgoing_depth_count,
+        incoming_depth_count,
+    }
+}
+
+/// Recursively build the outgoing (forward links) tree.
+fn build_outgoing_tree(
+    graph: &LinkGraph,
+    known_files: &HashSet<String>,
+    file: &str,
+    remaining_depth: usize,
+    branch_visited: &mut HashSet<String>,
+) -> Vec<NeighborhoodNode> {
+    if remaining_depth == 0 {
+        return Vec::new();
+    }
+
+    let entries = match graph.forward.get(file) {
+        Some(entries) => entries,
+        None => return Vec::new(),
+    };
+
+    let mut nodes = Vec::new();
+    for entry in entries {
+        // Cycle detection: skip if already on this branch
+        if !branch_visited.insert(entry.target.clone()) {
+            continue;
+        }
+
+        let state = if known_files.contains(&entry.target) {
+            LinkState::Valid
+        } else {
+            LinkState::Broken
+        };
+
+        let children = build_outgoing_tree(
+            graph,
+            known_files,
+            &entry.target,
+            remaining_depth - 1,
+            branch_visited,
+        );
+
+        nodes.push(NeighborhoodNode {
+            path: entry.target.clone(),
+            state,
+            children,
+        });
+
+        // Remove from branch visited so it can appear in other branches
+        branch_visited.remove(&entry.target);
+    }
+
+    nodes
+}
+
+/// Recursively build the incoming (backlinks) tree.
+fn build_incoming_tree(
+    backlinks: &HashMap<String, Vec<LinkEntry>>,
+    known_files: &HashSet<String>,
+    file: &str,
+    remaining_depth: usize,
+    branch_visited: &mut HashSet<String>,
+) -> Vec<NeighborhoodNode> {
+    if remaining_depth == 0 {
+        return Vec::new();
+    }
+
+    let entries = match backlinks.get(file) {
+        Some(entries) => entries,
+        None => return Vec::new(),
+    };
+
+    let mut nodes = Vec::new();
+    for entry in entries {
+        // Cycle detection: skip if already on this branch
+        if !branch_visited.insert(entry.source.clone()) {
+            continue;
+        }
+
+        let state = if known_files.contains(&entry.source) {
+            LinkState::Valid
+        } else {
+            LinkState::Broken
+        };
+
+        let children = build_incoming_tree(
+            backlinks,
+            known_files,
+            &entry.source,
+            remaining_depth - 1,
+            branch_visited,
+        );
+
+        nodes.push(NeighborhoodNode {
+            path: entry.source.clone(),
+            state,
+            children,
+        });
+
+        // Remove from branch visited so it can appear in other branches
+        branch_visited.remove(&entry.source);
+    }
+
+    nodes
+}
+
+/// Count total nodes in a neighborhood tree.
+fn count_nodes(nodes: &[NeighborhoodNode]) -> usize {
+    nodes
+        .iter()
+        .map(|n| 1 + count_nodes(&n.children))
+        .sum()
+}
+
+/// Find the maximum depth of a neighborhood tree.
+fn max_depth(nodes: &[NeighborhoodNode]) -> usize {
+    if nodes.is_empty() {
+        return 0;
+    }
+    nodes
+        .iter()
+        .map(|n| 1 + max_depth(&n.children))
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -538,5 +794,321 @@ mod tests {
 
         remove_file_links(&mut graph, "a.md");
         assert!(!graph.forward.contains_key("a.md"));
+    }
+
+    // --- bfs_neighbors tests ---
+
+    #[test]
+    fn bfs_1_hop() {
+        // a -> b -> c
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            1,
+        );
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors["b.md"], 1);
+    }
+
+    #[test]
+    fn bfs_2_hops() {
+        // a -> b -> c -> d
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("c.md", vec![make_link("d", "D", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            2,
+        );
+
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["c.md"], 2);
+        // d.md should NOT be included (3 hops away, but max_depth=2)
+        assert!(!neighbors.contains_key("d.md"));
+    }
+
+    #[test]
+    fn bfs_3_hops() {
+        // a -> b -> c -> d -> e
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("c.md", vec![make_link("d", "D", 1, false)]),
+            make_file("d.md", vec![make_link("e", "E", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            3,
+        );
+
+        assert_eq!(neighbors.len(), 3);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["c.md"], 2);
+        assert_eq!(neighbors["d.md"], 3);
+        assert!(!neighbors.contains_key("e.md"));
+    }
+
+    #[test]
+    fn bfs_cycle_safe() {
+        // a -> b -> c -> a (cycle), plus d -> e -> a for deeper test
+        // We use a longer chain to verify cycles are handled:
+        // a -> b -> c -> d -> a (cycle)
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("c.md", vec![make_link("d", "D", 1, false)]),
+            make_file("d.md", vec![make_link("a", "A", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        // With max_depth 3, BFS should not loop forever
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            3,
+        );
+
+        // a is seed (excluded). Bidirectional traversal:
+        // hop 1: b.md (forward a->b), d.md (backlink d->a)
+        // hop 2: c.md (forward b->c) — d already visited
+        // hop 3: nothing new (c->d already visited, d->a already visited)
+        // a is never re-added since it's in visited set
+        assert_eq!(neighbors.len(), 3);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["d.md"], 1);
+        assert_eq!(neighbors["c.md"], 2);
+    }
+
+    #[test]
+    fn bfs_disconnected() {
+        // a -> b, c is isolated
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            3,
+        );
+
+        // Only b.md reachable, c.md is disconnected and not reachable
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors["b.md"], 1);
+        assert!(!neighbors.contains_key("c.md"));
+    }
+
+    #[test]
+    fn bfs_bidirectional() {
+        // a -> b, c -> a (backlink from c to a)
+        // From a: forward gives b at hop 1, backlink gives c at hop 1
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("c.md", vec![make_link("a", "A", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            1,
+        );
+
+        // b.md via forward link, c.md via backlink (c links to a, so a has backlink from c)
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors["b.md"], 1);
+        assert_eq!(neighbors["c.md"], 1);
+    }
+
+    #[test]
+    fn bfs_empty_seeds() {
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(&graph, &backlinks, &[], 2);
+
+        assert!(neighbors.is_empty());
+    }
+
+    #[test]
+    fn bfs_empty_graph() {
+        let graph = build_link_graph(&[]);
+        let backlinks = compute_backlinks(&graph);
+
+        let neighbors = bfs_neighbors(
+            &graph,
+            &backlinks,
+            &["a.md".to_string()],
+            2,
+        );
+
+        assert!(neighbors.is_empty());
+    }
+
+    // --- neighborhood tests ---
+
+    #[test]
+    fn neighborhood_depth_1() {
+        // a -> b, a -> c; d -> a (backlink)
+        let files = vec![
+            make_file("a.md", vec![
+                make_link("b", "B", 1, false),
+                make_link("c", "C", 2, false),
+            ]),
+            make_file("d.md", vec![make_link("a", "A", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let known: HashSet<String> = ["a.md", "b.md", "c.md", "d.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let result = neighborhood(&graph, &known, "a.md", 1);
+
+        assert_eq!(result.file, "a.md");
+
+        // Outgoing: b.md, c.md (depth 1, no children)
+        assert_eq!(result.outgoing.len(), 2);
+        let out_paths: Vec<&str> = result.outgoing.iter().map(|n| n.path.as_str()).collect();
+        assert!(out_paths.contains(&"b.md"));
+        assert!(out_paths.contains(&"c.md"));
+        for node in &result.outgoing {
+            assert_eq!(node.state, LinkState::Valid);
+            assert!(node.children.is_empty()); // depth 1 = no children
+        }
+        assert_eq!(result.outgoing_count, 2);
+        assert_eq!(result.outgoing_depth_count, 1);
+
+        // Incoming: d.md (depth 1, no children)
+        assert_eq!(result.incoming.len(), 1);
+        assert_eq!(result.incoming[0].path, "d.md");
+        assert_eq!(result.incoming[0].state, LinkState::Valid);
+        assert!(result.incoming[0].children.is_empty());
+        assert_eq!(result.incoming_count, 1);
+        assert_eq!(result.incoming_depth_count, 1);
+    }
+
+    #[test]
+    fn neighborhood_depth_2() {
+        // a -> b -> c; d -> a, e -> d
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("d.md", vec![make_link("a", "A", 1, false)]),
+            make_file("e.md", vec![make_link("d", "D", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let known: HashSet<String> = ["a.md", "b.md", "c.md", "d.md", "e.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let result = neighborhood(&graph, &known, "a.md", 2);
+
+        // Outgoing: a -> b -> c
+        assert_eq!(result.outgoing.len(), 1);
+        assert_eq!(result.outgoing[0].path, "b.md");
+        assert_eq!(result.outgoing[0].children.len(), 1);
+        assert_eq!(result.outgoing[0].children[0].path, "c.md");
+        assert!(result.outgoing[0].children[0].children.is_empty());
+        assert_eq!(result.outgoing_count, 2); // b + c
+        assert_eq!(result.outgoing_depth_count, 2);
+
+        // Incoming: d -> a, e -> d
+        assert_eq!(result.incoming.len(), 1);
+        assert_eq!(result.incoming[0].path, "d.md");
+        assert_eq!(result.incoming[0].children.len(), 1);
+        assert_eq!(result.incoming[0].children[0].path, "e.md");
+        assert!(result.incoming[0].children[0].children.is_empty());
+        assert_eq!(result.incoming_count, 2); // d + e
+        assert_eq!(result.incoming_depth_count, 2);
+    }
+
+    #[test]
+    fn neighborhood_with_cycle() {
+        // a -> b -> c -> a (cycle)
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+            make_file("b.md", vec![make_link("c", "C", 1, false)]),
+            make_file("c.md", vec![make_link("a", "A", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let known: HashSet<String> = ["a.md", "b.md", "c.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let result = neighborhood(&graph, &known, "a.md", 3);
+
+        // Outgoing: a -> b -> c (c -> a is cycle, skipped)
+        assert_eq!(result.outgoing.len(), 1);
+        assert_eq!(result.outgoing[0].path, "b.md");
+        assert_eq!(result.outgoing[0].children.len(), 1);
+        assert_eq!(result.outgoing[0].children[0].path, "c.md");
+        // c -> a would be a cycle (a is the root), so no children
+        assert!(result.outgoing[0].children[0].children.is_empty());
+
+        // Incoming: c -> a (backlink), then c's backlinks: b -> c, then b's backlinks: a -> b (cycle)
+        assert_eq!(result.incoming.len(), 1);
+        assert_eq!(result.incoming[0].path, "c.md");
+        assert_eq!(result.incoming[0].children.len(), 1);
+        assert_eq!(result.incoming[0].children[0].path, "b.md");
+        // b's backlink is a -> b, but a is on the branch, so skipped
+        assert!(result.incoming[0].children[0].children.is_empty());
+    }
+
+    #[test]
+    fn neighborhood_missing_file() {
+        // Query for a file not in the graph
+        let files = vec![
+            make_file("a.md", vec![make_link("b", "B", 1, false)]),
+        ];
+        let graph = build_link_graph(&files);
+        let known: HashSet<String> = ["a.md", "b.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        let result = neighborhood(&graph, &known, "missing.md", 2);
+
+        assert_eq!(result.file, "missing.md");
+        assert!(result.outgoing.is_empty());
+        assert!(result.incoming.is_empty());
+        assert_eq!(result.outgoing_count, 0);
+        assert_eq!(result.incoming_count, 0);
+        assert_eq!(result.outgoing_depth_count, 0);
+        assert_eq!(result.incoming_depth_count, 0);
     }
 }

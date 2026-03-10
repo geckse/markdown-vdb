@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::error::Error;
 use mdvdb::search::SearchQuery;
-use mdvdb::{CheckStatus, IngestOptions, MarkdownVdb, SearchMode};
+use mdvdb::{CheckStatus, IngestOptions, MarkdownVdb, SearchMode, SearchResponse};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,9 @@ fn mock_config() -> Config {
         search_decay_exclude: vec![],
         search_decay_include: vec![],
         search_boost_links: false,
+        search_boost_hops: 1,
+        search_expand_graph: 0,
+        search_expand_limit: 3,
         vector_quantization: mdvdb::VectorQuantization::F16,
         index_compression: true,
     }
@@ -122,7 +125,7 @@ async fn test_search_returns_results() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("rust programming");
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "search should return results after ingest");
     let r = &results[0];
@@ -323,7 +326,7 @@ async fn test_search_hybrid_mode_via_api() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("rust programming").with_mode(SearchMode::Hybrid);
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "hybrid search should return results");
     assert!(results[0].score > 0.0, "results should have positive scores");
@@ -335,7 +338,7 @@ async fn test_search_semantic_mode_via_api() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("rust").with_mode(SearchMode::Semantic);
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "semantic search should return results");
 }
@@ -346,7 +349,7 @@ async fn test_search_lexical_mode_via_api() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("systems programming language").with_mode(SearchMode::Lexical);
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "lexical search should return results for matching terms");
 }
@@ -368,7 +371,7 @@ async fn test_search_default_mode_is_hybrid() {
 
     // Default SearchQuery should use hybrid (from config)
     let query = SearchQuery::new("rust");
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "default mode search should return results");
 }
@@ -489,7 +492,7 @@ async fn test_search_with_path_prefix() {
 
     // Search scoped to docs/ directory
     let query = SearchQuery::new("programming").with_path_prefix("docs/");
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     // All results should be within docs/
     for r in &results {
@@ -729,7 +732,7 @@ async fn test_search_works_after_full_reindex() {
     // Initial ingest and search
     vdb.ingest(IngestOptions::default()).await.unwrap();
     let query = SearchQuery::new("rust programming");
-    let (results1, _timings) = vdb.search(query).await.unwrap();
+    let results1 = vdb.search(query).await.unwrap().results;
     assert!(!results1.is_empty(), "search should return results after first ingest");
 
     // Full reindex
@@ -738,7 +741,7 @@ async fn test_search_works_after_full_reindex() {
 
     // Search again — should still work
     let query2 = SearchQuery::new("rust programming");
-    let (results2, _timings) = vdb.search(query2).await.unwrap();
+    let results2 = vdb.search(query2).await.unwrap().results;
     assert!(!results2.is_empty(), "search should return results after full reindex");
     assert!(results2[0].score > 0.0, "results should have positive scores after reindex");
 }
@@ -761,7 +764,7 @@ async fn test_multiple_reindex_cycles() {
         assert!(status.vector_count > 0, "cycle {cycle}: should have vectors");
 
         let query = SearchQuery::new("test document");
-        let (results, _timings) = vdb.search(query).await.unwrap();
+        let results = vdb.search(query).await.unwrap().results;
         assert!(!results.is_empty(), "cycle {cycle}: search should return results");
     }
 }
@@ -776,7 +779,7 @@ async fn test_search_with_decay_enabled() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("test document").with_decay(true);
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     // Decay should not break search.
     assert!(!results.is_empty(), "search with decay should return results");
@@ -793,7 +796,7 @@ async fn test_search_with_decay_disabled() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let query = SearchQuery::new("test document").with_decay(false);
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty());
     for r in &results {
@@ -819,7 +822,7 @@ async fn test_search_decay_with_custom_half_life() {
     let query = SearchQuery::new("test document")
         .with_decay(true)
         .with_decay_half_life(7.0);
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty());
     for r in &results {
@@ -847,6 +850,160 @@ async fn test_decay_config_enabled_via_config() {
 
     // Without per-query override, should use config's decay.
     let query = SearchQuery::new("doc");
-    let (results, _timings) = vdb.search(query).await.unwrap();
+    let results = vdb.search(query).await.unwrap().results;
     assert!(!results.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// SearchResponse / graph traversal API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_search_returns_search_response() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("rust programming");
+    let response: SearchResponse = vdb.search(query).await.unwrap();
+
+    // Verify the SearchResponse struct has all expected fields.
+    assert!(!response.results.is_empty(), "search should return results");
+    // Verify timings are populated (total_secs is f64, so always >= 0; just check it exists).
+    let _total = response.timings.total_secs;
+    let _search = response.timings.vector_search_secs;
+    // graph_context should be empty when expand_graph is 0 (default).
+    assert!(response.graph_context.is_empty(), "graph_context should be empty without expansion");
+}
+
+#[tokio::test]
+async fn test_search_response_json_serialization() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let query = SearchQuery::new("rust");
+    let response = vdb.search(query).await.unwrap();
+
+    // Serialize to JSON.
+    let json_str = serde_json::to_string(&response).expect("SearchResponse should serialize to JSON");
+
+    // Deserialize back to serde_json::Value and verify structure.
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("serialized JSON should parse back");
+    assert!(parsed.is_object(), "top-level should be an object");
+    assert!(parsed.get("results").is_some(), "should have 'results' key");
+    assert!(parsed["results"].is_array(), "'results' should be an array");
+    assert!(parsed.get("timings").is_some(), "should have 'timings' key");
+    assert!(parsed["timings"].is_object(), "'timings' should be an object");
+    assert!(parsed["timings"].get("total_secs").is_some(), "timings should have 'total_secs'");
+    assert!(parsed["timings"].get("embed_secs").is_some(), "timings should have 'embed_secs'");
+
+    // graph_context is empty, so it should be skipped due to skip_serializing_if.
+    assert!(
+        parsed.get("graph_context").is_none(),
+        "empty graph_context should be omitted from JSON"
+    );
+}
+
+#[test]
+fn test_with_boost_hops_builder() {
+    let query = SearchQuery::new("test query").with_boost_hops(2);
+    assert_eq!(query.boost_hops, Some(2), "boost_hops should be set to 2");
+
+    let query0 = SearchQuery::new("test query").with_boost_hops(0);
+    assert_eq!(query0.boost_hops, Some(0), "boost_hops should accept 0");
+
+    let query3 = SearchQuery::new("test query").with_boost_hops(3);
+    assert_eq!(query3.boost_hops, Some(3), "boost_hops should accept 3");
+
+    // Default should be None.
+    let query_default = SearchQuery::new("test query");
+    assert_eq!(query_default.boost_hops, None, "default boost_hops should be None");
+}
+
+#[test]
+fn test_with_expand_graph_builder() {
+    let query = SearchQuery::new("test query").with_expand_graph(1);
+    assert_eq!(query.expand_graph, Some(1), "expand_graph should be set to 1");
+
+    let query0 = SearchQuery::new("test query").with_expand_graph(0);
+    assert_eq!(query0.expand_graph, Some(0), "expand_graph should accept 0");
+
+    let query3 = SearchQuery::new("test query").with_expand_graph(3);
+    assert_eq!(query3.expand_graph, Some(3), "expand_graph should accept 3");
+
+    // Default should be None.
+    let query_default = SearchQuery::new("test query");
+    assert_eq!(query_default.expand_graph, None, "default expand_graph should be None");
+}
+
+#[tokio::test]
+async fn test_search_with_expansion() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    // Create files that link to each other.
+    fs::write(
+        root.join("main.md"),
+        "---\ntitle: Main Doc\n---\n\n# Main Document\n\nThis is the main document about programming.\nSee also [reference](reference.md).\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("reference.md"),
+        "---\ntitle: Reference Guide\n---\n\n# Reference\n\nThis is the reference guide with details.\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("unlinked.md"),
+        "---\ntitle: Unlinked\n---\n\n# Unlinked\n\nThis file has no links.\n",
+    )
+    .unwrap();
+
+    let mut config = mock_config();
+    config.search_expand_graph = 1; // Enable graph expansion by default.
+    config.search_expand_limit = 5;
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), config).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Search with graph expansion enabled.
+    let query = SearchQuery::new("main document programming").with_expand_graph(1);
+    let response = vdb.search(query).await.unwrap();
+
+    assert!(!response.results.is_empty(), "search should return results");
+
+    // Check if any result file matches main.md — if so, graph_context may contain
+    // chunks from reference.md (linked from main.md).
+    let has_main = response.results.iter().any(|r| r.file.path == "main.md");
+    if has_main {
+        // With expand_graph=1, we expect graph_context to include chunks from linked files.
+        // The mock provider produces deterministic embeddings, so results depend on similarity.
+        // At minimum, verify graph_context items have valid structure.
+        for ctx in &response.graph_context {
+            assert!(!ctx.chunk.content.is_empty(), "graph context chunk should have content");
+            assert!(!ctx.linked_from.is_empty(), "graph context should have linked_from");
+            assert!(ctx.hop_distance >= 1, "hop_distance should be >= 1");
+        }
+    }
+
+    // Also test that JSON serialization includes graph_context when non-empty.
+    if !response.graph_context.is_empty() {
+        let json_str = serde_json::to_string(&response).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(
+            parsed.get("graph_context").is_some(),
+            "non-empty graph_context should be present in JSON"
+        );
+        assert!(
+            parsed["graph_context"].is_array(),
+            "graph_context should be an array"
+        );
+    }
 }
