@@ -1447,8 +1447,14 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         let graph = self.index.get_link_graph().ok_or_else(|| {
             Error::Config("no link graph available; run ingest first".to_string())
         })?;
+        let path = path.strip_prefix("./").unwrap_or(path);
         let indexed_files: std::collections::HashSet<String> =
             self.index.get_file_hashes().keys().cloned().collect();
+        if !indexed_files.contains(path) {
+            return Err(Error::FileNotInIndex {
+                path: std::path::PathBuf::from(path),
+            });
+        }
         let backlink_map = links::compute_backlinks(&graph);
         Ok(links::query_links(path, &graph, &backlink_map, &indexed_files))
     }
@@ -1461,8 +1467,14 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         let graph = self.index.get_link_graph().ok_or_else(|| {
             Error::Config("no link graph available; run ingest first".to_string())
         })?;
+        let path = path.strip_prefix("./").unwrap_or(path);
         let indexed_files: std::collections::HashSet<String> =
             self.index.get_file_hashes().keys().cloned().collect();
+        if !indexed_files.contains(path) {
+            return Err(Error::FileNotInIndex {
+                path: std::path::PathBuf::from(path),
+            });
+        }
         Ok(links::neighborhood(&graph, &indexed_files, path, depth))
     }
 

@@ -616,15 +616,13 @@ fn test_links_nonexistent_file() {
         .output()
         .expect("failed to run mdvdb");
 
-    // The command succeeds but returns empty links for a nonexistent file
-    assert!(output.status.success(), "links should succeed even for nonexistent file");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
-    let links = &json["links"];
-    let outgoing = links["outgoing"].as_array().unwrap();
-    let incoming = links["incoming"].as_array().unwrap();
-    assert!(outgoing.is_empty(), "nonexistent file should have no outgoing links");
-    assert!(incoming.is_empty(), "nonexistent file should have no incoming links");
+    // The command should fail with an error for a nonexistent file
+    assert!(!output.status.success(), "links should fail for nonexistent file");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not in index") || stderr.contains("nonexistent.md"),
+        "error should mention the file is not in the index, got: {stderr}"
+    );
 }
 
 #[test]
