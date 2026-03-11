@@ -279,6 +279,9 @@ pub struct GraphNode {
     pub chunk_index: Option<usize>,
     /// Cluster assignment, if any.
     pub cluster_id: Option<usize>,
+    /// Optional size metric for visualization (e.g. content length for chunks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f64>,
 }
 
 /// An edge in the graph visualization representing a link or similarity.
@@ -1285,6 +1288,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 label: None,
                 chunk_index: None,
                 cluster_id: path_to_cluster.get(path).copied(),
+                size: None,
             })
             .collect();
 
@@ -1365,12 +1369,15 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 } else {
                     Some(cv.heading_hierarchy.join(" > "))
                 };
+                let content_len = self.index.get_chunk(&cv.chunk_id)
+                    .map(|c| c.content.len() as f64);
                 GraphNode {
                     id: cv.chunk_id.clone(),
                     path: cv.source_path.clone(),
                     label,
                     chunk_index: Some(cv.chunk_index),
                     cluster_id: path_to_cluster.get(&cv.source_path).copied(),
+                    size: content_len,
                 }
             })
             .collect();
