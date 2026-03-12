@@ -229,6 +229,63 @@ Optional time-based decay multiplier for search scores, favoring recently edited
 
 ---
 
+## Sprint 4 — Semantic Graph & Scoped Schema (Phases 22–23)
+
+### Phase 22 — Semantic Edges (Auto-Inferred Graph RAG)
+> [phase-22-semantic-edges.md](phase-22-semantic-edges.md)
+
+Transform the flat link graph into a semantically-rich knowledge graph. Extract paragraph-level context around every internal link, embed it alongside chunk vectors, and globally cluster all edge embeddings via K-means to auto-discover relationship types. Edge-weighted search boosting replaces the flat link boost with `cosine(query_embedding, edge_embedding)` modulation. New edge-first retrieval mode (`--edge-search`) and `mdvdb edges` CLI command.
+
+**Key additions:**
+- Paragraph-level link context extraction during parsing
+- Edge embeddings stored in shared HNSW index with `"edge:"` ID prefix
+- Global K-means clustering of edge embeddings to auto-discover relationship types
+- Edge-weighted search boost replacing flat BFS multiplier
+- `SearchMode::Edge` — edge-first retrieval: search edges, return connected documents
+- `mdvdb edges <file>` CLI command
+- `mdvdb search --edge-search` flag
+
+### Phase 22 (App) — Semantic Edge Visualization
+> [app/phase-22-semantic-edge-visualization.md](app/phase-22-semantic-edge-visualization.md)
+
+Visualize auto-inferred semantic edges in the Electron app's graph views. Edges gain variable thickness (by strength), color (by relationship cluster), dashed/solid styling, hover tooltips with context text, and a clickable edge-type legend for filtering. Consumes extended `GraphData` JSON from the Rust backend.
+
+**Key additions:**
+- Variable edge thickness based on relationship strength (0–1)
+- Edge coloring by auto-discovered relationship cluster (pastel palette)
+- Dashed lines for weak edges below configurable threshold
+- Edge hover tooltips with relationship type, strength bar, and context excerpt
+- Edge-type legend with click-to-filter in graph panel
+- Graceful degradation when semantic edge data is absent
+
+### Phase 23 — Path-Scoped Schema
+> [phase-23-scoped-schema.md](phase-23-scoped-schema.md)
+
+Extend the schema system to support path-scoped schemas — separate inferences per directory subtree alongside the global schema. Scopes are auto-discovered from top-level directories and optionally refined via `.markdownvdb.schema.yml`. Scoped queries return global fields + matching scope fields with more-specific scopes overriding broader ones.
+
+**Key additions:**
+- Auto-discover scopes from top-level directories
+- Explicit scope configuration in `.markdownvdb.schema.yml` with `scopes:` section
+- Union resolution: scoped fields override global fields
+- `mdvdb schema --path blog/` for scoped schema queries
+- `MarkdownVdb::schema_scoped(path_prefix)` library API
+- Index version bump (v1 → v2), requiring `mdvdb ingest --full` for existing indexes
+
+### Phase 23 (App) — Schema-Aware Frontmatter Editor
+> [app/phase-23-frontmatter-suggestions.md](app/phase-23-frontmatter-suggestions.md)
+
+Make the app's FrontmatterEditor schema-aware with field name suggestions, value autocomplete, constrained dropdowns for fields with allowed values, description tooltips, and required field indicators. Uses path-scoped schema from core Phase 23 for directory-aware suggestions.
+
+**Key additions:**
+- Field name suggestions when adding new frontmatter properties
+- Value autocomplete for text fields using `sample_values`
+- Constrained `<select>` dropdowns for fields with `allowed_values`
+- Tag autocomplete for array fields
+- Description tooltips and required field indicators (`*`)
+- Scoped suggestions based on the open file's directory
+
+---
+
 ## Dependency Graph
 
 ```
@@ -281,12 +338,26 @@ Optional time-based decay multiplier for search scores, favoring recently edited
                ┌─▼──┐
                │ 18 │ Time Decay
                │    │ (uses 6, 14)
-               └────┘
+               └─┬──┘
+                 │
+          ┌──────┴──────┐
+        ┌─▼──┐        ┌─▼──┐
+        │ 22 │        │ 23 │ Scoped Schema
+        │Edge│        │    │ (uses 7)
+        │    │        └─┬──┘
+        └─┬──┘          │
+          │           ┌─▼──────┐
+        ┌─▼──────┐    │ 23 App │ Frontmatter
+        │ 22 App │    │        │ Editor
+        │  Edge  │    └────────┘
+        │  Viz   │
+        └────────┘
 ```
 
 **Sprint 1 critical path:** 1 → 2 → 3 → 4 → 5 → 6 → 10 ✅
 **Sprint 1.5:** 11 (config polish) ✅
 **Sprint 2:** 12 first (CLI formatting used by 13+). 13, 14, and 15 are independent of each other after 12.
+**Sprint 4:** 22 depends on 15 (link graph) + 4 (embeddings). 23 depends on 7 (schema). App phases depend on their core counterparts.
 
 ---
 
