@@ -1,4 +1,4 @@
-# PRD: Phase 22 — Linear Score Fusion for Hybrid Search
+# PRD: Phase 25 — Linear Score Fusion for Hybrid Search
 
 ## Overview
 
