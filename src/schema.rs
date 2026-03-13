@@ -45,11 +45,22 @@ pub struct OverlayField {
     pub required: Option<bool>,
 }
 
+/// A scope's field overlay, defining field annotations for a path prefix.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ScopeOverlay {
+    /// Map from field name to overlay configuration for this scope.
+    pub fields: HashMap<String, OverlayField>,
+}
+
 /// Top-level structure for `.markdownvdb.schema.yml`.
 #[derive(Debug, serde::Deserialize)]
 pub struct OverlaySchema {
     /// Map from field name to overlay configuration.
+    #[serde(default)]
     pub fields: HashMap<String, OverlayField>,
+    /// Path-scoped field overlays.
+    #[serde(default)]
+    pub scopes: HashMap<String, ScopeOverlay>,
 }
 
 /// A merged schema field combining inferred data with overlay annotations.
@@ -70,6 +81,16 @@ pub struct SchemaField {
     pub allowed_values: Option<Vec<String>>,
     /// Whether this field is required (from overlay, defaults to false).
     pub required: bool,
+}
+
+/// A schema tagged with its path scope, persisted in the index.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[rkyv(derive(Debug))]
+pub struct ScopedSchema {
+    /// Path prefix for this scope (e.g. "blog/").
+    pub scope: String,
+    /// The schema for files under this scope.
+    pub schema: Schema,
 }
 
 /// The complete metadata schema, persisted in the index.

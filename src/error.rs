@@ -50,6 +50,9 @@ pub enum Error {
 
     #[error("full-text search error: {0}")]
     Fts(String),
+
+    #[error("index version {version} is outdated. Run `mdvdb ingest --full` to rebuild.")]
+    IndexVersionMismatch { version: u32 },
 }
 
 /// Convenience alias used throughout the crate.
@@ -166,6 +169,15 @@ mod tests {
     fn fts_variant_formats() {
         let err = Error::Fts("tokenization failed".into());
         assert_eq!(err.to_string(), "full-text search error: tokenization failed");
+    }
+
+    #[test]
+    fn index_version_mismatch_variant_formats() {
+        let err = Error::IndexVersionMismatch { version: 1 };
+        assert_eq!(
+            err.to_string(),
+            "index version 1 is outdated. Run `mdvdb ingest --full` to rebuild."
+        );
     }
 
     #[test]
