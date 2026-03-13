@@ -50,6 +50,9 @@ pub enum Error {
 
     #[error("full-text search error: {0}")]
     Fts(String),
+
+    #[error("semantic edge error: {0}")]
+    SemanticEdge(String),
 }
 
 /// Convenience alias used throughout the crate.
@@ -166,6 +169,12 @@ mod tests {
     fn fts_variant_formats() {
         let err = Error::Fts("tokenization failed".into());
         assert_eq!(err.to_string(), "full-text search error: tokenization failed");
+    }
+
+    #[test]
+    fn semantic_edge_variant_formats() {
+        let err = Error::SemanticEdge("invalid weight".into());
+        assert_eq!(err.to_string(), "semantic edge error: invalid weight");
     }
 
     #[test]
