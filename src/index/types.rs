@@ -5,7 +5,7 @@ use crate::chunker::Chunk;
 use crate::clustering::ClusterState;
 use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
-use crate::schema::Schema;
+use crate::schema::{Schema, ScopedSchema};
 
 /// A chunk stored in the index, with rkyv derives for zero-copy deserialization.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
@@ -80,6 +80,8 @@ pub struct IndexMetadata {
     /// File modification timestamps (path → mtime as Unix seconds).
     /// `None` for indices created before Phase 18.
     pub file_mtimes: Option<HashMap<String, u64>>,
+    /// Path-scoped schemas from directory-level inference, if available.
+    pub scoped_schemas: Option<Vec<ScopedSchema>>,
 }
 
 /// Status snapshot returned by `Index::status()`.

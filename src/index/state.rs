@@ -110,6 +110,7 @@ impl Index {
             cluster_state: None,
             link_graph: None,
             file_mtimes: Some(HashMap::new()),
+            scoped_schemas: None,
         };
 
         let scalar_kind = storage::scalar_kind_for(&write_options.quantization);
