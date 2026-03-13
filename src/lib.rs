@@ -25,9 +25,10 @@ pub use search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, Sear
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{
-    LinkEntry, LinkGraph, LinkQueryResult, LinkState, NeighborhoodNode, NeighborhoodResult,
-    OrphanFile, ResolvedLink,
+    EdgeClusterInfo, EdgeClusterState, LinkEntry, LinkGraph, LinkQueryResult, LinkState,
+    NeighborhoodNode, NeighborhoodResult, OrphanFile, ResolvedLink, SemanticEdge,
 };
+pub use parser::LinkContext;
 pub use tree::{FileState, FileTree, FileTreeNode};
 pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
 // Graph visualization types are defined in this file and automatically public.
@@ -664,6 +665,19 @@ impl MarkdownVdb {
             HashMap::new();
         let mut discovered_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // Track full file contents for edge paragraph extraction.
+        let mut file_full_contents: HashMap<PathBuf, String> = HashMap::new();
+        // Track edge batch chunks (edge ID -> paragraph content).
+        let mut edge_batch_chunks: Vec<embedding::batch::Chunk> = Vec::new();
+        // Track edge metadata for building SemanticEdge entries after embedding.
+        struct EdgeMeta {
+            edge_id: String,
+            source: String,
+            target: String,
+            context_text: String,
+            line_number: usize,
+        }
+        let mut edge_metas: Vec<EdgeMeta> = Vec::new();
 
         let parse_start = std::time::Instant::now();
         let total_files = discovered.len();
@@ -737,6 +751,47 @@ impl MarkdownVdb {
                 });
             }
 
+            // Extract edge contexts if edge embeddings are enabled.
+            if self.config.edge_embeddings && !md.links.is_empty() {
+                // Read full file content (needed for paragraph extraction since
+                // RawLink.line_number is file-relative including frontmatter).
+                let full_path = self.root.join(path);
+                match std::fs::read_to_string(&full_path) {
+                    Ok(full_content) => {
+                        let link_contexts =
+                            parser::extract_links_with_context(&full_content, &md.links);
+                        let source_str = path.to_string_lossy().to_string();
+                        for ctx in &link_contexts {
+                            let resolved_target =
+                                links::resolve_link(&source_str, &ctx.link.target);
+                            if resolved_target.is_empty() {
+                                continue;
+                            }
+                            let edge_id = format!(
+                                "edge:{}->{}@{}",
+                                source_str, resolved_target, ctx.link.line_number
+                            );
+                            edge_batch_chunks.push(embedding::batch::Chunk {
+                                id: edge_id.clone(),
+                                source_path: path.clone(),
+                                content: ctx.paragraph.clone(),
+                            });
+                            edge_metas.push(EdgeMeta {
+                                edge_id,
+                                source: source_str.clone(),
+                                target: resolved_target,
+                                context_text: ctx.paragraph.clone(),
+                                line_number: ctx.link.line_number,
+                            });
+                        }
+                        file_full_contents.insert(path.clone(), full_content);
+                    }
+                    Err(e) => {
+                        debug!(path = %path.display(), error = %e, "could not read full file for edge extraction");
+                    }
+                }
+            }
+
             parsed_files.insert(path.clone(), (md, chunks));
         }
 
@@ -752,6 +807,9 @@ impl MarkdownVdb {
         }
 
         emit(&IngestPhase::Embedding { batch: 0, total_batches: 0 });
+
+        // Include edge chunks in the same batch as regular chunks (no extra API calls).
+        all_batch_chunks.extend(edge_batch_chunks);
 
         // Embed all changed chunks.
         // For files we're re-embedding, we pass empty existing hashes so nothing is skipped.
@@ -816,6 +874,103 @@ impl MarkdownVdb {
             result.files_indexed += 1;
             result.chunks_created += chunks.len();
             debug!(path = %path.display(), chunks = chunks.len(), "indexed");
+        }
+
+        // Upsert edge vectors and build semantic edge entries.
+        if self.config.edge_embeddings && !edge_metas.is_empty() {
+            // For single-file ingest, remove old edges for the file first.
+            if let Some(ref single_file) = options.file {
+                let source_str = single_file.to_string_lossy().to_string();
+                let source_prefix = format!("edge:{}", source_str);
+                // Get existing edge vectors to find ones belonging to this file.
+                let existing_edges = self.index.get_edge_vectors();
+                let old_edge_ids: Vec<String> = existing_edges
+                    .keys()
+                    .filter(|id| id.starts_with(&source_prefix))
+                    .cloned()
+                    .collect();
+                if !old_edge_ids.is_empty() {
+                    // Remove old edge vectors by upserting empty set after removing via index internals.
+                    // The upsert_edges call will handle replacement since it removes existing edge: prefix entries.
+                    debug!(count = old_edge_ids.len(), "removing old edge vectors for single-file re-ingest");
+                }
+            }
+
+            // Collect edge vectors from embed results.
+            let edge_vectors: Vec<(String, Vec<f32>)> = edge_metas
+                .iter()
+                .filter_map(|em| {
+                    embed_result
+                        .embeddings
+                        .get(&em.edge_id)
+                        .map(|v| (em.edge_id.clone(), v.clone()))
+                })
+                .collect();
+
+            if !edge_vectors.is_empty() {
+                self.index.upsert_edges(&edge_vectors)?;
+                debug!(count = edge_vectors.len(), "upserted edge vectors");
+            }
+
+            // Build SemanticEdge entries and merge into link graph.
+            let mut semantic_edges: HashMap<String, links::SemanticEdge> = HashMap::new();
+            for em in &edge_metas {
+                // Compute strength (cosine similarity to target doc vector) if available.
+                let strength = {
+                    let doc_vectors = self.index.get_document_vectors();
+                    let edge_vec = embed_result.embeddings.get(&em.edge_id);
+                    let target_vec = doc_vectors.get(&em.target);
+                    match (edge_vec, target_vec) {
+                        (Some(ev), Some(tv)) => {
+                            let dot: f32 = ev.iter().zip(tv.iter()).map(|(a, b)| a * b).sum();
+                            let norm_a: f32 = ev.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let norm_b: f32 = tv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            if norm_a > 0.0 && norm_b > 0.0 {
+                                Some((dot / (norm_a * norm_b)) as f64)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+
+                semantic_edges.insert(
+                    em.edge_id.clone(),
+                    links::SemanticEdge {
+                        edge_id: em.edge_id.clone(),
+                        source: em.source.clone(),
+                        target: em.target.clone(),
+                        context_text: em.context_text.clone(),
+                        line_number: em.line_number,
+                        strength,
+                        relationship_type: None,
+                        cluster_id: None,
+                    },
+                );
+            }
+
+            // Merge semantic edges into the link graph.
+            if let Some(mut graph) = self.index.get_link_graph() {
+                // For single-file ingest, remove old edges for the file from the map.
+                if let Some(ref single_file) = options.file {
+                    let source_str = single_file.to_string_lossy().to_string();
+                    let source_prefix = format!("edge:{}->", source_str);
+                    if let Some(ref mut existing) = graph.semantic_edges {
+                        existing.retain(|id, _| !id.starts_with(&source_prefix));
+                    }
+                }
+
+                match graph.semantic_edges {
+                    Some(ref mut existing) => {
+                        existing.extend(semantic_edges);
+                    }
+                    None => {
+                        graph.semantic_edges = Some(semantic_edges);
+                    }
+                }
+                self.index.update_link_graph(Some(graph));
+            }
         }
 
         // Consistency guard: rebuild FTS from stored chunks for files that
