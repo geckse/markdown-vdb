@@ -260,7 +260,11 @@ struct IngestArgs {
 struct StatusArgs {}
 
 #[derive(Parser)]
-struct SchemaArgs {}
+struct SchemaArgs {
+    /// Restrict schema to files under this path prefix
+    #[arg(long)]
+    path: Option<String>,
+}
 
 #[derive(Parser)]
 struct ClustersArgs {}
@@ -660,16 +664,31 @@ async fn run() -> anyhow::Result<()> {
                 format::print_status(&status);
             }
         }
-        Some(Commands::Schema(_args)) => {
+        Some(Commands::Schema(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let schema = vdb.schema()?;
 
-            if json {
-                serde_json::to_writer_pretty(std::io::stdout(), &schema)?;
-                writeln!(std::io::stdout())?;
+            if let Some(ref prefix) = args.path {
+                let scoped = vdb.schema_scoped(prefix)?;
+
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &scoped)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    let scope_label = format!("Schema (scoped to {})", prefix);
+                    eprintln!("{}", scope_label.bold());
+                    let vdb_status = vdb.status();
+                    format::print_schema(&scoped.schema, vdb_status.document_count, Some(prefix));
+                }
             } else {
-                let vdb_status = vdb.status();
-                format::print_schema(&schema, vdb_status.document_count);
+                let schema = vdb.schema()?;
+
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &schema)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    let vdb_status = vdb.status();
+                    format::print_schema(&schema, vdb_status.document_count, None);
+                }
             }
         }
         Some(Commands::Clusters(_args)) => {

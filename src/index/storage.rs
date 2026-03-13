@@ -13,7 +13,7 @@ use crate::index::types::IndexMetadata;
 pub const MAGIC: &[u8; 6] = b"MDVDB\x00";
 
 /// Current index format version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Fixed header size in bytes.
 pub const HEADER_SIZE: usize = 64;
@@ -160,6 +160,9 @@ pub fn load_index(path: &Path) -> Result<(IndexMetadata, Index)> {
     // Validate version
     let version = u32::from_le_bytes(mmap[6..10].try_into().unwrap());
     if version != VERSION {
+        if version < VERSION {
+            return Err(Error::IndexVersionMismatch { version });
+        }
         return Err(Error::IndexCorrupted(format!(
             "unsupported version: {version}"
         )));
@@ -249,6 +252,7 @@ mod tests {
             cluster_state: None,
             link_graph: None,
             file_mtimes: Some(HashMap::new()),
+            scoped_schemas: None,
         }
     }
 
@@ -350,6 +354,21 @@ mod tests {
         fs::write(&path, &data).unwrap();
         let result = load_index(&path);
         assert!(matches!(result, Err(Error::IndexCorrupted(_))));
+    }
+
+    #[test]
+    fn old_version_returns_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("old.idx");
+        let mut data = vec![0u8; 128];
+        data[..6].copy_from_slice(b"MDVDB\x00");
+        data[6..10].copy_from_slice(&1u32.to_le_bytes());
+        fs::write(&path, &data).unwrap();
+        let result = load_index(&path);
+        assert!(matches!(
+            result,
+            Err(Error::IndexVersionMismatch { version: 1 })
+        ));
     }
 
     #[test]

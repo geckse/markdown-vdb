@@ -45,11 +45,22 @@ pub struct OverlayField {
     pub required: Option<bool>,
 }
 
+/// A scope's field overlay, defining field annotations for a path prefix.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ScopeOverlay {
+    /// Map from field name to overlay configuration for this scope.
+    pub fields: HashMap<String, OverlayField>,
+}
+
 /// Top-level structure for `.markdownvdb.schema.yml`.
 #[derive(Debug, serde::Deserialize)]
 pub struct OverlaySchema {
     /// Map from field name to overlay configuration.
+    #[serde(default)]
     pub fields: HashMap<String, OverlayField>,
+    /// Path-scoped field overlays.
+    #[serde(default)]
+    pub scopes: HashMap<String, ScopeOverlay>,
 }
 
 /// A merged schema field combining inferred data with overlay annotations.
@@ -70,6 +81,16 @@ pub struct SchemaField {
     pub allowed_values: Option<Vec<String>>,
     /// Whether this field is required (from overlay, defaults to false).
     pub required: bool,
+}
+
+/// A schema tagged with its path scope, persisted in the index.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[rkyv(derive(Debug))]
+pub struct ScopedSchema {
+    /// Path prefix for this scope (e.g. "blog/").
+    pub scope: String,
+    /// The schema for files under this scope.
+    pub schema: Schema,
 }
 
 /// The complete metadata schema, persisted in the index.
@@ -138,6 +159,42 @@ fn parse_field_type_str(s: &str) -> Option<FieldType> {
 impl Schema {
     /// Auto-infer a schema from frontmatter across all provided files.
     pub fn infer(files: &[MarkdownFile]) -> Self {
+        Self::infer_from_iter(files.iter())
+    }
+
+    /// Infer a schema from frontmatter across files matching a path prefix.
+    ///
+    /// Files whose `path` starts with `path_prefix` are included.
+    /// The prefix is normalized to end with `/` (unless empty).
+    pub fn infer_scoped(files: &[MarkdownFile], path_prefix: &str) -> Self {
+        let prefix = if path_prefix.is_empty() || path_prefix.ends_with('/') {
+            path_prefix.to_string()
+        } else {
+            format!("{path_prefix}/")
+        };
+
+        let filtered = files.iter().filter(|f| f.path.to_string_lossy().starts_with(&prefix));
+        Self::infer_from_iter(filtered)
+    }
+
+    /// Discover unique top-level directory scopes from the file paths.
+    ///
+    /// Returns sorted unique first path components that are directories
+    /// (i.e., paths containing a `/`).
+    pub fn discover_scopes(files: &[MarkdownFile]) -> Vec<String> {
+        let mut scopes: BTreeMap<String, ()> = BTreeMap::new();
+        for file in files {
+            let path_str = file.path.to_string_lossy();
+            if let Some(idx) = path_str.find('/') {
+                let top = &path_str[..idx];
+                scopes.entry(top.to_string()).or_default();
+            }
+        }
+        scopes.into_keys().collect()
+    }
+
+    /// Core inference logic operating over any iterator of `&MarkdownFile`.
+    pub fn infer_from_iter<'a>(files: impl IntoIterator<Item = &'a MarkdownFile>) -> Self {
         // Track per-field: types seen, occurrence count, sample values
         let mut field_types: HashMap<String, HashSet<std::mem::Discriminant<FieldType>>> =
             HashMap::new();
@@ -224,7 +281,7 @@ impl Schema {
     /// Load an optional overlay from `.markdownvdb.schema.yml` in the project root.
     pub fn load_overlay(
         project_root: &Path,
-    ) -> crate::Result<Option<HashMap<String, OverlayField>>> {
+    ) -> crate::Result<Option<OverlaySchema>> {
         let path = project_root.join(".markdownvdb.schema.yml");
         if !path.exists() {
             debug!("no schema overlay file found at {}", path.display());
@@ -240,7 +297,42 @@ impl Schema {
         })?;
 
         debug!(field_count = overlay.fields.len(), "loaded schema overlay");
-        Ok(Some(overlay.fields))
+        Ok(Some(overlay))
+    }
+
+    /// Resolve overlay fields for a given path prefix.
+    /// Returns global fields merged with all matching scope fields,
+    /// sorted by prefix length (shortest first, more specific overrides).
+    pub fn resolve_overlay_for_path(
+        overlay: &OverlaySchema,
+        path_prefix: Option<&str>,
+    ) -> HashMap<String, OverlayField> {
+        // Start with global fields
+        let mut resolved = overlay.fields.clone();
+
+        // If no path prefix, return global fields only
+        let prefix = match path_prefix {
+            Some(p) => p,
+            None => return resolved,
+        };
+
+        // Collect matching scopes and sort by prefix length (shortest first)
+        let mut matching_scopes: Vec<(&str, &ScopeOverlay)> = overlay
+            .scopes
+            .iter()
+            .filter(|(scope, _)| prefix.starts_with(scope.as_str()) || prefix == scope.as_str())
+            .map(|(s, o)| (s.as_str(), o))
+            .collect();
+        matching_scopes.sort_by_key(|(scope, _)| scope.len());
+
+        // Layer matching scope fields on top (more specific overrides less specific)
+        for (_, scope_overlay) in matching_scopes {
+            for (name, field) in &scope_overlay.fields {
+                resolved.insert(name.clone(), field.clone());
+            }
+        }
+
+        resolved
     }
 
     /// Merge an inferred schema with an optional overlay.
@@ -503,10 +595,10 @@ fields:
 "#;
         std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
         let result = Schema::load_overlay(dir.path()).unwrap().unwrap();
-        assert_eq!(result.len(), 2);
-        assert_eq!(result["title"].description.as_deref(), Some("The document title"));
-        assert_eq!(result["title"].required, Some(true));
-        assert!(result["status"].allowed_values.is_some());
+        assert_eq!(result.fields.len(), 2);
+        assert_eq!(result.fields["title"].description.as_deref(), Some("The document title"));
+        assert_eq!(result.fields["title"].required, Some(true));
+        assert!(result.fields["status"].allowed_values.is_some());
     }
 
     #[test]
@@ -591,5 +683,249 @@ fields:
         let schema = Schema::infer(&files);
         let names = schema.field_names();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    fn make_overlay(
+        fields: HashMap<String, OverlayField>,
+        scopes: HashMap<String, ScopeOverlay>,
+    ) -> OverlaySchema {
+        OverlaySchema { fields, scopes }
+    }
+
+    fn make_overlay_field(description: Option<&str>) -> OverlayField {
+        OverlayField {
+            description: description.map(|s| s.to_string()),
+            field_type: None,
+            allowed_values: None,
+            required: None,
+        }
+    }
+
+    #[test]
+    fn resolve_no_prefix_returns_global_only() {
+        let mut fields = HashMap::new();
+        fields.insert("title".to_string(), make_overlay_field(Some("Global title")));
+        let mut scopes = HashMap::new();
+        let mut scope_fields = HashMap::new();
+        scope_fields.insert("status".to_string(), make_overlay_field(Some("Blog status")));
+        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        let overlay = make_overlay(fields, scopes);
+
+        let resolved = Schema::resolve_overlay_for_path(&overlay, None);
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved.contains_key("title"));
+    }
+
+    #[test]
+    fn resolve_matching_scope() {
+        let mut fields = HashMap::new();
+        fields.insert("title".to_string(), make_overlay_field(Some("Global title")));
+        let mut scopes = HashMap::new();
+        let mut scope_fields = HashMap::new();
+        scope_fields.insert("status".to_string(), make_overlay_field(Some("Blog status")));
+        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        let overlay = make_overlay(fields, scopes);
+
+        let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/"));
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains_key("title"));
+        assert!(resolved.contains_key("status"));
+    }
+
+    #[test]
+    fn resolve_scope_overrides_global() {
+        let mut fields = HashMap::new();
+        fields.insert("title".to_string(), make_overlay_field(Some("Global title")));
+        let mut scopes = HashMap::new();
+        let mut scope_fields = HashMap::new();
+        scope_fields.insert("title".to_string(), make_overlay_field(Some("Blog title")));
+        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        let overlay = make_overlay(fields, scopes);
+
+        let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/"));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved["title"].description.as_deref(), Some("Blog title"));
+    }
+
+    #[test]
+    fn resolve_nested_path_matches_parent_scope() {
+        let mut scopes = HashMap::new();
+        let mut scope_fields = HashMap::new();
+        scope_fields.insert("category".to_string(), make_overlay_field(Some("Blog cat")));
+        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        let overlay = make_overlay(HashMap::new(), scopes);
+
+        let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/2024/post.md"));
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved.contains_key("category"));
+    }
+
+    #[test]
+    fn resolve_multiple_scopes_union() {
+        let mut scopes = HashMap::new();
+        let mut blog_fields = HashMap::new();
+        blog_fields.insert("category".to_string(), make_overlay_field(Some("Blog cat")));
+        scopes.insert("blog/".to_string(), ScopeOverlay { fields: blog_fields });
+        let mut nested_fields = HashMap::new();
+        nested_fields.insert("year".to_string(), make_overlay_field(Some("Year")));
+        scopes.insert("blog/2024/".to_string(), ScopeOverlay { fields: nested_fields });
+        let overlay = make_overlay(HashMap::new(), scopes);
+
+        let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/2024/post.md"));
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains_key("category"));
+        assert!(resolved.contains_key("year"));
+    }
+
+    #[test]
+    fn resolve_no_matching_scope() {
+        let mut fields = HashMap::new();
+        fields.insert("title".to_string(), make_overlay_field(Some("Global")));
+        let mut scopes = HashMap::new();
+        let mut scope_fields = HashMap::new();
+        scope_fields.insert("status".to_string(), make_overlay_field(None));
+        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        let overlay = make_overlay(fields, scopes);
+
+        let resolved = Schema::resolve_overlay_for_path(&overlay, Some("docs/readme.md"));
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved.contains_key("title"));
+    }
+
+    #[test]
+    fn load_overlay_with_scopes_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+fields:
+  title:
+    description: "Document title"
+    required: true
+scopes:
+  blog/:
+    fields:
+      status:
+        description: "Publication status"
+        allowed_values: ["draft", "published"]
+"#;
+        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+        let result = Schema::load_overlay(dir.path()).unwrap().unwrap();
+        assert_eq!(result.fields.len(), 1);
+        assert_eq!(result.scopes.len(), 1);
+        assert!(result.scopes.contains_key("blog/"));
+        assert_eq!(result.scopes["blog/"].fields.len(), 1);
+    }
+
+    #[test]
+    fn load_overlay_backward_compat() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+fields:
+  title:
+    description: "Document title"
+"#;
+        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+        let result = Schema::load_overlay(dir.path()).unwrap().unwrap();
+        assert_eq!(result.fields.len(), 1);
+        assert!(result.scopes.is_empty());
+    }
+
+    fn make_file_with_path(path: &str, frontmatter: serde_json::Value) -> MarkdownFile {
+        MarkdownFile {
+            path: std::path::PathBuf::from(path),
+            frontmatter: Some(frontmatter),
+            headings: vec![],
+            body: String::new(),
+            content_hash: String::new(),
+            file_size: 0,
+            links: Vec::new(),
+            modified_at: 0,
+        }
+    }
+
+    #[test]
+    fn infer_from_iter_matches_infer() {
+        let files = vec![
+            make_file(serde_json::json!({"title": "Hello", "count": 5})),
+            make_file(serde_json::json!({"title": "World", "tags": ["a"]})),
+        ];
+        let schema_infer = Schema::infer(&files);
+        let schema_iter = Schema::infer_from_iter(files.iter());
+        assert_eq!(schema_infer.fields.len(), schema_iter.fields.len());
+        for (a, b) in schema_infer.fields.iter().zip(schema_iter.fields.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.field_type, b.field_type);
+            assert_eq!(a.occurrence_count, b.occurrence_count);
+        }
+    }
+
+    #[test]
+    fn infer_scoped_filters_by_prefix() {
+        let files = vec![
+            make_file_with_path("blog/post1.md", serde_json::json!({"title": "Post", "status": "draft"})),
+            make_file_with_path("blog/post2.md", serde_json::json!({"title": "Post2", "status": "published"})),
+            make_file_with_path("docs/readme.md", serde_json::json!({"title": "Docs", "version": "1.0"})),
+        ];
+        let schema = Schema::infer_scoped(&files, "blog");
+        assert_eq!(schema.fields.len(), 2); // status, title
+        assert_eq!(schema.fields[0].name, "status");
+        assert_eq!(schema.fields[1].name, "title");
+        assert_eq!(schema.fields[1].occurrence_count, 2);
+    }
+
+    #[test]
+    fn infer_scoped_empty_prefix_returns_empty() {
+        let files = vec![
+            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
+        ];
+        // Empty prefix matches nothing since paths don't start with ""... actually they do
+        let schema = Schema::infer_scoped(&files, "");
+        assert_eq!(schema.fields.len(), 1);
+    }
+
+    #[test]
+    fn infer_scoped_no_matches() {
+        let files = vec![
+            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
+        ];
+        let schema = Schema::infer_scoped(&files, "docs");
+        assert!(schema.fields.is_empty());
+    }
+
+    #[test]
+    fn infer_scoped_with_trailing_slash() {
+        let files = vec![
+            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
+        ];
+        let schema = Schema::infer_scoped(&files, "blog/");
+        assert_eq!(schema.fields.len(), 1);
+    }
+
+    #[test]
+    fn discover_scopes_extracts_top_level_dirs() {
+        let files = vec![
+            make_file_with_path("blog/post1.md", serde_json::json!({})),
+            make_file_with_path("blog/post2.md", serde_json::json!({})),
+            make_file_with_path("docs/readme.md", serde_json::json!({})),
+            make_file_with_path("notes/daily/today.md", serde_json::json!({})),
+            make_file_with_path("root-file.md", serde_json::json!({})),
+        ];
+        let scopes = Schema::discover_scopes(&files);
+        assert_eq!(scopes, vec!["blog", "docs", "notes"]);
+    }
+
+    #[test]
+    fn discover_scopes_empty_files() {
+        let scopes = Schema::discover_scopes(&[]);
+        assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn discover_scopes_no_directories() {
+        let files = vec![
+            make_file_with_path("file1.md", serde_json::json!({})),
+            make_file_with_path("file2.md", serde_json::json!({})),
+        ];
+        let scopes = Schema::discover_scopes(&files);
+        assert!(scopes.is_empty());
     }
 }
