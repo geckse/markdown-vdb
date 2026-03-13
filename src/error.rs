@@ -53,6 +53,9 @@ pub enum Error {
 
     #[error("index version {version} is outdated. Run `mdvdb ingest --full` to rebuild.")]
     IndexVersionMismatch { version: u32 },
+
+    #[error("semantic edge error: {0}")]
+    SemanticEdge(String),
 }
 
 /// Convenience alias used throughout the crate.
@@ -178,6 +181,12 @@ mod tests {
             err.to_string(),
             "index version 1 is outdated. Run `mdvdb ingest --full` to rebuild."
         );
+    }
+
+    #[test]
+    fn semantic_edge_variant_formats() {
+        let err = Error::SemanticEdge("invalid weight".into());
+        assert_eq!(err.to_string(), "semantic edge error: invalid weight");
     }
 
     #[test]

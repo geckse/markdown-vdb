@@ -316,6 +316,115 @@ The graph from the two-layer example above:
 
 A flat folder of `.md` files becomes a directed graph. mdvdb lets you traverse it in both directions.
 
+## Semantic Edges: Understanding *Why* Files Are Linked
+
+Plain links tell you *that* two files are connected. Semantic edges tell you *why*. During ingest, mdvdb extracts the paragraph surrounding each link, embeds it, and uses clustering to auto-discover relationship types — no manual labeling needed.
+
+### What Happens Automatically
+
+When `mdvdb ingest` runs (enabled by default via `MDVDB_EDGE_EMBEDDINGS=true`):
+
+1. For every internal link, mdvdb extracts the surrounding paragraph as "edge context"
+2. Edge contexts are embedded alongside chunk embeddings in the same API batch (no extra cost)
+3. All edge embeddings are clustered via K-means to discover relationship types
+4. Each edge gets an auto-generated label (e.g., "dependency / requires", "elaboration / extends", "reference / see also")
+5. Each edge gets a strength score — cosine similarity between the edge context and the target document
+
+For example, given this paragraph in `topics/auth.md`:
+
+```markdown
+The middleware validates tokens on every request. This depends heavily on
+the token generation logic in [[topics/jwt-tokens]] which handles RS256
+signing and refresh rotation.
+```
+
+mdvdb extracts the full paragraph as context for the link to `topics/jwt-tokens.md`. The embedding captures the *dependency* relationship, not just the link's existence.
+
+### Exploring Edges
+
+The `mdvdb edges` command lets you browse semantic edges:
+
+```bash
+# List all semantic edges in the index:
+mdvdb edges
+
+# Show edges for a specific file (as source or target):
+mdvdb edges topics/auth.md
+
+# Filter by relationship type:
+mdvdb edges --relationship "depends"
+
+# JSON output for agents:
+mdvdb edges --json
+```
+
+Example human-readable output:
+
+```
+  ● Semantic Edges (4)
+
+  topics/auth.md → topics/jwt-tokens.md
+    "depends on / requires / imports"  strength: 0.87
+    context: "This depends heavily on the token generation logic in..."
+
+  topics/auth.md → topics/middleware.md
+    "elaboration / extends / builds on"  strength: 0.72
+    context: "The middleware validates tokens on every request..."
+
+  MEMORY.md → topics/auth.md
+    "reference / see also / mentioned"  strength: 0.54
+    context: "JWT with refresh rotation for auth..."
+```
+
+### Edge-First Search
+
+Traditional search finds relevant *documents*. Edge search finds relevant *relationships* — useful when the agent needs to understand how concepts connect rather than find a specific piece of information.
+
+```bash
+# Find relationships about authentication dependencies:
+mdvdb search "what depends on authentication" --edge-search
+
+# JSON output includes edge_results:
+mdvdb search "token validation" --edge-search --json
+```
+
+Edge search queries the edge embeddings (the paragraph contexts around links) instead of document chunks. Results show the source file, target file, relationship type, and the context paragraph that explains the connection.
+
+### Smarter Link Boosting
+
+Without semantic edges, `--boost-links` applies a flat score boost to linked documents — a casual "see also" gets the same boost as a critical dependency link. With semantic edges, the boost is **query-aware**: the edge context embedding is compared to the query, and only edges relevant to what you're searching for contribute a meaningful boost.
+
+```bash
+# Edge-weighted boost (automatic when semantic edges exist):
+mdvdb search "token validation" --boost-links
+```
+
+If you search for "token validation" and `topics/auth.md` links to both `topics/jwt-tokens.md` (about token generation) and `changelog.md` (mentioning auth was updated), the JWT link gets a strong boost while the changelog link gets almost none.
+
+### Graph Output with Edge Metadata
+
+The `mdvdb graph --json` command includes semantic edge data for visualization or agent consumption:
+
+```bash
+mdvdb graph --json
+```
+
+Each edge in the output includes:
+- `relationship_type` — auto-discovered cluster label
+- `strength` — cosine similarity (0.0–1.0)
+- `context_text` — the paragraph surrounding the link
+- `edge_cluster_id` — which relationship cluster it belongs to
+
+### Configuration
+
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `MDVDB_EDGE_EMBEDDINGS` | `true` | Enable/disable semantic edge extraction |
+| `MDVDB_EDGE_BOOST_WEIGHT` | `0.15` | Max boost multiplier for edge-weighted search |
+| `MDVDB_EDGE_CLUSTER_REBALANCE` | `50` | Re-cluster edges after this many new edges |
+
+Set these in `.markdownvdb` or as environment variables.
+
 **Wikilink resolution:**
 
 | Syntax | Resolves to |
@@ -489,17 +598,22 @@ mdvdb search "caching strategy" --json --limit 3
 mdvdb search "error handling" --semantic     # Pure vector similarity
 mdvdb search "ERR_CONNECTION_REFUSED" --lexical  # Keyword/BM25
 mdvdb search "auth middleware"               # Hybrid (default)
+mdvdb search "what depends on auth" --edge-search  # Search relationships, not documents
 ```
+
+Edge search is especially useful for agent memory when the question is about *connections* between concepts rather than a specific fact. See the [Semantic Edges](#semantic-edges-understanding-why-files-are-linked) section for details.
 
 ### Link-Boosted Search
 
-The `--boost-links` flag activates link-aware scoring. After normal ranking, mdvdb checks the top results' link neighbors (files they link to, and files that link to them). Any other result that is a link neighbor gets a 1.2x score boost, then results are re-sorted.
+The `--boost-links` flag activates link-aware scoring. After normal ranking, mdvdb checks the top results' link neighbors (files they link to, and files that link to them). Neighbors get a score boost, and results are re-sorted.
 
 ```bash
 mdvdb search "authentication" --boost-links
 ```
 
-This is powerful for agent memory because linked documents are explicitly related by the agent. If the top result is `topics/auth.md` and it links to `topics/middleware.md`, and `topics/middleware.md` also appears in the results, its score gets boosted — documents the agent explicitly connected are more likely to be relevant.
+When semantic edges are available (default), the boost is **query-aware** — edge context embeddings are compared to the query, so only edges relevant to the search contribute a meaningful boost. A link from `topics/auth.md` to `topics/jwt-tokens.md` in a paragraph about "token validation dependencies" will boost strongly for auth-related queries but weakly for unrelated ones.
+
+Without semantic edges (or when disabled via `MDVDB_EDGE_EMBEDDINGS=false`), a flat distance-based boost is used instead.
 
 ### Recency Decay
 
@@ -605,7 +719,7 @@ The link graph is updated incrementally — when a file changes, its links are r
 For deeper integration, agents can use the Rust library directly:
 
 ```rust
-use mdvdb::{MarkdownVdb, SearchQuery, IngestOptions};
+use mdvdb::{MarkdownVdb, SearchQuery, SearchMode, IngestOptions};
 
 let vdb = MarkdownVdb::open("./memory")?;
 
@@ -633,6 +747,28 @@ let backlinks = vdb.backlinks("topics/auth.md")?;
 
 // Find orphan files:
 let orphans = vdb.orphans()?;
+
+// Explore semantic edges — see WHY files are linked:
+let edges = vdb.edges(Some("topics/auth.md"))?;
+for edge in &edges {
+    println!("{} → {} [{}] strength: {:.2}",
+        edge.source, edge.target,
+        edge.relationship_type.as_deref().unwrap_or("unknown"),
+        edge.strength.unwrap_or(0.0));
+}
+
+// Get auto-discovered relationship types:
+if let Some(clusters) = vdb.edge_clusters()? {
+    for cluster in &clusters.clusters {
+        println!("Relationship: {} ({} edges)", cluster.label, cluster.members.len());
+    }
+}
+
+// Edge-first search — find relationships, not documents:
+let edge_results = vdb.search(
+    SearchQuery::new("what depends on authentication")
+        .with_mode(SearchMode::Edge)
+).await?;
 ```
 
 ## Tips
@@ -641,7 +777,10 @@ let orphans = vdb.orphans()?;
 - **Use frontmatter consistently** — at minimum, include `type` and `tags` on every memory file. This enables filtered search (`--filter type=decision`) and makes `mdvdb schema` useful for discoverability.
 - **Keep curated memory small** — `MEMORY.md` should contain distilled facts, not raw logs. Link to logs for full context.
 - **Run orphan checks regularly** — orphan files indicate forgotten knowledge. Link them in or archive them.
-- **Use `--boost-links` for recall** — link boosting leverages the agent's own cross-references to improve search results.
+- **Use `--boost-links` for recall** — link boosting leverages the agent's own cross-references to improve search results. With semantic edges, this boost is query-aware — only contextually relevant links contribute.
+- **Write descriptive link paragraphs** — semantic edges extract the paragraph around each link. "This depends on [[jwt-tokens]] for token validation" produces a richer edge than a bare `[[jwt-tokens]]` on its own line.
+- **Use `--edge-search` for relationship queries** — when the question is "what connects to X?" rather than "tell me about X", edge search returns the relationships themselves.
+- **Use `mdvdb edges` for graph exploration** — browse auto-discovered relationship types to understand how your memory files connect semantically.
 - **Single-file ingest is fast** — `mdvdb ingest --file <path>` immediately after writing a file for near-instant indexing.
 - **Always use `--json` for programmatic access** — all commands support it. Agents should parse JSON, not human-readable output.
 - **Use the watcher for long sessions** — `mdvdb watch` keeps the index current without manual re-ingestion.
@@ -682,12 +821,20 @@ mdvdb links MEMORY.md
 mdvdb backlinks topics/auth.md
 mdvdb orphans                     # → scratch/ideas.md
 
+# Explore semantic edges (auto-discovered relationships):
+mdvdb edges                       # All edges with relationship types
+mdvdb edges topics/auth.md        # Edges for a specific file
+mdvdb edges --relationship "depends"  # Filter by relationship type
+
 # Search by type:
 mdvdb search "caching" --filter type=decision
 mdvdb search "" --filter type=user-preference
 
-# Search with link boosting:
+# Search with link boosting (query-aware with semantic edges):
 mdvdb search "authentication flow" --boost-links
+
+# Search relationships between files:
+mdvdb search "what depends on auth" --edge-search
 
 # Start watching for live changes:
 mdvdb watch

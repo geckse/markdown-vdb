@@ -209,7 +209,9 @@ pub fn load_index(path: &Path) -> Result<(IndexMetadata, Index)> {
     // Deserialize metadata
     let metadata: IndexMetadata =
         rkyv::from_bytes::<IndexMetadata, rkyv::rancor::Error>(meta_bytes)
-            .map_err(|e| Error::Serialization(format!("rkyv deserialize: {e}")))?;
+            .map_err(|_| Error::IndexCorrupted(
+                "index format is incompatible or corrupted — delete .markdownvdb/ and re-ingest".into()
+            ))?;
 
     // Load HNSW with the correct ScalarKind
     let hnsw_bytes = &mmap[hnsw_offset..hnsw_offset + hnsw_size];

@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use serde_json::Value;
 
-use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink};
-use mdvdb::search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings};
+use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink, SemanticEdge};
+use mdvdb::search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings};
 use mdvdb::{GraphLevel, IngestTimings, MarkdownVdb};
 
 /// Wrapped search output for JSON mode.
@@ -23,6 +23,8 @@ struct SearchOutput {
     timings: Option<SearchTimings>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     graph_context: Vec<GraphContextItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    edge_results: Vec<EdgeSearchResult>,
 }
 
 /// Wrapped ingest output for JSON mode (verbosity-gated timings).
@@ -61,6 +63,17 @@ struct BacklinksOutput {
 struct OrphansOutput {
     orphans: Vec<OrphanFile>,
     total_orphans: usize,
+}
+
+/// Wrapped edges output for JSON mode.
+#[derive(serde::Serialize)]
+struct EdgesOutput {
+    edges: Vec<SemanticEdge>,
+    total_edges: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relationship_filter: Option<String>,
 }
 
 /// mdvdb — Markdown Vector Database
@@ -135,6 +148,9 @@ enum Commands {
     /// Find orphan files with no links
     Orphans(OrphansArgs),
 
+    /// Show semantic edges between linked files
+    Edges(EdgesArgs),
+
     /// Show graph data (nodes, edges, clusters) for visualization
     Graph(GraphArgs),
 
@@ -177,12 +193,16 @@ struct SearchArgs {
     mode: Option<SearchMode>,
 
     /// Shorthand for --mode=semantic
-    #[arg(long, conflicts_with_all = ["lexical", "mode"])]
+    #[arg(long, conflicts_with_all = ["lexical", "mode", "edge_search"])]
     semantic: bool,
 
     /// Shorthand for --mode=lexical
-    #[arg(long, conflicts_with_all = ["semantic", "mode"])]
+    #[arg(long, conflicts_with_all = ["semantic", "mode", "edge_search"])]
     lexical: bool,
+
+    /// Shorthand for --mode=edge (search edge embeddings)
+    #[arg(long, conflicts_with_all = ["semantic", "lexical", "mode"])]
+    edge_search: bool,
 
     /// Restrict search to files under this path prefix
     #[arg(long)]
@@ -283,6 +303,16 @@ struct BacklinksArgs {
 
 #[derive(Parser)]
 struct OrphansArgs {}
+
+#[derive(Parser)]
+struct EdgesArgs {
+    /// Filter edges by file (source or target)
+    file: Option<PathBuf>,
+
+    /// Filter by relationship type (substring match on cluster label)
+    #[arg(long)]
+    relationship: Option<String>,
+}
 
 #[derive(Parser)]
 struct GraphArgs {
@@ -405,6 +435,8 @@ async fn run() -> anyhow::Result<()> {
                 SearchMode::Semantic
             } else if args.lexical {
                 SearchMode::Lexical
+            } else if args.edge_search {
+                SearchMode::Edge
             } else {
                 config.search_default_mode
             };
@@ -464,6 +496,7 @@ async fn run() -> anyhow::Result<()> {
                     mode: effective_mode,
                     timings: if cli.verbose > 0 { Some(response.timings) } else { None },
                     graph_context: response.graph_context,
+                    edge_results: response.edge_results,
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
@@ -799,6 +832,34 @@ async fn run() -> anyhow::Result<()> {
                 writeln!(std::io::stdout())?;
             } else {
                 format::print_orphans(&result);
+            }
+        }
+        Some(Commands::Edges(args)) => {
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+            let file_str = args.file.as_ref().map(|p| p.to_string_lossy().to_string());
+            let mut edges = vdb.edges(file_str.as_deref())?;
+
+            // Filter by relationship type substring if provided.
+            if let Some(ref rel_filter) = args.relationship {
+                let lower = rel_filter.to_lowercase();
+                edges.retain(|e| {
+                    e.relationship_type
+                        .as_ref()
+                        .is_some_and(|r| r.to_lowercase().contains(&lower))
+                });
+            }
+
+            if json {
+                let output = EdgesOutput {
+                    total_edges: edges.len(),
+                    edges,
+                    file: file_str,
+                    relationship_filter: args.relationship,
+                };
+                serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_edges(&edges);
             }
         }
         Some(Commands::Graph(args)) => {

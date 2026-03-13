@@ -25,6 +25,30 @@ Three search modes out of the box: **hybrid** (semantic + lexical, fused via RRF
 
 **Guides:** [Agent Memory](docs/guides/agent-memory.md) · [Agent Memory Graph](docs/guides/agent-memory-graph.md)
 
+## Claude Code Skills
+
+Context-expanding skills for [Claude Code](https://claude.com/claude-code). Once installed, Claude automatically picks the right skill based on what you ask — search your vault, explore topics, check document health, or write new files optimized for indexing.
+
+```bash
+git clone https://github.com/geckse/markdown-vdb-skills.git skills
+```
+
+| Skill | What it does |
+|---|---|
+| [search-docs](skills/plugins/mdvdb/skills/search-docs/SKILL.md) | Semantic, lexical, or hybrid search across the vault |
+| [search-and-summarize](skills/plugins/mdvdb/skills/search-and-summarize/SKILL.md) | Search, read top matches in full, produce a cited synthesis |
+| [explore-topic](skills/plugins/mdvdb/skills/explore-topic/SKILL.md) | Deep research combining search with graph expansion and linked context |
+| [find-related](skills/plugins/mdvdb/skills/find-related/SKILL.md) | Find related content via semantic edges, links, backlinks, and multi-hop traversal |
+| [index-vault](skills/plugins/mdvdb/skills/index-vault/SKILL.md) | Ingest or re-index markdown files into the vector database |
+| [vault-overview](skills/plugins/mdvdb/skills/vault-overview/SKILL.md) | Quick situational awareness: index status, clusters, and file tree |
+| [vault-health](skills/plugins/mdvdb/skills/vault-health/SKILL.md) | Diagnostic checks: doctor, orphan detection, and schema analysis |
+| [check-document](skills/plugins/mdvdb/skills/check-document/SKILL.md) | Validate a file against the vault schema, check structure and link connectivity |
+| [enhance-document](skills/plugins/mdvdb/skills/enhance-document/SKILL.md) | Improve a file for better indexing: add frontmatter, restructure headings, add links |
+| [write-document](skills/plugins/mdvdb/skills/write-document/SKILL.md) | Create a new markdown file optimized for indexing with proper frontmatter and links |
+| [graph-visualize](skills/plugins/mdvdb/skills/graph-visualize/SKILL.md) | Export and summarize the vault's knowledge graph for visualization |
+
+[View skills repo →](https://github.com/geckse/markdown-vdb-skills) · [Benchmark Suite](https://github.com/geckse/markdown-vdb-benchmark)
+
 ## Features
 
 - **Three search modes** — hybrid (semantic + BM25 via RRF fusion), semantic, and lexical — switch with `--mode` or `--semantic`/`--lexical` flags

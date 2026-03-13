@@ -333,3 +333,13 @@ Returns every field name, inferred type, and example values — useful for dynam
 - **Use `--decay` for active projects** — recent memory is usually more relevant.
 - **Paths are always relative** — all file references are relative to the project root.
 - **mdvdb never writes to your files** — it's a read-only index. The agent owns the files.
+
+## Next Step: Add Links for a Knowledge Graph
+
+Once your memory grows beyond a handful of files, adding `[[wikilinks]]` and `[standard links](path.md)` between them unlocks a much richer experience. mdvdb automatically extracts the paragraph around each link, embeds it, and clusters edges to auto-discover relationship types (e.g., "depends on", "elaborates", "references"). This enables:
+
+- **`mdvdb edges`** — browse auto-discovered relationships between files
+- **`--boost-links`** — query-aware link boosting (relevant edges boost more than irrelevant ones)
+- **`--edge-search`** — search for relationships between concepts, not just documents
+
+See the [Agent Memory Graph](agent-memory-graph.md) guide for the full walkthrough.
