@@ -51,7 +51,7 @@ pub enum Error {
     #[error("full-text search error: {0}")]
     Fts(String),
 
-    #[error("index version {version} is outdated. Run `mdvdb ingest --full` to rebuild.")]
+    #[error("index version {version} is outdated. Run `mdvdb ingest --reindex` to rebuild.")]
     IndexVersionMismatch { version: u32 },
 
     #[error("semantic edge error: {0}")]
@@ -179,7 +179,7 @@ mod tests {
         let err = Error::IndexVersionMismatch { version: 1 };
         assert_eq!(
             err.to_string(),
-            "index version 1 is outdated. Run `mdvdb ingest --full` to rebuild."
+            "index version 1 is outdated. Run `mdvdb ingest --reindex` to rebuild."
         );
     }
 

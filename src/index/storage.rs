@@ -13,7 +13,7 @@ use crate::index::types::IndexMetadata;
 pub const MAGIC: &[u8; 6] = b"MDVDB\x00";
 
 /// Current index format version.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 1;
 
 /// Fixed header size in bytes.
 pub const HEADER_SIZE: usize = 64;

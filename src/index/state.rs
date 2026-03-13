@@ -160,7 +160,13 @@ impl Index {
     ) -> Result<Self> {
         match Self::open_with_options(path, write_options.clone()) {
             Ok(index) => Ok(index),
-            Err(Error::IndexNotFound { .. }) => {
+            Err(Error::IndexNotFound { .. })
+            | Err(Error::IndexVersionMismatch { .. })
+            | Err(Error::IndexCorrupted(_)) => {
+                // Remove outdated/corrupted index file so we can recreate it
+                if path.exists() {
+                    let _ = std::fs::remove_file(path);
+                }
                 Self::create_with_options(path, config, write_options)
             }
             Err(e) => Err(e),
