@@ -498,6 +498,27 @@ impl Index {
         state.dirty = true;
     }
 
+    /// Get all scoped schemas, if any.
+    pub fn get_scoped_schemas(&self) -> Option<Vec<crate::schema::ScopedSchema>> {
+        let state = self.state.read();
+        state.metadata.scoped_schemas.clone()
+    }
+
+    /// Get the scoped schema for a specific path prefix, if any.
+    pub fn get_scoped_schema(&self, prefix: &str) -> Option<crate::schema::ScopedSchema> {
+        let state = self.state.read();
+        state.metadata.scoped_schemas.as_ref().and_then(|schemas| {
+            schemas.iter().find(|s| s.scope == prefix).cloned()
+        })
+    }
+
+    /// Set (or clear) the scoped schemas.
+    pub fn set_scoped_schemas(&self, scoped_schemas: Option<Vec<crate::schema::ScopedSchema>>) {
+        let mut state = self.state.write();
+        state.metadata.scoped_schemas = scoped_schemas;
+        state.dirty = true;
+    }
+
     /// Persist the index to disk atomically.
     ///
     /// Compacts HNSW keys to sequential 0..N matching sorted chunk ID order,
