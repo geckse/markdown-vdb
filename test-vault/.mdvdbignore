@@ -1,0 +1,9 @@
+# Files and directories excluded from the mdvdb index
+# Uses .gitignore syntax — these stay in git but won't be indexed
+
+# Draft content not ready for search
+drafts/
+*.draft.md
+
+# Private/scratch notes
+scratch/
