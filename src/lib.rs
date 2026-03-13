@@ -966,23 +966,27 @@ impl MarkdownVdb {
             }
 
             // Merge semantic edges into the link graph.
-            if let Some(mut graph) = self.index.get_link_graph() {
-                // For single-file ingest, remove old edges for the file from the map.
+            let existing_graph = self.index.get_link_graph();
+            {
+            let mut graph = existing_graph.unwrap_or_else(|| links::LinkGraph {
+                forward: HashMap::new(),
+                last_updated: 0,
+                semantic_edges: None,
+                edge_cluster_state: None,
+            });
                 if let Some(ref single_file) = options.file {
+                    // Single-file ingest: remove old edges for the file, then merge new ones.
                     let source_str = single_file.to_string_lossy().to_string();
                     let source_prefix = format!("edge:{}->", source_str);
                     if let Some(ref mut existing) = graph.semantic_edges {
                         existing.retain(|id, _| !id.starts_with(&source_prefix));
-                    }
-                }
-
-                match graph.semantic_edges {
-                    Some(ref mut existing) => {
                         existing.extend(semantic_edges);
-                    }
-                    None => {
+                    } else {
                         graph.semantic_edges = Some(semantic_edges);
                     }
+                } else {
+                    // Full ingest: replace all semantic edges with freshly computed ones.
+                    graph.semantic_edges = Some(semantic_edges);
                 }
                 // Run edge clustering.
                 let clusterer = clustering::Clusterer::new(&self.config);
@@ -1057,7 +1061,7 @@ impl MarkdownVdb {
 
                 self.index.update_link_graph(Some(graph));
             }
-        }
+            } // end semantic edges block
 
         // Consistency guard: rebuild FTS from stored chunks for files that
         // were skipped (already in vector index but missing from FTS).
@@ -1136,7 +1140,17 @@ impl MarkdownVdb {
                     }
                 }
             }
-            let graph = links::build_link_graph(&all_md_files);
+            let mut graph = links::build_link_graph(&all_md_files);
+            // Preserve semantic edges and edge cluster state from the earlier
+            // edge-embedding pass (which stored them before this rebuild).
+            if let Some(prev) = self.index.get_link_graph() {
+                if graph.semantic_edges.is_none() {
+                    graph.semantic_edges = prev.semantic_edges;
+                }
+                if graph.edge_cluster_state.is_none() {
+                    graph.edge_cluster_state = prev.edge_cluster_state;
+                }
+            }
             self.index.update_link_graph(Some(graph));
 
             // Remove links for deleted files.
