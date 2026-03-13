@@ -644,7 +644,7 @@ async fn run() -> anyhow::Result<()> {
                     let scope_label = format!("Schema (scoped to {})", prefix);
                     eprintln!("{}", scope_label.bold());
                     let vdb_status = vdb.status();
-                    format::print_schema(&scoped.schema, vdb_status.document_count);
+                    format::print_schema(&scoped.schema, vdb_status.document_count, Some(&prefix));
                 }
             } else {
                 let schema = vdb.schema()?;
@@ -654,7 +654,7 @@ async fn run() -> anyhow::Result<()> {
                     writeln!(std::io::stdout())?;
                 } else {
                     let vdb_status = vdb.status();
-                    format::print_schema(&schema, vdb_status.document_count);
+                    format::print_schema(&schema, vdb_status.document_count, None);
                 }
             }
         }

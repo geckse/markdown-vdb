@@ -525,7 +525,7 @@ pub fn print_document(doc: &DocumentInfo) {
 }
 
 /// Print the metadata schema with occurrence bars and field details.
-pub fn print_schema(schema: &Schema, total_docs: usize) {
+pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
     if schema.fields.is_empty() {
         println!(
             "  {} No schema fields found. Run {} first.",
@@ -533,6 +533,14 @@ pub fn print_schema(schema: &Schema, total_docs: usize) {
             "mdvdb ingest".yellow()
         );
         return;
+    }
+
+    if let Some(prefix) = scope {
+        println!(
+            "\n  {} {}",
+            "Scope:".bold(),
+            prefix.cyan()
+        );
     }
 
     println!(
