@@ -950,33 +950,71 @@ pub fn print_edges(edges: &[mdvdb::links::SemanticEdge]) {
 
     for edge in edges {
         let rel = edge.relationship_type.as_deref().unwrap_or("unknown");
-        let strength_str = edge.strength.map(|s| format!(" [{:.2}]", s)).unwrap_or_default();
+
+        // Strength bar: map 0.0–1.0 to 0–10 filled segments
+        let strength_display = if let Some(s) = edge.strength {
+            let filled = (s * 10.0).round() as usize;
+            let bar = render_bar(filled, 10);
+            format!(" {} {}", bar, format!("{:.2}", s).yellow())
+        } else {
+            String::new()
+        };
 
         println!(
             "    {} {} {} {}{}",
             edge.source.cyan(),
-            "→".dimmed(),
+            "→".bold(),
             edge.target.cyan(),
-            rel.yellow(),
-            strength_str.dimmed()
+            format!("[{}]", rel).yellow(),
+            strength_display
         );
 
-        // Show truncated context
-        let ctx = &edge.context_text;
-        let display = if ctx.len() > 80 {
-            format!("{}…", &ctx[..77])
-        } else {
-            ctx.clone()
-        };
-        println!("      {}", display.dimmed());
+        // Link text if available (shown as quoted text)
+        // Context excerpt truncated to 80 chars
+        let ctx: String = edge.context_text.chars().take(80).collect();
+        let ctx = ctx.replace('\n', " ");
+        if !ctx.is_empty() {
+            let display = if edge.context_text.chars().count() > 80 {
+                format!("{ctx}…")
+            } else {
+                ctx
+            };
+            println!("      {}", display.dimmed());
+        }
     }
 
+    // Collect cluster stats
+    let mut cluster_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for edge in edges {
+        let rel = edge.relationship_type.as_deref().unwrap_or("unknown");
+        *cluster_counts.entry(rel).or_insert(0) += 1;
+    }
+
+    // Summary stats
     println!(
-        "\n  {} {} edge{}\n",
-        "Total:".dimmed(),
+        "\n  {} {} edge{}, {} cluster{}",
+        "Summary:".bold(),
         edges.len().to_string().yellow(),
-        if edges.len() == 1 { "" } else { "s" }
+        if edges.len() == 1 { "" } else { "s" },
+        cluster_counts.len().to_string().yellow(),
+        if cluster_counts.len() == 1 { "" } else { "s" }
     );
+
+    // Show cluster breakdown
+    if cluster_counts.len() > 1 {
+        let mut sorted: Vec<_> = cluster_counts.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        for (label, count) in &sorted {
+            println!(
+                "    {} {} ({})",
+                "•".dimmed(),
+                label.cyan(),
+                count
+            );
+        }
+    }
+
+    println!();
 }
 
 /// Print success message for `mdvdb init --global`.
