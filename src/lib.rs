@@ -1767,6 +1767,38 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         Ok(links::find_orphans(&graph, &indexed_files))
     }
 
+    /// Get semantic edges, optionally filtered by file path.
+    ///
+    /// Returns all edges if `file` is `None`, or only edges where the given
+    /// file is either the source or target.
+    pub fn edges(&self, file: Option<&str>) -> Result<Vec<SemanticEdge>> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        let all_edges = match &graph.semantic_edges {
+            Some(map) => map.values().cloned().collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        match file {
+            Some(path) => {
+                let path = path.strip_prefix("./").unwrap_or(path);
+                Ok(all_edges
+                    .into_iter()
+                    .filter(|e| e.source == path || e.target == path)
+                    .collect())
+            }
+            None => Ok(all_edges),
+        }
+    }
+
+    /// Get the edge clustering state, if available.
+    pub fn edge_clusters(&self) -> Result<Option<EdgeClusterState>> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        Ok(graph.edge_cluster_state.clone())
+    }
+
     /// Build a file tree showing sync state of all discovered files.
     ///
     /// Compares files on disk against the index to classify each as
