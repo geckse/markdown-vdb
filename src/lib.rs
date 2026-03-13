@@ -20,7 +20,7 @@ pub use error::Error;
 // Re-export key public types for convenience.
 pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
-pub use schema::{FieldType, Schema, SchemaField};
+pub use schema::{FieldType, Schema, SchemaField, ScopedSchema};
 pub use search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
@@ -962,6 +962,60 @@ impl MarkdownVdb {
             }
         }
 
+        // Persist global and scoped schemas.
+        // For single-file ingest, skip schema recomputation.
+        if options.file.is_none() {
+            // Collect all parsed markdown files (processed + skipped).
+            let mut all_md_for_schema: Vec<parser::MarkdownFile> = Vec::new();
+            for (md, _) in parsed_files.values() {
+                all_md_for_schema.push(md.clone());
+            }
+            for path in &discovered {
+                if !parsed_files.contains_key(path) {
+                    if let Ok(md) = parser::parse_markdown_file(&self.root, path) {
+                        all_md_for_schema.push(md);
+                    }
+                }
+            }
+
+            // Infer global schema and merge with overlay.
+            let inferred = schema::Schema::infer(&all_md_for_schema);
+            let overlay = schema::Schema::load_overlay(&self.root).unwrap_or(None);
+            let global_overlay_fields = overlay.as_ref().map(|o| o.fields.clone());
+            let merged = schema::Schema::merge(inferred, global_overlay_fields);
+            self.index.set_schema(Some(merged));
+
+            // Compute scoped schemas: auto-discovered scopes + overlay-defined scopes.
+            let mut scope_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for s in schema::Schema::discover_scopes(&all_md_for_schema) {
+                scope_names.insert(s);
+            }
+            if let Some(ref ov) = overlay {
+                for scope in ov.scopes.keys() {
+                    scope_names.insert(scope.clone());
+                }
+            }
+
+            if !scope_names.is_empty() {
+                let mut scoped_schemas = Vec::new();
+                for scope in &scope_names {
+                    let scoped_inferred = schema::Schema::infer_scoped(&all_md_for_schema, scope);
+                    let scoped_overlay_fields = overlay
+                        .as_ref()
+                        .and_then(|o| o.scopes.get(scope))
+                        .map(|so| so.fields.clone());
+                    let scoped_merged = schema::Schema::merge(scoped_inferred, scoped_overlay_fields);
+                    scoped_schemas.push(schema::ScopedSchema {
+                        scope: scope.clone(),
+                        schema: scoped_merged,
+                    });
+                }
+                self.index.set_scoped_schemas(Some(scoped_schemas));
+            }
+
+            self.index.save()?;
+        }
+
         let save_secs = save_start.elapsed().as_secs_f64();
 
         result.duration_secs = start_time.elapsed().as_secs_f64();
@@ -1142,6 +1196,33 @@ impl MarkdownVdb {
             }
         }
         Ok(schema::Schema::infer(&parsed))
+    }
+
+    /// Return the inferred schema for files matching a path prefix.
+    ///
+    /// If a scoped schema for `path_prefix` is persisted in the index, returns it
+    /// directly. Otherwise, discovers and parses files to infer on the fly.
+    pub fn schema_scoped(&self, path_prefix: &str) -> Result<schema::ScopedSchema> {
+        // Check persisted scoped schemas first.
+        if let Some(scoped) = self.index.get_scoped_schema(path_prefix) {
+            return Ok(scoped);
+        }
+
+        // Infer from discovered files.
+        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+        let files = disco.discover()?;
+        let mut parsed = Vec::new();
+        for path in &files {
+            match parser::parse_markdown_file(&self.root, path) {
+                Ok(md) => parsed.push(md),
+                Err(_) => continue,
+            }
+        }
+        let inferred = schema::Schema::infer_scoped(&parsed, path_prefix);
+        Ok(schema::ScopedSchema {
+            scope: path_prefix.to_string(),
+            schema: inferred,
+        })
     }
 
     /// Initialize a new markdown-vdb project by creating `.markdownvdb/.config`
