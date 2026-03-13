@@ -159,6 +159,42 @@ fn parse_field_type_str(s: &str) -> Option<FieldType> {
 impl Schema {
     /// Auto-infer a schema from frontmatter across all provided files.
     pub fn infer(files: &[MarkdownFile]) -> Self {
+        Self::infer_from_iter(files.iter())
+    }
+
+    /// Infer a schema from frontmatter across files matching a path prefix.
+    ///
+    /// Files whose `path` starts with `path_prefix` are included.
+    /// The prefix is normalized to end with `/` (unless empty).
+    pub fn infer_scoped(files: &[MarkdownFile], path_prefix: &str) -> Self {
+        let prefix = if path_prefix.is_empty() || path_prefix.ends_with('/') {
+            path_prefix.to_string()
+        } else {
+            format!("{path_prefix}/")
+        };
+
+        let filtered = files.iter().filter(|f| f.path.to_string_lossy().starts_with(&prefix));
+        Self::infer_from_iter(filtered)
+    }
+
+    /// Discover unique top-level directory scopes from the file paths.
+    ///
+    /// Returns sorted unique first path components that are directories
+    /// (i.e., paths containing a `/`).
+    pub fn discover_scopes(files: &[MarkdownFile]) -> Vec<String> {
+        let mut scopes: BTreeMap<String, ()> = BTreeMap::new();
+        for file in files {
+            let path_str = file.path.to_string_lossy();
+            if let Some(idx) = path_str.find('/') {
+                let top = &path_str[..idx];
+                scopes.entry(top.to_string()).or_default();
+            }
+        }
+        scopes.into_keys().collect()
+    }
+
+    /// Core inference logic operating over any iterator of `&MarkdownFile`.
+    pub fn infer_from_iter<'a>(files: impl IntoIterator<Item = &'a MarkdownFile>) -> Self {
         // Track per-field: types seen, occurrence count, sample values
         let mut field_types: HashMap<String, HashSet<std::mem::Discriminant<FieldType>>> =
             HashMap::new();
@@ -791,5 +827,105 @@ fields:
         let result = Schema::load_overlay(dir.path()).unwrap().unwrap();
         assert_eq!(result.fields.len(), 1);
         assert!(result.scopes.is_empty());
+    }
+
+    fn make_file_with_path(path: &str, frontmatter: serde_json::Value) -> MarkdownFile {
+        MarkdownFile {
+            path: std::path::PathBuf::from(path),
+            frontmatter: Some(frontmatter),
+            headings: vec![],
+            body: String::new(),
+            content_hash: String::new(),
+            file_size: 0,
+            links: Vec::new(),
+            modified_at: 0,
+        }
+    }
+
+    #[test]
+    fn infer_from_iter_matches_infer() {
+        let files = vec![
+            make_file(serde_json::json!({"title": "Hello", "count": 5})),
+            make_file(serde_json::json!({"title": "World", "tags": ["a"]})),
+        ];
+        let schema_infer = Schema::infer(&files);
+        let schema_iter = Schema::infer_from_iter(files.iter());
+        assert_eq!(schema_infer.fields.len(), schema_iter.fields.len());
+        for (a, b) in schema_infer.fields.iter().zip(schema_iter.fields.iter()) {
+            assert_eq!(a.name, b.name);
+            assert_eq!(a.field_type, b.field_type);
+            assert_eq!(a.occurrence_count, b.occurrence_count);
+        }
+    }
+
+    #[test]
+    fn infer_scoped_filters_by_prefix() {
+        let files = vec![
+            make_file_with_path("blog/post1.md", serde_json::json!({"title": "Post", "status": "draft"})),
+            make_file_with_path("blog/post2.md", serde_json::json!({"title": "Post2", "status": "published"})),
+            make_file_with_path("docs/readme.md", serde_json::json!({"title": "Docs", "version": "1.0"})),
+        ];
+        let schema = Schema::infer_scoped(&files, "blog");
+        assert_eq!(schema.fields.len(), 2); // status, title
+        assert_eq!(schema.fields[0].name, "status");
+        assert_eq!(schema.fields[1].name, "title");
+        assert_eq!(schema.fields[1].occurrence_count, 2);
+    }
+
+    #[test]
+    fn infer_scoped_empty_prefix_returns_empty() {
+        let files = vec![
+            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
+        ];
+        // Empty prefix matches nothing since paths don't start with ""... actually they do
+        let schema = Schema::infer_scoped(&files, "");
+        assert_eq!(schema.fields.len(), 1);
+    }
+
+    #[test]
+    fn infer_scoped_no_matches() {
+        let files = vec![
+            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
+        ];
+        let schema = Schema::infer_scoped(&files, "docs");
+        assert!(schema.fields.is_empty());
+    }
+
+    #[test]
+    fn infer_scoped_with_trailing_slash() {
+        let files = vec![
+            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
+        ];
+        let schema = Schema::infer_scoped(&files, "blog/");
+        assert_eq!(schema.fields.len(), 1);
+    }
+
+    #[test]
+    fn discover_scopes_extracts_top_level_dirs() {
+        let files = vec![
+            make_file_with_path("blog/post1.md", serde_json::json!({})),
+            make_file_with_path("blog/post2.md", serde_json::json!({})),
+            make_file_with_path("docs/readme.md", serde_json::json!({})),
+            make_file_with_path("notes/daily/today.md", serde_json::json!({})),
+            make_file_with_path("root-file.md", serde_json::json!({})),
+        ];
+        let scopes = Schema::discover_scopes(&files);
+        assert_eq!(scopes, vec!["blog", "docs", "notes"]);
+    }
+
+    #[test]
+    fn discover_scopes_empty_files() {
+        let scopes = Schema::discover_scopes(&[]);
+        assert!(scopes.is_empty());
+    }
+
+    #[test]
+    fn discover_scopes_no_directories() {
+        let files = vec![
+            make_file_with_path("file1.md", serde_json::json!({})),
+            make_file_with_path("file2.md", serde_json::json!({})),
+        ];
+        let scopes = Schema::discover_scopes(&files);
+        assert!(scopes.is_empty());
     }
 }
