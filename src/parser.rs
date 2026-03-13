@@ -325,6 +325,75 @@ pub fn extract_links(content: &str) -> Vec<RawLink> {
     links
 }
 
+/// Context around a link extracted from a markdown document.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkContext {
+    /// The raw link this context belongs to.
+    pub link: RawLink,
+    /// The surrounding paragraph text where the link appears.
+    pub paragraph: String,
+}
+
+/// Extract the paragraph surrounding a link at the given 1-based line number.
+///
+/// Walks backward and forward from `line_number` until hitting an empty line,
+/// a heading line (starting with `# `), or file boundary. Uses FULL file content
+/// because `RawLink.line_number` is file-relative (includes frontmatter lines).
+pub fn extract_link_paragraph(content: &str, line_number: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if line_number == 0 || line_number > lines.len() {
+        return String::new();
+    }
+    let idx = line_number - 1; // convert to 0-based
+
+    let is_boundary = |line: &str| -> bool {
+        line.trim().is_empty() || line.starts_with('#')
+    };
+
+    // Walk backward
+    let mut start = idx;
+    while start > 0 {
+        let prev = start - 1;
+        if is_boundary(lines[prev]) {
+            break;
+        }
+        start = prev;
+    }
+
+    // Walk forward
+    let mut end = idx;
+    while end + 1 < lines.len() {
+        let next = end + 1;
+        if is_boundary(lines[next]) {
+            break;
+        }
+        end = next;
+    }
+
+    let paragraph: String = lines[start..=end].join("\n");
+    let trimmed = paragraph.trim();
+    if trimmed.is_empty() {
+        // Fall back to the single link line
+        lines.get(idx).unwrap_or(&"").trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Extract link contexts for all provided links using the full file content.
+pub fn extract_links_with_context(content: &str, links: &[RawLink]) -> Vec<LinkContext> {
+    links
+        .iter()
+        .map(|link| {
+            let paragraph = extract_link_paragraph(content, link.line_number);
+            LinkContext {
+                link: link.clone(),
+                paragraph,
+            }
+        })
+        .collect()
+}
+
 /// Check if a URL is external (http/https/mailto) or anchor-only (#heading).
 fn is_external_or_anchor(url: &str) -> bool {
     let lower = url.to_lowercase();
@@ -565,5 +634,87 @@ mod tests {
     fn content_hash_empty_string() {
         let hash = compute_content_hash("");
         assert_eq!(hash.len(), 64);
+    }
+
+    // --- extract_link_paragraph tests ---
+
+    #[test]
+    fn extract_link_paragraph_basic() {
+        let content = "Some intro text.\n\nThis paragraph has a [link](other.md) in it.\nIt continues on this line.\n\nAnother paragraph.";
+        let para = extract_link_paragraph(content, 3);
+        assert_eq!(para, "This paragraph has a [link](other.md) in it.\nIt continues on this line.");
+    }
+
+    #[test]
+    fn extract_link_paragraph_heading_boundary() {
+        let content = "# Heading\nSome text with a [link](a.md).\n\nMore text.";
+        let para = extract_link_paragraph(content, 2);
+        assert_eq!(para, "Some text with a [link](a.md).");
+    }
+
+    #[test]
+    fn extract_link_paragraph_start_of_file() {
+        let content = "First line [link](a.md).\nSecond line.\n\nThird.";
+        let para = extract_link_paragraph(content, 1);
+        assert_eq!(para, "First line [link](a.md).\nSecond line.");
+    }
+
+    #[test]
+    fn extract_link_paragraph_end_of_file() {
+        let content = "Intro.\n\nLast line [link](a.md).";
+        let para = extract_link_paragraph(content, 3);
+        assert_eq!(para, "Last line [link](a.md).");
+    }
+
+    #[test]
+    fn extract_link_paragraph_bare_link() {
+        let content = "Before.\n\n[link](a.md)\n\nAfter.";
+        let para = extract_link_paragraph(content, 3);
+        assert_eq!(para, "[link](a.md)");
+    }
+
+    #[test]
+    fn extract_link_paragraph_multiple_links_same_paragraph() {
+        let content = "Intro.\n\nSee [a](a.md) and [b](b.md) here.\n\nEnd.";
+        let para1 = extract_link_paragraph(content, 3);
+        let para2 = extract_link_paragraph(content, 3);
+        assert_eq!(para1, para2);
+        assert!(para1.contains("[a](a.md)"));
+        assert!(para1.contains("[b](b.md)"));
+    }
+
+    #[test]
+    fn extract_link_paragraph_with_frontmatter() {
+        // Frontmatter followed by empty line then body — empty line acts as boundary
+        let content = "---\ntitle: Test\n---\n\nBody with [link](a.md) here.";
+        let para = extract_link_paragraph(content, 5);
+        assert_eq!(para, "Body with [link](a.md) here.");
+    }
+
+    #[test]
+    fn extract_link_paragraph_invalid_line_number() {
+        let content = "Some text.";
+        assert_eq!(extract_link_paragraph(content, 0), "");
+        assert_eq!(extract_link_paragraph(content, 100), "");
+    }
+
+    // --- extract_links_with_context tests ---
+
+    #[test]
+    fn extract_links_with_context_basic() {
+        let content = "Intro.\n\nSee [doc](other.md) for details.\n\nEnd.";
+        let links = extract_links(content);
+        let contexts = extract_links_with_context(content, &links);
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].link.target, "other.md");
+        assert_eq!(contexts[0].paragraph, "See [doc](other.md) for details.");
+    }
+
+    #[test]
+    fn extract_links_with_context_multiple() {
+        let content = "First [a](a.md) link.\n\nSecond [b](b.md) link.";
+        let links = extract_links(content);
+        let contexts = extract_links_with_context(content, &links);
+        assert_eq!(contexts.len(), 2);
     }
 }
