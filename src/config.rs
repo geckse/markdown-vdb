@@ -97,6 +97,12 @@ pub struct Config {
     pub vector_quantization: VectorQuantization,
     /// Whether to compress the metadata region with zstd. Default: true.
     pub index_compression: bool,
+    /// Whether to compute and store edge embeddings. Default: true.
+    pub edge_embeddings: bool,
+    /// Weight for edge-based boost in search scoring. Default: 0.15, range [0.0, 1.0].
+    pub edge_boost_weight: f64,
+    /// Threshold for rebalancing edge clusters. Default: 50, must be > 0.
+    pub edge_cluster_rebalance: usize,
 }
 
 impl Config {
@@ -207,6 +213,12 @@ impl Config {
 
         let index_compression = parse_env_bool("MDVDB_INDEX_COMPRESSION", true)?;
 
+        let edge_embeddings = parse_env_bool("MDVDB_EDGE_EMBEDDINGS", true)?;
+
+        let edge_boost_weight = parse_env::<f64>("MDVDB_EDGE_BOOST_WEIGHT", 0.15)?;
+
+        let edge_cluster_rebalance = parse_env::<usize>("MDVDB_EDGE_CLUSTER_REBALANCE", 50)?;
+
         let config = Self {
             embedding_provider,
             embedding_model,
@@ -238,6 +250,9 @@ impl Config {
             search_expand_limit,
             vector_quantization,
             index_compression,
+            edge_embeddings,
+            edge_boost_weight,
+            edge_cluster_rebalance,
         };
 
         config.validate()?;
@@ -292,6 +307,17 @@ impl Config {
                 "search_expand_limit ({}) must be in [1, 10]",
                 self.search_expand_limit
             )));
+        }
+        if !(0.0..=1.0).contains(&self.edge_boost_weight) {
+            return Err(Error::Config(format!(
+                "edge_boost_weight ({}) must be in [0.0, 1.0]",
+                self.edge_boost_weight
+            )));
+        }
+        if self.edge_cluster_rebalance == 0 {
+            return Err(Error::Config(
+                "edge_cluster_rebalance must be > 0".into(),
+            ));
         }
         Ok(())
     }
@@ -431,6 +457,9 @@ mod tests {
             "MDVDB_SEARCH_EXPAND_LIMIT",
             "MDVDB_VECTOR_QUANTIZATION",
             "MDVDB_INDEX_COMPRESSION",
+            "MDVDB_EDGE_EMBEDDINGS",
+            "MDVDB_EDGE_BOOST_WEIGHT",
+            "MDVDB_EDGE_CLUSTER_REBALANCE",
         ];
         // Save original values so we can restore them after the test
         let saved: Vec<(&str, Option<String>)> = vars_to_clear
@@ -489,6 +518,9 @@ mod tests {
         assert_eq!(config.search_expand_limit, 3);
         assert_eq!(config.vector_quantization, VectorQuantization::F16);
         assert!(config.index_compression);
+        assert!(config.edge_embeddings);
+        assert_eq!(config.edge_boost_weight, 0.15);
+        assert_eq!(config.edge_cluster_rebalance, 50);
     }
 
     #[test]
@@ -664,6 +696,8 @@ mod tests {
             "MDVDB_SEARCH_BOOST_HOPS", "MDVDB_SEARCH_EXPAND_GRAPH",
             "MDVDB_SEARCH_EXPAND_LIMIT",
             "MDVDB_VECTOR_QUANTIZATION", "MDVDB_INDEX_COMPRESSION",
+            "MDVDB_EDGE_EMBEDDINGS", "MDVDB_EDGE_BOOST_WEIGHT",
+            "MDVDB_EDGE_CLUSTER_REBALANCE",
         ] {
             std::env::remove_var(var);
         }
@@ -683,5 +717,34 @@ mod tests {
 
         // Should get default model, not the user config one.
         assert_eq!(config.embedding_model, "text-embedding-3-small");
+    }
+
+    #[test]
+    fn validation_rejects_edge_boost_weight_out_of_range() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MDVDB_EDGE_BOOST_WEIGHT", "1.5");
+        let result = Config::load(Path::new("/nonexistent"));
+        std::env::remove_var("MDVDB_EDGE_BOOST_WEIGHT");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("edge_boost_weight"));
+    }
+
+    #[test]
+    fn validation_rejects_negative_edge_boost_weight() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MDVDB_EDGE_BOOST_WEIGHT", "-0.1");
+        let result = Config::load(Path::new("/nonexistent"));
+        std::env::remove_var("MDVDB_EDGE_BOOST_WEIGHT");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validation_rejects_zero_edge_cluster_rebalance() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("MDVDB_EDGE_CLUSTER_REBALANCE", "0");
+        let result = Config::load(Path::new("/nonexistent"));
+        std::env::remove_var("MDVDB_EDGE_CLUSTER_REBALANCE");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("edge_cluster_rebalance"));
     }
 }

@@ -48,6 +48,9 @@ fn test_config(source_dir: &str) -> Config {
         search_expand_limit: 3,
         vector_quantization: mdvdb::VectorQuantization::F16,
         index_compression: true,
+            edge_embeddings: true,
+            edge_boost_weight: 0.15,
+            edge_cluster_rebalance: 50,
     }
 }
 
