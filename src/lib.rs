@@ -294,6 +294,18 @@ pub struct GraphEdge {
     pub target: String,
     /// Optional edge weight (e.g. cosine similarity).
     pub weight: Option<f64>,
+    /// Semantic edge relationship type (cluster label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship_type: Option<String>,
+    /// Semantic edge strength (cosine similarity between edge and target embeddings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
+    /// Paragraph context surrounding the link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_text: Option<String>,
+    /// Edge cluster assignment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_cluster_id: Option<usize>,
 }
 
 /// A cluster in the graph visualization.
@@ -320,6 +332,9 @@ pub struct GraphData {
     pub clusters: Vec<GraphCluster>,
     /// The level of detail for this graph.
     pub level: String,
+    /// Edge clusters (semantic relationship groupings), if available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_clusters: Vec<GraphCluster>,
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -1551,21 +1566,43 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 }
                 for entry in entries {
                     if indexed_paths.contains(&entry.target) {
+                        // Look up semantic edge metadata if available
+                        let edge_id = format!("edge:{}->{}@{}", source, entry.target, entry.line_number);
+                        let semantic = link_graph.semantic_edges.as_ref()
+                            .and_then(|se| se.get(&edge_id));
                         edges.push(GraphEdge {
                             source: source.clone(),
                             target: entry.target.clone(),
                             weight: None,
+                            relationship_type: semantic.and_then(|s| s.relationship_type.clone()),
+                            strength: semantic.and_then(|s| s.strength),
+                            context_text: semantic.map(|s| s.context_text.clone()),
+                            edge_cluster_id: semantic.and_then(|s| s.cluster_id),
                         });
                     }
                 }
             }
         }
 
+        // Build edge clusters from EdgeClusterState if available
+        let edge_clusters = self.index.get_link_graph()
+            .and_then(|lg| lg.edge_cluster_state)
+            .map(|ecs| {
+                ecs.clusters.iter().map(|c| GraphCluster {
+                    id: c.id,
+                    label: c.label.clone(),
+                    keywords: c.keywords.clone(),
+                    member_count: c.members.len(),
+                }).collect()
+            })
+            .unwrap_or_default();
+
         Ok(GraphData {
             nodes,
             edges,
             clusters,
             level: "document".to_string(),
+            edge_clusters,
         })
     }
 
@@ -1589,6 +1626,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 edges: Vec::new(),
                 clusters: Vec::new(),
                 level: "chunk".to_string(),
+                edge_clusters: Vec::new(),
             });
         }
 
@@ -1675,6 +1713,10 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                     source: cv.chunk_id.clone(),
                     target: neighbor_id.clone(),
                     weight: Some(*score),
+                    relationship_type: None,
+                    strength: None,
+                    context_text: None,
+                    edge_cluster_id: None,
                 });
                 cross_file_count += 1;
             }
@@ -1685,6 +1727,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             edges,
             clusters,
             level: "chunk".to_string(),
+            edge_clusters: Vec::new(),
         })
     }
 

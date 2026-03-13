@@ -930,6 +930,55 @@ pub fn print_orphans(orphans: &[OrphanFile]) {
     );
 }
 
+/// Print semantic edges for `mdvdb edges`.
+pub fn print_edges(edges: &[mdvdb::links::SemanticEdge]) {
+    if edges.is_empty() {
+        println!(
+            "\n  {} No semantic edges found. Run {} first.\n",
+            "✗".red().bold(),
+            "mdvdb ingest".yellow()
+        );
+        return;
+    }
+
+    println!(
+        "\n  {} {} {}\n",
+        "●".cyan().bold(),
+        "Semantic Edges".bold(),
+        format!("({})", edges.len()).dimmed()
+    );
+
+    for edge in edges {
+        let rel = edge.relationship_type.as_deref().unwrap_or("unknown");
+        let strength_str = edge.strength.map(|s| format!(" [{:.2}]", s)).unwrap_or_default();
+
+        println!(
+            "    {} {} {} {}{}",
+            edge.source.cyan(),
+            "→".dimmed(),
+            edge.target.cyan(),
+            rel.yellow(),
+            strength_str.dimmed()
+        );
+
+        // Show truncated context
+        let ctx = &edge.context_text;
+        let display = if ctx.len() > 80 {
+            format!("{}…", &ctx[..77])
+        } else {
+            ctx.clone()
+        };
+        println!("      {}", display.dimmed());
+    }
+
+    println!(
+        "\n  {} {} edge{}\n",
+        "Total:".dimmed(),
+        edges.len().to_string().yellow(),
+        if edges.len() == 1 { "" } else { "s" }
+    );
+}
+
 /// Print success message for `mdvdb init --global`.
 pub fn print_init_global_success(path: &str) {
     println!(
