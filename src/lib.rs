@@ -1258,6 +1258,7 @@ impl MarkdownVdb {
             self.config.search_boost_hops,
             self.config.search_expand_graph,
             self.config.search_expand_limit,
+            self.config.edge_boost_weight,
         )
         .await
     }

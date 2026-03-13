@@ -378,6 +378,7 @@ pub async fn search(
     boost_hops_default: usize,
     expand_graph_default: usize,
     expand_limit: usize,
+    edge_boost_weight: f64,
 ) -> Result<SearchResponse> {
     let total_start = Instant::now();
 
@@ -523,6 +524,8 @@ pub async fn search(
         link_graph.as_ref(),
         backlinks.as_ref(),
         now,
+        query_embedding.as_deref(),
+        edge_boost_weight,
     )?;
 
     // Graph context expansion: find relevant chunks from linked files.
@@ -616,6 +619,29 @@ fn lexical_search(
 /// Assemble SearchResult objects from ranked candidates, applying decay, filters, min_score,
 /// and multi-hop link-graph boosting.
 #[allow(clippy::too_many_arguments)]
+/// Compute cosine similarity between two vectors. Returns 0.0 if either is zero-length.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f64;
+    let mut norm_a = 0.0_f64;
+    let mut norm_b = 0.0_f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let x = *x as f64;
+        let y = *y as f64;
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom < 1e-12 {
+        0.0
+    } else {
+        (dot / denom).clamp(0.0, 1.0)
+    }
+}
+
 fn assemble_results(
     query: &SearchQuery,
     index: &Index,
@@ -629,6 +655,8 @@ fn assemble_results(
     link_graph: Option<&links::LinkGraph>,
     backlinks: Option<&HashMap<String, Vec<links::LinkEntry>>>,
     now: u64,
+    query_embedding: Option<&[f32]>,
+    edge_boost_weight: f64,
 ) -> Result<Vec<SearchResult>> {
     let file_mtimes = index.get_file_mtimes();
 
@@ -730,12 +758,55 @@ fn assemble_results(
             let neighbors = links::bfs_neighbors(graph, bl, &top_paths, boost_hops);
 
             if !neighbors.is_empty() {
+                // Pre-fetch edge vectors for semantic edge boosting.
+                let edge_vectors = if query_embedding.is_some() && edge_boost_weight > 0.0 {
+                    Some(index.get_edge_vectors())
+                } else {
+                    None
+                };
+
+                // Build a lookup: target_path → best edge cosine similarity with query.
+                // We look at all semantic edges and index the best score per target file.
+                let edge_scores: HashMap<String, f64> = if let (
+                    Some(qe),
+                    Some(ref evecs),
+                    Some(ref edges_map),
+                ) = (
+                    query_embedding,
+                    &edge_vectors,
+                    graph.semantic_edges.as_ref(),
+                ) {
+                    let mut best: HashMap<String, f64> = HashMap::new();
+                    for (eid, edge) in edges_map.iter() {
+                        if let Some(evec) = evecs.get(eid) {
+                            let sim = cosine_similarity(qe, evec);
+                            // Index by both source and target so any file connected
+                            // via a relevant edge gets the boost.
+                            for path in [&edge.source, &edge.target] {
+                                let entry = best.entry(path.to_string()).or_insert(0.0);
+                                if sim > *entry {
+                                    *entry = sim;
+                                }
+                            }
+                        }
+                    }
+                    best
+                } else {
+                    HashMap::new()
+                };
+
                 for result in &mut results {
                     if let Some(&distance) = neighbors.get(&result.file.path) {
-                        // Distance-decayed multiplier: 1.0 + 0.15 / 2^(distance - 1)
-                        // Hop 1: 1.150x, Hop 2: 1.075x, Hop 3: 1.0375x
+                        // Use edge-weighted boost when edge scores available,
+                        // otherwise fall back to flat boost.
+                        let boost = if let Some(&edge_sim) = edge_scores.get(&result.file.path) {
+                            edge_boost_weight * edge_sim
+                        } else {
+                            // Flat fallback: use edge_boost_weight as the base boost.
+                            edge_boost_weight
+                        };
                         let multiplier =
-                            1.0 + 0.15 / 2.0_f64.powi((distance as i32) - 1);
+                            1.0 + boost / 2.0_f64.powi((distance as i32) - 1);
                         result.score *= multiplier;
                         debug!(
                             path = %result.file.path,
@@ -1886,5 +1957,109 @@ mod tests {
         assert!(should_apply_decay("docs/guides/setup.md", &exclude, &include));
         assert!(should_apply_decay("wiki/articles/rust.md", &exclude, &include));
         assert!(!should_apply_decay("notes/random.md", &exclude, &include));
+    }
+
+    // --- Cosine similarity tests ---
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let v = vec![1.0_f32, 2.0, 3.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0_f32, 0.0, 0.0];
+        let b = vec![0.0_f32, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_similar_vectors() {
+        let a = vec![1.0_f32, 1.0, 0.0];
+        let b = vec![1.0_f32, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        // cos(45°) = 1/√2
+        assert!((sim - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty_vectors() {
+        let empty: Vec<f32> = vec![];
+        assert_eq!(cosine_similarity(&empty, &empty), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        let a = vec![0.0_f32, 0.0, 0.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_mismatched_lengths() {
+        let a = vec![1.0_f32, 2.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    // --- Edge-weighted boost tests ---
+
+    #[test]
+    fn test_edge_boost_weight_used_in_multiplier() {
+        // With edge_boost_weight = 0.15 and no edge vectors, flat boost applies.
+        // Hop 1: 1.0 + 0.15 / 2^0 = 1.15
+        let weight = 0.15;
+        let distance = 1;
+        let multiplier = 1.0 + weight / 2.0_f64.powi((distance as i32) - 1);
+        assert!((multiplier - 1.15).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_edge_boost_weight_zero_disables_boost() {
+        // With edge_boost_weight = 0.0, multiplier should be 1.0 (no boost).
+        let weight = 0.0;
+        let distance = 1;
+        let multiplier = 1.0 + weight / 2.0_f64.powi((distance as i32) - 1);
+        assert!((multiplier - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_edge_weighted_boost_high_similarity_boosts_more() {
+        // An edge with high cosine similarity to query should boost more
+        // than one with low similarity.
+        let weight = 0.15;
+        let high_sim = 0.95;
+        let low_sim = 0.2;
+
+        let high_boost = weight * high_sim;
+        let low_boost = weight * low_sim;
+
+        let high_multiplier = 1.0 + high_boost / 2.0_f64.powi(0); // hop 1
+        let low_multiplier = 1.0 + low_boost / 2.0_f64.powi(0); // hop 1
+
+        assert!(high_multiplier > low_multiplier,
+            "high sim edge ({high_multiplier}) should boost more than low sim ({low_multiplier})");
+        // High: 1.0 + 0.15 * 0.95 = 1.1425
+        assert!((high_multiplier - 1.1425).abs() < 1e-10);
+        // Low: 1.0 + 0.15 * 0.2 = 1.03
+        assert!((low_multiplier - 1.03).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_edge_weighted_boost_decays_with_distance() {
+        let weight = 0.15;
+        let sim = 0.8;
+        let boost = weight * sim;
+
+        let m1 = 1.0 + boost / 2.0_f64.powi(0); // hop 1
+        let m2 = 1.0 + boost / 2.0_f64.powi(1); // hop 2
+        let m3 = 1.0 + boost / 2.0_f64.powi(2); // hop 3
+
+        assert!(m1 > m2);
+        assert!(m2 > m3);
+        assert!(m3 > 1.0);
     }
 }
