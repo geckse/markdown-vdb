@@ -1,0 +1,6 @@
+[submodule "skills"]
+	path = skills
+	url = https://github.com/geckse/markdown-vdb-skills.git
+[submodule "benchmark"]
+	path = benchmark
+	url = https://github.com/geckse/markdown-vdb-benchmark.git

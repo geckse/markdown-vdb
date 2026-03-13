@@ -25,6 +25,30 @@ Three search modes out of the box: **hybrid** (semantic + lexical, fused via RRF
 
 **Guides:** [Agent Memory](docs/guides/agent-memory.md) · [Agent Memory Graph](docs/guides/agent-memory-graph.md)
 
+## Claude Code Skills
+
+Drop-in slash commands for [Claude Code](https://claude.com/claude-code) that let agents work with your vault out of the box. Install standalone or as a submodule:
+
+```bash
+git clone https://github.com/geckse/markdown-vdb-skills.git skills
+```
+
+| Skill | What it does |
+|---|---|
+| [`/search-docs`](skills/skills/search-docs/SKILL.md) | Semantic, lexical, or hybrid search across the vault |
+| [`/search-and-summarize`](skills/skills/search-and-summarize/SKILL.md) | Search, read top matches in full, produce a cited synthesis |
+| [`/explore-topic`](skills/skills/explore-topic/SKILL.md) | Deep research combining search with graph expansion and linked context |
+| [`/find-related`](skills/skills/find-related/SKILL.md) | Find related content via semantic edges, links, backlinks, and multi-hop traversal |
+| [`/index-vault`](skills/skills/index-vault/SKILL.md) | Ingest or re-index markdown files into the vector database |
+| [`/vault-overview`](skills/skills/vault-overview/SKILL.md) | Quick situational awareness: index status, clusters, and file tree |
+| [`/vault-health`](skills/skills/vault-health/SKILL.md) | Diagnostic checks: doctor, orphan detection, and schema analysis |
+| [`/check-document`](skills/skills/check-document/SKILL.md) | Validate a file against the vault schema, check structure and link connectivity |
+| [`/enhance-document`](skills/skills/enhance-document/SKILL.md) | Improve a file for better indexing: add frontmatter, restructure headings, add links |
+| [`/write-document`](skills/skills/write-document/SKILL.md) | Create a new markdown file optimized for indexing with proper frontmatter and links |
+| [`/graph-visualize`](skills/skills/graph-visualize/SKILL.md) | Export and summarize the vault's knowledge graph for visualization |
+
+[View skills repo →](https://github.com/geckse/markdown-vdb-skills) · [Benchmark Suite](https://github.com/geckse/markdown-vdb-benchmark)
+
 ## Features
 
 - **Three search modes** — hybrid (semantic + BM25 via RRF fusion), semantic, and lexical — switch with `--mode` or `--semantic`/`--lexical` flags
