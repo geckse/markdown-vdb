@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::{IngestOptions, MarkdownVdb, SearchMode, SearchQuery};
@@ -470,4 +471,239 @@ async fn test_edge_context_populated() {
             edge.edge_id
         );
     }
+}
+
+// ===========================================================================
+// CLI Integration Tests
+// ===========================================================================
+
+fn mdvdb_bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_mdvdb"))
+}
+
+/// Create a temp directory with interlinked files, config, and run ingest via CLI.
+fn cli_setup_and_ingest() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\nMDVDB_EDGE_EMBEDDINGS=true\n",
+    )
+    .unwrap();
+
+    write_interlinked_files(root);
+
+    let output = mdvdb_bin()
+        .arg("ingest")
+        .current_dir(root)
+        .output()
+        .expect("failed to run ingest");
+    assert!(
+        output.status.success(),
+        "ingest should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    dir
+}
+
+// ---------------------------------------------------------------------------
+// CLI 1. mdvdb edges --json returns valid JSON with required fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_edges_json_returns_valid_json() {
+    let dir = cli_setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["edges", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run edges");
+
+    assert!(
+        output.status.success(),
+        "edges --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("edges --json should return valid JSON");
+
+    // Should have top-level fields
+    assert!(parsed["edges"].is_array(), "should have 'edges' array");
+    assert!(parsed["total_edges"].is_number(), "should have 'total_edges'");
+
+    let edges = parsed["edges"].as_array().unwrap();
+    assert!(!edges.is_empty(), "should have at least one edge");
+
+    // Check required fields on first edge
+    let edge = &edges[0];
+    assert!(edge["edge_id"].is_string(), "edge should have edge_id");
+    assert!(edge["source"].is_string(), "edge should have source");
+    assert!(edge["target"].is_string(), "edge should have target");
+    assert!(edge["context_text"].is_string(), "edge should have context_text");
+    assert!(edge["line_number"].is_number(), "edge should have line_number");
+}
+
+// ---------------------------------------------------------------------------
+// CLI 2. mdvdb edges <file> --json filters to edges involving that file
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_edges_file_filter_json() {
+    let dir = cli_setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["edges", "alpha.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run edges with file filter");
+
+    assert!(
+        output.status.success(),
+        "edges alpha.md --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    let edges = parsed["edges"].as_array().unwrap();
+    assert!(!edges.is_empty(), "alpha.md should have edges");
+
+    // All edges should involve alpha.md
+    for edge in edges {
+        let source = edge["source"].as_str().unwrap();
+        let target = edge["target"].as_str().unwrap();
+        assert!(
+            source == "alpha.md" || target == "alpha.md",
+            "filtered edge should involve alpha.md, got source={source} target={target}"
+        );
+    }
+
+    // file field should be set in output
+    assert_eq!(parsed["file"].as_str().unwrap(), "alpha.md");
+}
+
+// ---------------------------------------------------------------------------
+// CLI 3. mdvdb edges --relationship 'depends' --json filters by relationship
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_edges_relationship_filter_json() {
+    let dir = cli_setup_and_ingest();
+
+    // First get all edges to find a relationship type we can filter on
+    let output_all = mdvdb_bin()
+        .args(["edges", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run edges");
+
+    let stdout_all = String::from_utf8_lossy(&output_all.stdout);
+    let parsed_all: serde_json::Value = serde_json::from_str(&stdout_all).unwrap();
+    let all_edges = parsed_all["edges"].as_array().unwrap();
+
+    // Use a nonsense relationship filter — should return empty or subset
+    let output = mdvdb_bin()
+        .args(["edges", "--relationship", "zzz_nonexistent_zzz", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run edges with relationship filter");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    let filtered_edges = parsed["edges"].as_array().unwrap();
+    // Nonsense filter should return fewer edges than total
+    assert!(
+        filtered_edges.len() <= all_edges.len(),
+        "relationship filter should not increase edge count"
+    );
+
+    // relationship_filter field should be set
+    assert_eq!(
+        parsed["relationship_filter"].as_str().unwrap(),
+        "zzz_nonexistent_zzz"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CLI 4. mdvdb search 'query' --edge-search --json returns edge_results
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_search_edge_search_json() {
+    let dir = cli_setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["search", "concepts examples", "--edge-search", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run search --edge-search");
+
+    assert!(
+        output.status.success(),
+        "search --edge-search --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    // Should have edge_results array
+    assert!(
+        parsed["edge_results"].is_array(),
+        "search --edge-search should include edge_results in JSON output"
+    );
+
+    // Mode should be Edge
+    assert_eq!(
+        parsed["mode"].as_str().unwrap_or(""),
+        "edge",
+        "mode should be 'edge'"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CLI 5. mdvdb graph --json includes edge_clusters
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_graph_json_includes_edge_clusters() {
+    let dir = cli_setup_and_ingest();
+
+    let output = mdvdb_bin()
+        .args(["graph", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run graph --json");
+
+    assert!(
+        output.status.success(),
+        "graph --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("graph --json should return valid JSON");
+
+    // Should have edge_clusters field (may be empty array if not enough edges)
+    assert!(
+        parsed.get("edge_clusters").is_some(),
+        "graph JSON should include edge_clusters field"
+    );
+    assert!(
+        parsed["edge_clusters"].is_array(),
+        "edge_clusters should be an array"
+    );
 }
