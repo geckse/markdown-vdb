@@ -23,6 +23,56 @@ pub struct LinkEntry {
     pub is_wikilink: bool,
 }
 
+/// A semantic edge representing a link with its surrounding paragraph context.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize)]
+#[rkyv(derive(Debug))]
+pub struct SemanticEdge {
+    /// Unique edge identifier in format `"edge:source.md->target.md@42"`.
+    pub edge_id: String,
+    /// Source file (relative path).
+    pub source: String,
+    /// Target file (resolved relative path).
+    pub target: String,
+    /// Paragraph context surrounding the link.
+    pub context_text: String,
+    /// Line number of the link in the source file (1-based).
+    pub line_number: usize,
+    /// Cosine similarity between edge embedding and target document embedding.
+    pub strength: Option<f64>,
+    /// Auto-discovered relationship type label from edge clustering.
+    pub relationship_type: Option<String>,
+    /// Cluster ID this edge belongs to (if clustered).
+    pub cluster_id: Option<usize>,
+}
+
+/// Information about a single edge cluster.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize)]
+#[rkyv(derive(Debug))]
+pub struct EdgeClusterInfo {
+    /// Numeric cluster identifier (0-based).
+    pub id: usize,
+    /// Human-readable auto-generated label (top TF-IDF keywords).
+    pub label: String,
+    /// Centroid vector (mean of member edge embeddings).
+    pub centroid: Vec<f32>,
+    /// Edge IDs belonging to this cluster.
+    pub members: Vec<String>,
+    /// Top keywords extracted via TF-IDF from edge context paragraphs.
+    pub keywords: Vec<String>,
+}
+
+/// Edge cluster state persisted in the index.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize)]
+#[rkyv(derive(Debug))]
+pub struct EdgeClusterState {
+    /// All edge clusters.
+    pub clusters: Vec<EdgeClusterInfo>,
+    /// Number of edges added since last full rebalance.
+    pub edges_since_rebalance: usize,
+    /// Total edge count at last rebalance.
+    pub edges_at_last_rebalance: usize,
+}
+
 /// The complete link graph stored in the index.
 #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
 #[rkyv(derive(Debug))]
@@ -31,6 +81,10 @@ pub struct LinkGraph {
     pub forward: HashMap<String, Vec<LinkEntry>>,
     /// Unix timestamp of last update.
     pub last_updated: u64,
+    /// Semantic edges with paragraph context (None for old indices without edge data).
+    pub semantic_edges: Option<HashMap<String, SemanticEdge>>,
+    /// Edge clustering state (None if not yet clustered or too few edges).
+    pub edge_cluster_state: Option<EdgeClusterState>,
 }
 
 /// A resolved link with validity status.
@@ -103,6 +157,13 @@ pub struct NeighborhoodResult {
     pub outgoing_depth_count: usize,
     /// Number of depth levels explored for incoming links.
     pub incoming_depth_count: usize,
+}
+
+/// Generate a unique edge ID in the format `"edge:source.md->target.md@42"`.
+///
+/// The line number disambiguates multiple links from the same source to the same target.
+pub fn edge_id(source: &str, target: &str, line_number: usize) -> String {
+    format!("edge:{}->{}@{}", source, target, line_number)
 }
 
 /// Resolve a raw link target relative to the source file's directory.
@@ -207,6 +268,8 @@ pub fn build_link_graph(files: &[MarkdownFile]) -> LinkGraph {
     LinkGraph {
         forward,
         last_updated,
+        semantic_edges: None,
+        edge_cluster_state: None,
     }
 }
 
@@ -584,6 +647,103 @@ mod tests {
             line_number: line,
             is_wikilink: wikilink,
         }
+    }
+
+    // --- edge_id tests ---
+
+    #[test]
+    fn edge_id_format() {
+        assert_eq!(
+            edge_id("source.md", "target.md", 42),
+            "edge:source.md->target.md@42"
+        );
+    }
+
+    #[test]
+    fn edge_id_with_subdirs() {
+        assert_eq!(
+            edge_id("docs/intro.md", "docs/guide.md", 10),
+            "edge:docs/intro.md->docs/guide.md@10"
+        );
+    }
+
+    // --- SemanticEdge tests ---
+
+    #[test]
+    fn semantic_edge_serde_roundtrip() {
+        let edge = SemanticEdge {
+            edge_id: edge_id("a.md", "b.md", 5),
+            source: "a.md".to_string(),
+            target: "b.md".to_string(),
+            context_text: "See [b](b.md) for details.".to_string(),
+            line_number: 5,
+            strength: Some(0.85),
+            relationship_type: Some("references".to_string()),
+            cluster_id: Some(2),
+        };
+        let json = serde_json::to_string(&edge).unwrap();
+        let roundtripped: SemanticEdge = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.edge_id, edge.edge_id);
+        assert_eq!(roundtripped.source, edge.source);
+        assert_eq!(roundtripped.target, edge.target);
+        assert_eq!(roundtripped.context_text, edge.context_text);
+        assert_eq!(roundtripped.line_number, edge.line_number);
+        assert_eq!(roundtripped.strength, edge.strength);
+        assert_eq!(roundtripped.relationship_type, edge.relationship_type);
+        assert_eq!(roundtripped.cluster_id, edge.cluster_id);
+    }
+
+    #[test]
+    fn semantic_edge_optional_fields_none() {
+        let edge = SemanticEdge {
+            edge_id: edge_id("a.md", "b.md", 1),
+            source: "a.md".to_string(),
+            target: "b.md".to_string(),
+            context_text: "link text".to_string(),
+            line_number: 1,
+            strength: None,
+            relationship_type: None,
+            cluster_id: None,
+        };
+        let json = serde_json::to_string(&edge).unwrap();
+        let roundtripped: SemanticEdge = serde_json::from_str(&json).unwrap();
+        assert!(roundtripped.strength.is_none());
+        assert!(roundtripped.relationship_type.is_none());
+        assert!(roundtripped.cluster_id.is_none());
+    }
+
+    // --- EdgeClusterState tests ---
+
+    #[test]
+    fn edge_cluster_state_serde_roundtrip() {
+        let state = EdgeClusterState {
+            clusters: vec![EdgeClusterInfo {
+                id: 0,
+                label: "depends / imports".to_string(),
+                centroid: vec![0.1, 0.2, 0.3],
+                members: vec![edge_id("a.md", "b.md", 1)],
+                keywords: vec!["depends".to_string(), "imports".to_string()],
+            }],
+            edges_since_rebalance: 5,
+            edges_at_last_rebalance: 10,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let roundtripped: EdgeClusterState = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.clusters.len(), 1);
+        assert_eq!(roundtripped.clusters[0].id, 0);
+        assert_eq!(roundtripped.clusters[0].label, "depends / imports");
+        assert_eq!(roundtripped.clusters[0].members.len(), 1);
+        assert_eq!(roundtripped.edges_since_rebalance, 5);
+        assert_eq!(roundtripped.edges_at_last_rebalance, 10);
+    }
+
+    // --- LinkGraph backward compat tests ---
+
+    #[test]
+    fn link_graph_new_fields_default_none() {
+        let graph = build_link_graph(&[]);
+        assert!(graph.semantic_edges.is_none());
+        assert!(graph.edge_cluster_state.is_none());
     }
 
     // --- resolve_link tests ---

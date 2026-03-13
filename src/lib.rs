@@ -870,6 +870,8 @@ impl MarkdownVdb {
             let mut graph = self.index.get_link_graph().unwrap_or_else(|| links::LinkGraph {
                 forward: HashMap::new(),
                 last_updated: 0,
+                semantic_edges: None,
+                edge_cluster_state: None,
             });
             if let Some((md, _)) = parsed_files.get(single_file) {
                 links::update_file_links(&mut graph, md);
