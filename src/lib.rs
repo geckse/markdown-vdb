@@ -21,7 +21,7 @@ pub use error::Error;
 pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
+pub use search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{

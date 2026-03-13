@@ -23,6 +23,8 @@ pub enum SearchMode {
     Semantic,
     /// Lexical search only (BM25 via Tantivy). No embedding API call needed.
     Lexical,
+    /// Edge-based search: retrieve by semantic edges between documents.
+    Edge,
 }
 
 impl FromStr for SearchMode {
@@ -33,8 +35,9 @@ impl FromStr for SearchMode {
             "hybrid" => Ok(Self::Hybrid),
             "semantic" => Ok(Self::Semantic),
             "lexical" => Ok(Self::Lexical),
+            "edge" => Ok(Self::Edge),
             other => Err(Error::Config(format!(
-                "unknown search mode '{other}': expected hybrid, semantic, or lexical"
+                "unknown search mode '{other}': expected hybrid, semantic, lexical, or edge"
             ))),
         }
     }
@@ -46,6 +49,7 @@ impl std::fmt::Display for SearchMode {
             Self::Hybrid => write!(f, "hybrid"),
             Self::Semantic => write!(f, "semantic"),
             Self::Lexical => write!(f, "lexical"),
+            Self::Edge => write!(f, "edge"),
         }
     }
 }
@@ -253,6 +257,38 @@ pub struct GraphContextItem {
     pub linked_from: String,
     /// Number of link hops from the result file (1 = direct link).
     pub hop_distance: usize,
+    /// Contextual information about the edge connecting this item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_context: Option<String>,
+    /// Relationship type of the edge connecting this item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_relationship: Option<String>,
+}
+
+/// A search result representing a semantic edge between two documents.
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgeSearchResult {
+    /// Relevance score for this edge match.
+    pub score: f64,
+    /// Unique identifier for this edge.
+    pub edge_id: String,
+    /// Source document path.
+    pub source_path: String,
+    /// Target document path.
+    pub target_path: String,
+    /// Link text connecting source to target.
+    pub link_text: String,
+    /// Contextual text surrounding the link.
+    pub context: String,
+    /// Relationship type label (e.g., "references", "extends").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship_type: Option<String>,
+    /// Cluster ID this edge belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_id: Option<usize>,
+    /// Edge strength/weight.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
 }
 
 /// Per-query timing breakdown for search operations.
@@ -283,6 +319,9 @@ pub struct SearchResponse {
     pub graph_context: Vec<GraphContextItem>,
     /// Timing breakdown for the search operation.
     pub timings: SearchTimings,
+    /// Edge-based search results (populated when mode is Edge).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_results: Vec<EdgeSearchResult>,
 }
 
 /// Apply exponential time decay to a score based on file age.
@@ -348,6 +387,7 @@ pub async fn search(
         return Ok(SearchResponse {
             results: Vec::new(),
             graph_context: Vec::new(),
+            edge_results: Vec::new(),
             timings: SearchTimings {
                 embed_secs: 0.0,
                 vector_search_secs: 0.0,
@@ -389,7 +429,7 @@ pub async fn search(
     // Get ranked candidates and query embedding based on mode.
     let mut query_embedding: Option<Vec<f32>> = None;
     let mut ranked_candidates: Vec<(String, f64)> = match effective_mode {
-        SearchMode::Semantic => {
+        SearchMode::Edge | SearchMode::Semantic => {
             let (candidates, qvec, es, vs) =
                 semantic_search(query, index, provider, over_fetch).await?;
             embed_secs = es;
@@ -442,7 +482,7 @@ pub async fn search(
     match effective_mode {
         SearchMode::Lexical => normalize_bm25_scores(&mut ranked_candidates, bm25_norm_k),
         SearchMode::Hybrid => normalize_rrf_scores(&mut ranked_candidates, rrf_k, 2),
-        SearchMode::Semantic => {} // already [0, 1] cosine similarity
+        SearchMode::Edge | SearchMode::Semantic => {} // already [0, 1] cosine similarity
     }
 
     debug!(
@@ -527,6 +567,7 @@ pub async fn search(
     Ok(SearchResponse {
         results,
         graph_context,
+        edge_results: Vec::new(),
         timings,
     })
 }
@@ -863,6 +904,8 @@ fn expand_graph_context(
                 },
                 linked_from,
                 hop_distance: hop,
+                edge_context: None,
+                edge_relationship: None,
             });
         }
     }
@@ -1077,6 +1120,136 @@ mod tests {
         // Case-insensitive
         assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
         assert_eq!("Semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
+    }
+
+    #[test]
+    fn test_search_mode_edge_from_str() {
+        assert_eq!("edge".parse::<SearchMode>().unwrap(), SearchMode::Edge);
+        assert_eq!("EDGE".parse::<SearchMode>().unwrap(), SearchMode::Edge);
+        assert_eq!("Edge".parse::<SearchMode>().unwrap(), SearchMode::Edge);
+    }
+
+    #[test]
+    fn test_search_mode_edge_display() {
+        assert_eq!(SearchMode::Edge.to_string(), "edge");
+    }
+
+    #[test]
+    fn test_search_mode_edge_serialize() {
+        assert_eq!(serde_json::to_string(&SearchMode::Edge).unwrap(), "\"edge\"");
+    }
+
+    #[test]
+    fn test_edge_search_result_serialize() {
+        let result = EdgeSearchResult {
+            score: 0.85,
+            edge_id: "a.md->b.md".into(),
+            source_path: "a.md".into(),
+            target_path: "b.md".into(),
+            link_text: "see also".into(),
+            context: "For more details, see also b.md".into(),
+            relationship_type: Some("references".into()),
+            cluster_id: Some(2),
+            strength: Some(0.9),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["score"], 0.85);
+        assert_eq!(json["edge_id"], "a.md->b.md");
+        assert_eq!(json["relationship_type"], "references");
+        assert_eq!(json["cluster_id"], 2);
+        assert_eq!(json["strength"], 0.9);
+    }
+
+    #[test]
+    fn test_edge_search_result_optional_fields_skipped() {
+        let result = EdgeSearchResult {
+            score: 0.5,
+            edge_id: "x->y".into(),
+            source_path: "x.md".into(),
+            target_path: "y.md".into(),
+            link_text: "link".into(),
+            context: "ctx".into(),
+            relationship_type: None,
+            cluster_id: None,
+            strength: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("relationship_type"));
+        assert!(!json.contains("cluster_id"));
+        assert!(!json.contains("strength"));
+    }
+
+    #[test]
+    fn test_search_response_edge_results_skipped_when_empty() {
+        let resp = SearchResponse {
+            results: Vec::new(),
+            graph_context: Vec::new(),
+            edge_results: Vec::new(),
+            timings: SearchTimings {
+                embed_secs: 0.0,
+                vector_search_secs: 0.0,
+                lexical_search_secs: 0.0,
+                fusion_secs: 0.0,
+                assemble_secs: 0.0,
+                total_secs: 0.0,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("edge_results"));
+    }
+
+    #[test]
+    fn test_graph_context_item_edge_fields() {
+        let item = GraphContextItem {
+            chunk: SearchResultChunk {
+                chunk_id: "a.md#0".into(),
+                heading_hierarchy: vec![],
+                content: "test".into(),
+                start_line: 1,
+                end_line: 5,
+            },
+            file: SearchResultFile {
+                path: "a.md".into(),
+                frontmatter: None,
+                file_size: 100,
+                path_components: vec!["a.md".into()],
+                modified_at: None,
+            },
+            linked_from: "b.md".into(),
+            hop_distance: 1,
+            edge_context: Some("related to".into()),
+            edge_relationship: Some("extends".into()),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["edge_context"], "related to");
+        assert_eq!(json["edge_relationship"], "extends");
+    }
+
+    #[test]
+    fn test_graph_context_item_edge_fields_skipped_when_none() {
+        let item = GraphContextItem {
+            chunk: SearchResultChunk {
+                chunk_id: "a.md#0".into(),
+                heading_hierarchy: vec![],
+                content: "test".into(),
+                start_line: 1,
+                end_line: 5,
+            },
+            file: SearchResultFile {
+                path: "a.md".into(),
+                frontmatter: None,
+                file_size: 100,
+                path_components: vec!["a.md".into()],
+                modified_at: None,
+            },
+            linked_from: "b.md".into(),
+            hop_distance: 1,
+            edge_context: None,
+            edge_relationship: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("edge_context"));
+        assert!(!json.contains("edge_relationship"));
     }
 
     #[test]
