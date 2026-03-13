@@ -7,6 +7,7 @@ use serde::Serialize;
 use tracing::{debug, info};
 
 use crate::config::Config;
+use crate::links::{EdgeClusterInfo, EdgeClusterState};
 
 /// Common English stop words filtered out during keyword extraction.
 const STOP_WORDS: &[&str] = &[
@@ -429,6 +430,264 @@ impl Clusterer {
     pub fn is_enabled(&self) -> bool {
         self.config.clustering_enabled
     }
+
+    /// Run a full K-means clustering pass over edge embeddings.
+    ///
+    /// `edge_vectors` maps edge ID to its embedding vector.
+    /// `edge_contexts` maps edge ID to its context paragraph text (for keyword extraction).
+    ///
+    /// Returns empty `EdgeClusterState` if fewer than 4 edges.
+    pub fn cluster_edges(
+        &self,
+        edge_vectors: &HashMap<String, Vec<f32>>,
+        edge_contexts: &HashMap<String, String>,
+    ) -> crate::Result<EdgeClusterState> {
+        if edge_vectors.len() < 4 {
+            debug!("cluster_edges: fewer than 4 edges ({}), returning empty state", edge_vectors.len());
+            return Ok(EdgeClusterState {
+                clusters: Vec::new(),
+                edges_since_rebalance: 0,
+                edges_at_last_rebalance: edge_vectors.len(),
+            });
+        }
+
+        // Collect edge IDs in deterministic order
+        let mut ids: Vec<String> = edge_vectors.keys().cloned().collect();
+        ids.sort();
+
+        // Filter out zero-norm vectors
+        let (ids, vecs): (Vec<String>, Vec<&Vec<f32>>) = ids
+            .into_iter()
+            .filter_map(|id| {
+                let v = edge_vectors.get(&id)?;
+                let norm: f32 = v.iter().map(|x| x * x).sum();
+                if norm == 0.0 {
+                    debug!("cluster_edges: skipping zero-norm vector for {id}");
+                    None
+                } else {
+                    Some((id, v))
+                }
+            })
+            .unzip();
+
+        let n = ids.len();
+        if n < 4 {
+            return Ok(EdgeClusterState {
+                clusters: Vec::new(),
+                edges_since_rebalance: 0,
+                edges_at_last_rebalance: n,
+            });
+        }
+
+        let dim = vecs[0].len();
+        let k = compute_edge_k(n);
+
+        // Build ndarray matrix (f64 for linfa)
+        let mut data = Array2::<f64>::zeros((n, dim));
+        for (i, v) in vecs.iter().enumerate() {
+            for (j, &val) in v.iter().enumerate() {
+                data[[i, j]] = val as f64;
+            }
+        }
+
+        let dataset = DatasetBase::from(data);
+
+        // Run K-means
+        let model = linfa_clustering::KMeans::params(k)
+            .max_n_iterations(100)
+            .tolerance(1e-4)
+            .fit(&dataset)
+            .map_err(|e| crate::Error::Clustering(format!("Edge K-means failed: {e}")))?;
+
+        let centroids = model.centroids();
+        let assignments = linfa::traits::Predict::predict(&model, &dataset);
+
+        info!("cluster_edges: clustered {n} edges into {k} clusters");
+
+        // Group members by cluster
+        let mut cluster_members: HashMap<usize, Vec<String>> = HashMap::new();
+        for (i, &cluster_id) in assignments.iter().enumerate() {
+            cluster_members
+                .entry(cluster_id)
+                .or_default()
+                .push(ids[i].clone());
+        }
+
+        // Build EdgeClusterInfo for each cluster
+        let mut clusters: Vec<EdgeClusterInfo> = Vec::new();
+        for cluster_id in 0..k {
+            let members = cluster_members.remove(&cluster_id).unwrap_or_default();
+            if members.is_empty() {
+                continue;
+            }
+
+            let centroid: Vec<f32> = centroids
+                .row(cluster_id)
+                .iter()
+                .map(|&v| v as f32)
+                .collect();
+
+            // Extract keywords from edge contexts for this cluster
+            let member_texts: Vec<&str> = members
+                .iter()
+                .filter_map(|m| edge_contexts.get(m).map(|s| s.as_str()))
+                .collect();
+            let keywords = self.extract_keywords(&member_texts, 5);
+            let label = self.generate_label(&keywords);
+
+            clusters.push(EdgeClusterInfo {
+                id: cluster_id,
+                label,
+                centroid,
+                members,
+                keywords,
+            });
+        }
+
+        // Apply cross-cluster TF-IDF for better keyword distinctiveness
+        self.assign_cross_cluster_edge_keywords(&mut clusters, edge_contexts, 5);
+
+        Ok(EdgeClusterState {
+            clusters,
+            edges_since_rebalance: 0,
+            edges_at_last_rebalance: n,
+        })
+    }
+
+    /// Assign a single new edge to the nearest existing edge cluster.
+    ///
+    /// Returns the cluster ID the edge was assigned to.
+    pub fn assign_edge_to_nearest(
+        &self,
+        state: &mut EdgeClusterState,
+        edge_id: &str,
+        embedding: &[f32],
+    ) -> crate::Result<usize> {
+        if state.clusters.is_empty() {
+            return Err(crate::Error::Clustering(
+                "no edge clusters exist for assignment".to_string(),
+            ));
+        }
+
+        let mut best_idx = 0;
+        let mut best_sim = f32::NEG_INFINITY;
+        for (i, cluster) in state.clusters.iter().enumerate() {
+            let sim = cosine_similarity(embedding, &cluster.centroid);
+            if sim > best_sim {
+                best_sim = sim;
+                best_idx = i;
+            }
+        }
+
+        let cluster = &mut state.clusters[best_idx];
+        let cluster_id = cluster.id;
+
+        // Update centroid incrementally
+        let n = cluster.members.len() as f32;
+        for (i, c) in cluster.centroid.iter_mut().enumerate() {
+            *c = (*c * n + embedding[i]) / (n + 1.0);
+        }
+
+        cluster.members.push(edge_id.to_string());
+        state.edges_since_rebalance += 1;
+
+        debug!(
+            "assign_edge_to_nearest: assigned {edge_id} to cluster {cluster_id} (similarity={best_sim:.4})"
+        );
+
+        Ok(cluster_id)
+    }
+
+    /// Rebalance edge clusters if the number of new edges exceeds the threshold.
+    ///
+    /// Returns `true` if a rebalance was performed.
+    pub fn maybe_rebalance_edges(
+        &self,
+        state: &mut EdgeClusterState,
+        edge_vectors: &HashMap<String, Vec<f32>>,
+        edge_contexts: &HashMap<String, String>,
+        threshold: usize,
+    ) -> crate::Result<bool> {
+        if state.edges_since_rebalance < threshold {
+            debug!(
+                "maybe_rebalance_edges: {}/{} edges since rebalance, skipping",
+                state.edges_since_rebalance, threshold
+            );
+            return Ok(false);
+        }
+
+        info!(
+            "maybe_rebalance_edges: threshold reached ({} edges since last rebalance), re-clustering",
+            state.edges_since_rebalance
+        );
+
+        let new_state = self.cluster_edges(edge_vectors, edge_contexts)?;
+        *state = new_state;
+
+        Ok(true)
+    }
+
+    /// Compute cross-cluster TF-IDF keywords for edge clusters.
+    fn assign_cross_cluster_edge_keywords(
+        &self,
+        clusters: &mut [EdgeClusterInfo],
+        edge_contexts: &HashMap<String, String>,
+        n: usize,
+    ) {
+        if clusters.is_empty() {
+            return;
+        }
+
+        let num_clusters = clusters.len() as f64;
+
+        let mut cluster_tfs: Vec<HashMap<String, f64>> = Vec::with_capacity(clusters.len());
+        let mut cluster_term_sets: Vec<std::collections::HashSet<String>> =
+            Vec::with_capacity(clusters.len());
+
+        for cluster in clusters.iter() {
+            let mut tf: HashMap<String, f64> = HashMap::new();
+            let mut terms_in_cluster: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
+            for member in &cluster.members {
+                if let Some(text) = edge_contexts.get(member) {
+                    let tokens = tokenize_and_filter(text);
+                    for token in &tokens {
+                        *tf.entry(token.clone()).or_insert(0.0) += 1.0;
+                        terms_in_cluster.insert(token.clone());
+                    }
+                }
+            }
+
+            cluster_tfs.push(tf);
+            cluster_term_sets.push(terms_in_cluster);
+        }
+
+        let mut cross_df: HashMap<String, f64> = HashMap::new();
+        for term_set in &cluster_term_sets {
+            for term in term_set {
+                *cross_df.entry(term.clone()).or_insert(0.0) += 1.0;
+            }
+        }
+
+        for (i, cluster) in clusters.iter_mut().enumerate() {
+            let tf = &cluster_tfs[i];
+
+            let mut scores: Vec<(String, f64)> = tf
+                .iter()
+                .map(|(term, &tf_val)| {
+                    let df_val = cross_df.get(term).copied().unwrap_or(1.0);
+                    let idf = (num_clusters / df_val).ln();
+                    (term.clone(), tf_val * idf)
+                })
+                .collect();
+
+            scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            cluster.keywords = scores.into_iter().take(n).map(|(term, _)| term).collect();
+            cluster.label = self.generate_label(&cluster.keywords);
+        }
+    }
 }
 
 /// Compute cosine similarity between two vectors.
@@ -461,6 +720,12 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 pub(crate) fn compute_k(n: usize) -> usize {
     let k = (n as f64 / 2.0).sqrt() as usize;
     k.clamp(2, 50)
+}
+
+/// Compute the optimal number of clusters for edges, clamped to [2, 20].
+pub(crate) fn compute_edge_k(n: usize) -> usize {
+    let k = (n as f64 / 2.0).sqrt() as usize;
+    k.clamp(2, 20)
 }
 
 /// Check if a word is a stop word.
@@ -827,6 +1092,199 @@ mod tests {
         let config = test_config();
         let clusterer = Clusterer::new(&config);
         assert!(clusterer.is_enabled());
+    }
+
+    // --- Edge clustering tests ---
+
+    #[test]
+    fn compute_edge_k_clamped_to_20() {
+        // n=10000 -> sqrt(5000) ≈ 70 -> clamped to 20
+        assert_eq!(compute_edge_k(10000), 20);
+        // n=4 -> sqrt(2) ≈ 1 -> clamped to 2
+        assert_eq!(compute_edge_k(4), 2);
+        // n=200 -> sqrt(100) = 10
+        assert_eq!(compute_edge_k(200), 10);
+    }
+
+    #[test]
+    fn cluster_edges_too_few_edges() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut vectors = HashMap::new();
+        vectors.insert("e1".to_string(), vec![1.0, 0.0, 0.0]);
+        vectors.insert("e2".to_string(), vec![0.0, 1.0, 0.0]);
+        vectors.insert("e3".to_string(), vec![0.0, 0.0, 1.0]);
+        let contexts = HashMap::new();
+
+        let state = clusterer.cluster_edges(&vectors, &contexts).unwrap();
+        assert!(state.clusters.is_empty());
+        assert_eq!(state.edges_at_last_rebalance, 3);
+    }
+
+    #[test]
+    fn cluster_edges_empty() {
+        let clusterer = Clusterer::new(&test_config());
+        let state = clusterer.cluster_edges(&HashMap::new(), &HashMap::new()).unwrap();
+        assert!(state.clusters.is_empty());
+    }
+
+    #[test]
+    fn cluster_edges_basic() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut vectors = HashMap::new();
+        let mut contexts = HashMap::new();
+
+        // Create two groups of edges with distinct vectors
+        for i in 0..5 {
+            vectors.insert(format!("edge:a{i}"), vec![1.0, 0.1 * i as f32, 0.0, 0.0]);
+            contexts.insert(format!("edge:a{i}"), format!("rust programming language systems {i}"));
+        }
+        for i in 0..5 {
+            vectors.insert(format!("edge:b{i}"), vec![0.0, 0.0, 1.0, 0.1 * i as f32]);
+            contexts.insert(format!("edge:b{i}"), format!("cooking recipe food kitchen {i}"));
+        }
+
+        let state = clusterer.cluster_edges(&vectors, &contexts).unwrap();
+        assert!(!state.clusters.is_empty());
+
+        // All edges should be assigned
+        let total: usize = state.clusters.iter().map(|c| c.members.len()).sum();
+        assert_eq!(total, 10);
+
+        // Each cluster should have labels
+        for c in &state.clusters {
+            assert!(!c.label.is_empty());
+            assert!(!c.centroid.is_empty());
+        }
+    }
+
+    #[test]
+    fn cluster_edges_label_generation() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut vectors = HashMap::new();
+        let mut contexts = HashMap::new();
+
+        for i in 0..6 {
+            let mut v = vec![0.0f32; 4];
+            v[i % 4] = 1.0;
+            vectors.insert(format!("edge:{i}"), v);
+            contexts.insert(format!("edge:{i}"), format!("documentation reference guide manual {i}"));
+        }
+
+        let state = clusterer.cluster_edges(&vectors, &contexts).unwrap();
+        for c in &state.clusters {
+            // Labels should be keyword-based, not empty
+            assert!(!c.label.is_empty());
+            assert_ne!(c.label, "Unlabeled");
+        }
+    }
+
+    #[test]
+    fn assign_edge_to_nearest_picks_closest() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = EdgeClusterState {
+            clusters: vec![
+                EdgeClusterInfo {
+                    id: 0,
+                    label: "A".to_string(),
+                    centroid: vec![1.0, 0.0, 0.0],
+                    members: vec!["e1".to_string()],
+                    keywords: vec![],
+                },
+                EdgeClusterInfo {
+                    id: 1,
+                    label: "B".to_string(),
+                    centroid: vec![0.0, 1.0, 0.0],
+                    members: vec!["e2".to_string()],
+                    keywords: vec![],
+                },
+            ],
+            edges_since_rebalance: 0,
+            edges_at_last_rebalance: 2,
+        };
+
+        let assigned = clusterer
+            .assign_edge_to_nearest(&mut state, "e3", &[0.9, 0.1, 0.0])
+            .unwrap();
+        assert_eq!(assigned, 0);
+        assert!(state.clusters[0].members.contains(&"e3".to_string()));
+        assert_eq!(state.edges_since_rebalance, 1);
+    }
+
+    #[test]
+    fn assign_edge_to_nearest_updates_centroid() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = EdgeClusterState {
+            clusters: vec![EdgeClusterInfo {
+                id: 0,
+                label: "A".to_string(),
+                centroid: vec![1.0, 0.0, 0.0],
+                members: vec!["e1".to_string()],
+                keywords: vec![],
+            }],
+            edges_since_rebalance: 0,
+            edges_at_last_rebalance: 1,
+        };
+
+        clusterer
+            .assign_edge_to_nearest(&mut state, "e2", &[0.0, 1.0, 0.0])
+            .unwrap();
+
+        let c = &state.clusters[0].centroid;
+        assert!((c[0] - 0.5).abs() < 1e-6);
+        assert!((c[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn assign_edge_to_nearest_empty_clusters_errors() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = EdgeClusterState {
+            clusters: vec![],
+            edges_since_rebalance: 0,
+            edges_at_last_rebalance: 0,
+        };
+        let result = clusterer.assign_edge_to_nearest(&mut state, "e1", &[1.0, 0.0]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn maybe_rebalance_edges_below_threshold() {
+        let clusterer = Clusterer::new(&test_config());
+        let mut state = EdgeClusterState {
+            clusters: vec![],
+            edges_since_rebalance: 3,
+            edges_at_last_rebalance: 10,
+        };
+        let rebalanced = clusterer
+            .maybe_rebalance_edges(&mut state, &HashMap::new(), &HashMap::new(), 50)
+            .unwrap();
+        assert!(!rebalanced);
+    }
+
+    #[test]
+    fn maybe_rebalance_edges_above_threshold() {
+        let clusterer = Clusterer::new(&test_config());
+
+        let mut vectors = HashMap::new();
+        let mut contexts = HashMap::new();
+        for i in 0..6 {
+            let mut v = vec![0.0f32; 4];
+            v[i % 4] = 1.0;
+            vectors.insert(format!("edge:{i}"), v);
+            contexts.insert(format!("edge:{i}"), format!("word{i} text content"));
+        }
+
+        let mut state = EdgeClusterState {
+            clusters: vec![],
+            edges_since_rebalance: 5,
+            edges_at_last_rebalance: 0,
+        };
+
+        let rebalanced = clusterer
+            .maybe_rebalance_edges(&mut state, &vectors, &contexts, 2)
+            .unwrap();
+        assert!(rebalanced);
+        assert!(!state.clusters.is_empty());
+        assert_eq!(state.edges_since_rebalance, 0);
     }
 
     #[test]

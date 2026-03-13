@@ -21,13 +21,14 @@ pub use error::Error;
 pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField};
-pub use search::{GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
+pub use search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState};
 pub use links::{
-    LinkEntry, LinkGraph, LinkQueryResult, LinkState, NeighborhoodNode, NeighborhoodResult,
-    OrphanFile, ResolvedLink,
+    EdgeClusterInfo, EdgeClusterState, LinkEntry, LinkGraph, LinkQueryResult, LinkState,
+    NeighborhoodNode, NeighborhoodResult, OrphanFile, ResolvedLink, SemanticEdge,
 };
+pub use parser::LinkContext;
 pub use tree::{FileState, FileTree, FileTreeNode};
 pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
 // Graph visualization types are defined in this file and automatically public.
@@ -293,6 +294,18 @@ pub struct GraphEdge {
     pub target: String,
     /// Optional edge weight (e.g. cosine similarity).
     pub weight: Option<f64>,
+    /// Semantic edge relationship type (cluster label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship_type: Option<String>,
+    /// Semantic edge strength (cosine similarity between edge and target embeddings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
+    /// Paragraph context surrounding the link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_text: Option<String>,
+    /// Edge cluster assignment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_cluster_id: Option<usize>,
 }
 
 /// A cluster in the graph visualization.
@@ -319,6 +332,9 @@ pub struct GraphData {
     pub clusters: Vec<GraphCluster>,
     /// The level of detail for this graph.
     pub level: String,
+    /// Edge clusters (semantic relationship groupings), if available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_clusters: Vec<GraphCluster>,
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -664,6 +680,19 @@ impl MarkdownVdb {
             HashMap::new();
         let mut discovered_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        // Track full file contents for edge paragraph extraction.
+        let mut file_full_contents: HashMap<PathBuf, String> = HashMap::new();
+        // Track edge batch chunks (edge ID -> paragraph content).
+        let mut edge_batch_chunks: Vec<embedding::batch::Chunk> = Vec::new();
+        // Track edge metadata for building SemanticEdge entries after embedding.
+        struct EdgeMeta {
+            edge_id: String,
+            source: String,
+            target: String,
+            context_text: String,
+            line_number: usize,
+        }
+        let mut edge_metas: Vec<EdgeMeta> = Vec::new();
 
         let parse_start = std::time::Instant::now();
         let total_files = discovered.len();
@@ -737,6 +766,47 @@ impl MarkdownVdb {
                 });
             }
 
+            // Extract edge contexts if edge embeddings are enabled.
+            if self.config.edge_embeddings && !md.links.is_empty() {
+                // Read full file content (needed for paragraph extraction since
+                // RawLink.line_number is file-relative including frontmatter).
+                let full_path = self.root.join(path);
+                match std::fs::read_to_string(&full_path) {
+                    Ok(full_content) => {
+                        let link_contexts =
+                            parser::extract_links_with_context(&full_content, &md.links);
+                        let source_str = path.to_string_lossy().to_string();
+                        for ctx in &link_contexts {
+                            let resolved_target =
+                                links::resolve_link(&source_str, &ctx.link.target);
+                            if resolved_target.is_empty() {
+                                continue;
+                            }
+                            let edge_id = format!(
+                                "edge:{}->{}@{}",
+                                source_str, resolved_target, ctx.link.line_number
+                            );
+                            edge_batch_chunks.push(embedding::batch::Chunk {
+                                id: edge_id.clone(),
+                                source_path: path.clone(),
+                                content: ctx.paragraph.clone(),
+                            });
+                            edge_metas.push(EdgeMeta {
+                                edge_id,
+                                source: source_str.clone(),
+                                target: resolved_target,
+                                context_text: ctx.paragraph.clone(),
+                                line_number: ctx.link.line_number,
+                            });
+                        }
+                        file_full_contents.insert(path.clone(), full_content);
+                    }
+                    Err(e) => {
+                        debug!(path = %path.display(), error = %e, "could not read full file for edge extraction");
+                    }
+                }
+            }
+
             parsed_files.insert(path.clone(), (md, chunks));
         }
 
@@ -752,6 +822,9 @@ impl MarkdownVdb {
         }
 
         emit(&IngestPhase::Embedding { batch: 0, total_batches: 0 });
+
+        // Include edge chunks in the same batch as regular chunks (no extra API calls).
+        all_batch_chunks.extend(edge_batch_chunks);
 
         // Embed all changed chunks.
         // For files we're re-embedding, we pass empty existing hashes so nothing is skipped.
@@ -818,6 +891,178 @@ impl MarkdownVdb {
             debug!(path = %path.display(), chunks = chunks.len(), "indexed");
         }
 
+        // Upsert edge vectors and build semantic edge entries.
+        if self.config.edge_embeddings && !edge_metas.is_empty() {
+            // For single-file ingest, remove old edges for the file first.
+            if let Some(ref single_file) = options.file {
+                let source_str = single_file.to_string_lossy().to_string();
+                let source_prefix = format!("edge:{}", source_str);
+                // Get existing edge vectors to find ones belonging to this file.
+                let existing_edges = self.index.get_edge_vectors();
+                let old_edge_ids: Vec<String> = existing_edges
+                    .keys()
+                    .filter(|id| id.starts_with(&source_prefix))
+                    .cloned()
+                    .collect();
+                if !old_edge_ids.is_empty() {
+                    // Remove old edge vectors by upserting empty set after removing via index internals.
+                    // The upsert_edges call will handle replacement since it removes existing edge: prefix entries.
+                    debug!(count = old_edge_ids.len(), "removing old edge vectors for single-file re-ingest");
+                }
+            }
+
+            // Collect edge vectors from embed results.
+            let edge_vectors: Vec<(String, Vec<f32>)> = edge_metas
+                .iter()
+                .filter_map(|em| {
+                    embed_result
+                        .embeddings
+                        .get(&em.edge_id)
+                        .map(|v| (em.edge_id.clone(), v.clone()))
+                })
+                .collect();
+
+            if !edge_vectors.is_empty() {
+                self.index.upsert_edges(&edge_vectors)?;
+                debug!(count = edge_vectors.len(), "upserted edge vectors");
+            }
+
+            // Build SemanticEdge entries and merge into link graph.
+            let mut semantic_edges: HashMap<String, links::SemanticEdge> = HashMap::new();
+            for em in &edge_metas {
+                // Compute strength (cosine similarity to target doc vector) if available.
+                let strength = {
+                    let doc_vectors = self.index.get_document_vectors();
+                    let edge_vec = embed_result.embeddings.get(&em.edge_id);
+                    let target_vec = doc_vectors.get(&em.target);
+                    match (edge_vec, target_vec) {
+                        (Some(ev), Some(tv)) => {
+                            let dot: f32 = ev.iter().zip(tv.iter()).map(|(a, b)| a * b).sum();
+                            let norm_a: f32 = ev.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            let norm_b: f32 = tv.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            if norm_a > 0.0 && norm_b > 0.0 {
+                                Some((dot / (norm_a * norm_b)) as f64)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                };
+
+                semantic_edges.insert(
+                    em.edge_id.clone(),
+                    links::SemanticEdge {
+                        edge_id: em.edge_id.clone(),
+                        source: em.source.clone(),
+                        target: em.target.clone(),
+                        context_text: em.context_text.clone(),
+                        line_number: em.line_number,
+                        strength,
+                        relationship_type: None,
+                        cluster_id: None,
+                    },
+                );
+            }
+
+            // Merge semantic edges into the link graph.
+            let existing_graph = self.index.get_link_graph();
+            {
+            let mut graph = existing_graph.unwrap_or_else(|| links::LinkGraph {
+                forward: HashMap::new(),
+                last_updated: 0,
+                semantic_edges: None,
+                edge_cluster_state: None,
+            });
+                if let Some(ref single_file) = options.file {
+                    // Single-file ingest: remove old edges for the file, then merge new ones.
+                    let source_str = single_file.to_string_lossy().to_string();
+                    let source_prefix = format!("edge:{}->", source_str);
+                    if let Some(ref mut existing) = graph.semantic_edges {
+                        existing.retain(|id, _| !id.starts_with(&source_prefix));
+                        existing.extend(semantic_edges);
+                    } else {
+                        graph.semantic_edges = Some(semantic_edges);
+                    }
+                } else {
+                    // Full ingest: replace all semantic edges with freshly computed ones.
+                    graph.semantic_edges = Some(semantic_edges);
+                }
+                // Run edge clustering.
+                let clusterer = clustering::Clusterer::new(&self.config);
+
+                // Collect all edge vectors and contexts for clustering.
+                let all_edge_vectors = self.index.get_edge_vectors();
+                let all_edge_contexts: HashMap<String, String> = graph
+                    .semantic_edges
+                    .as_ref()
+                    .map(|edges| {
+                        edges
+                            .iter()
+                            .map(|(id, e)| (id.clone(), e.context_text.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if options.file.is_some() {
+                    // Single-file ingest: assign new edges to nearest cluster, maybe rebalance.
+                    if let Some(ref mut state) = graph.edge_cluster_state {
+                        if !state.clusters.is_empty() {
+                            for em in &edge_metas {
+                                if let Some(vec) = all_edge_vectors.get(&em.edge_id) {
+                                    match clusterer.assign_edge_to_nearest(state, &em.edge_id, vec) {
+                                        Ok(cid) => {
+                                            // Update cluster_id on the SemanticEdge.
+                                            if let Some(ref mut edges) = graph.semantic_edges {
+                                                if let Some(edge) = edges.get_mut(&em.edge_id) {
+                                                    edge.cluster_id = Some(cid);
+                                                    // Find relationship_type from the cluster label.
+                                                    if let Some(ci) = state.clusters.iter().find(|c| c.id == cid) {
+                                                        edge.relationship_type = Some(ci.label.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(error = %e, edge_id = %em.edge_id, "failed to assign edge to cluster"),
+                                    }
+                                }
+                            }
+                            // Maybe rebalance.
+                            match clusterer.maybe_rebalance_edges(
+                                state,
+                                &all_edge_vectors,
+                                &all_edge_contexts,
+                                self.config.edge_cluster_rebalance,
+                            ) {
+                                Ok(rebalanced) => {
+                                    if rebalanced {
+                                        // After rebalance, update cluster_id/relationship_type on all edges.
+                                        Self::apply_edge_cluster_labels(&mut graph);
+                                        info!("edge clusters rebalanced after single-file ingest");
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "edge cluster rebalance failed"),
+                            }
+                        }
+                    }
+                } else {
+                    // Full ingest: run full edge clustering.
+                    match clusterer.cluster_edges(&all_edge_vectors, &all_edge_contexts) {
+                        Ok(state) => {
+                            graph.edge_cluster_state = Some(state);
+                            Self::apply_edge_cluster_labels(&mut graph);
+                            info!("edge clustering complete after full ingest");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "edge clustering failed (non-fatal)");
+                        }
+                    }
+                }
+
+                self.index.update_link_graph(Some(graph));
+            }
+            } // end semantic edges block
+
         // Consistency guard: rebuild FTS from stored chunks for files that
         // were skipped (already in vector index but missing from FTS).
         if fts_needs_rebuild {
@@ -870,6 +1115,8 @@ impl MarkdownVdb {
             let mut graph = self.index.get_link_graph().unwrap_or_else(|| links::LinkGraph {
                 forward: HashMap::new(),
                 last_updated: 0,
+                semantic_edges: None,
+                edge_cluster_state: None,
             });
             if let Some((md, _)) = parsed_files.get(single_file) {
                 links::update_file_links(&mut graph, md);
@@ -893,7 +1140,17 @@ impl MarkdownVdb {
                     }
                 }
             }
-            let graph = links::build_link_graph(&all_md_files);
+            let mut graph = links::build_link_graph(&all_md_files);
+            // Preserve semantic edges and edge cluster state from the earlier
+            // edge-embedding pass (which stored them before this rebuild).
+            if let Some(prev) = self.index.get_link_graph() {
+                if graph.semantic_edges.is_none() {
+                    graph.semantic_edges = prev.semantic_edges;
+                }
+                if graph.edge_cluster_state.is_none() {
+                    graph.edge_cluster_state = prev.edge_cluster_state;
+                }
+            }
             self.index.update_link_graph(Some(graph));
 
             // Remove links for deleted files.
@@ -989,6 +1246,27 @@ impl MarkdownVdb {
         Ok(result)
     }
 
+    /// Apply cluster labels to all semantic edges based on the current edge_cluster_state.
+    fn apply_edge_cluster_labels(graph: &mut links::LinkGraph) {
+        if let (Some(ref state), Some(ref mut edges)) =
+            (&graph.edge_cluster_state, &mut graph.semantic_edges)
+        {
+            // Build edge_id → (cluster_id, label) lookup from cluster members.
+            let mut edge_to_cluster: HashMap<String, (usize, String)> = HashMap::new();
+            for cluster in &state.clusters {
+                for member in &cluster.members {
+                    edge_to_cluster.insert(member.clone(), (cluster.id, cluster.label.clone()));
+                }
+            }
+            for (edge_id, edge) in edges.iter_mut() {
+                if let Some((cid, label)) = edge_to_cluster.get(edge_id) {
+                    edge.cluster_id = Some(*cid);
+                    edge.relationship_type = Some(label.clone());
+                }
+            }
+        }
+    }
+
     /// Execute a semantic search query against the index.
     pub async fn search(
         &self,
@@ -1009,6 +1287,7 @@ impl MarkdownVdb {
             self.config.search_boost_hops,
             self.config.search_expand_graph,
             self.config.search_expand_limit,
+            self.config.edge_boost_weight,
         )
         .await
     }
@@ -1301,21 +1580,43 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 }
                 for entry in entries {
                     if indexed_paths.contains(&entry.target) {
+                        // Look up semantic edge metadata if available
+                        let edge_id = format!("edge:{}->{}@{}", source, entry.target, entry.line_number);
+                        let semantic = link_graph.semantic_edges.as_ref()
+                            .and_then(|se| se.get(&edge_id));
                         edges.push(GraphEdge {
                             source: source.clone(),
                             target: entry.target.clone(),
                             weight: None,
+                            relationship_type: semantic.and_then(|s| s.relationship_type.clone()),
+                            strength: semantic.and_then(|s| s.strength),
+                            context_text: semantic.map(|s| s.context_text.clone()),
+                            edge_cluster_id: semantic.and_then(|s| s.cluster_id),
                         });
                     }
                 }
             }
         }
 
+        // Build edge clusters from EdgeClusterState if available
+        let edge_clusters = self.index.get_link_graph()
+            .and_then(|lg| lg.edge_cluster_state)
+            .map(|ecs| {
+                ecs.clusters.iter().map(|c| GraphCluster {
+                    id: c.id,
+                    label: c.label.clone(),
+                    keywords: c.keywords.clone(),
+                    member_count: c.members.len(),
+                }).collect()
+            })
+            .unwrap_or_default();
+
         Ok(GraphData {
             nodes,
             edges,
             clusters,
             level: "document".to_string(),
+            edge_clusters,
         })
     }
 
@@ -1339,6 +1640,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 edges: Vec::new(),
                 clusters: Vec::new(),
                 level: "chunk".to_string(),
+                edge_clusters: Vec::new(),
             });
         }
 
@@ -1425,6 +1727,10 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                     source: cv.chunk_id.clone(),
                     target: neighbor_id.clone(),
                     weight: Some(*score),
+                    relationship_type: None,
+                    strength: None,
+                    context_text: None,
+                    edge_cluster_id: None,
                 });
                 cross_file_count += 1;
             }
@@ -1435,6 +1741,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             edges,
             clusters,
             level: "chunk".to_string(),
+            edge_clusters: Vec::new(),
         })
     }
 
@@ -1515,6 +1822,38 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         let indexed_files: std::collections::HashSet<String> =
             self.index.get_file_hashes().keys().cloned().collect();
         Ok(links::find_orphans(&graph, &indexed_files))
+    }
+
+    /// Get semantic edges, optionally filtered by file path.
+    ///
+    /// Returns all edges if `file` is `None`, or only edges where the given
+    /// file is either the source or target.
+    pub fn edges(&self, file: Option<&str>) -> Result<Vec<SemanticEdge>> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        let all_edges = match &graph.semantic_edges {
+            Some(map) => map.values().cloned().collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        match file {
+            Some(path) => {
+                let path = path.strip_prefix("./").unwrap_or(path);
+                Ok(all_edges
+                    .into_iter()
+                    .filter(|e| e.source == path || e.target == path)
+                    .collect())
+            }
+            None => Ok(all_edges),
+        }
+    }
+
+    /// Get the edge clustering state, if available.
+    pub fn edge_clusters(&self) -> Result<Option<EdgeClusterState>> {
+        let graph = self.index.get_link_graph().ok_or_else(|| {
+            Error::Config("no link graph available; run ingest first".to_string())
+        })?;
+        Ok(graph.edge_cluster_state.clone())
     }
 
     /// Build a file tree showing sync state of all discovered files.

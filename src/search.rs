@@ -23,6 +23,8 @@ pub enum SearchMode {
     Semantic,
     /// Lexical search only (BM25 via Tantivy). No embedding API call needed.
     Lexical,
+    /// Edge-based search: retrieve by semantic edges between documents.
+    Edge,
 }
 
 impl FromStr for SearchMode {
@@ -33,8 +35,9 @@ impl FromStr for SearchMode {
             "hybrid" => Ok(Self::Hybrid),
             "semantic" => Ok(Self::Semantic),
             "lexical" => Ok(Self::Lexical),
+            "edge" => Ok(Self::Edge),
             other => Err(Error::Config(format!(
-                "unknown search mode '{other}': expected hybrid, semantic, or lexical"
+                "unknown search mode '{other}': expected hybrid, semantic, lexical, or edge"
             ))),
         }
     }
@@ -46,6 +49,7 @@ impl std::fmt::Display for SearchMode {
             Self::Hybrid => write!(f, "hybrid"),
             Self::Semantic => write!(f, "semantic"),
             Self::Lexical => write!(f, "lexical"),
+            Self::Edge => write!(f, "edge"),
         }
     }
 }
@@ -253,6 +257,38 @@ pub struct GraphContextItem {
     pub linked_from: String,
     /// Number of link hops from the result file (1 = direct link).
     pub hop_distance: usize,
+    /// Contextual information about the edge connecting this item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_context: Option<String>,
+    /// Relationship type of the edge connecting this item.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_relationship: Option<String>,
+}
+
+/// A search result representing a semantic edge between two documents.
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgeSearchResult {
+    /// Relevance score for this edge match.
+    pub score: f64,
+    /// Unique identifier for this edge.
+    pub edge_id: String,
+    /// Source document path.
+    pub source_path: String,
+    /// Target document path.
+    pub target_path: String,
+    /// Link text connecting source to target.
+    pub link_text: String,
+    /// Contextual text surrounding the link.
+    pub context: String,
+    /// Relationship type label (e.g., "references", "extends").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship_type: Option<String>,
+    /// Cluster ID this edge belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_id: Option<usize>,
+    /// Edge strength/weight.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
 }
 
 /// Per-query timing breakdown for search operations.
@@ -283,6 +319,9 @@ pub struct SearchResponse {
     pub graph_context: Vec<GraphContextItem>,
     /// Timing breakdown for the search operation.
     pub timings: SearchTimings,
+    /// Edge-based search results (populated when mode is Edge).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_results: Vec<EdgeSearchResult>,
 }
 
 /// Apply exponential time decay to a score based on file age.
@@ -339,6 +378,7 @@ pub async fn search(
     boost_hops_default: usize,
     expand_graph_default: usize,
     expand_limit: usize,
+    edge_boost_weight: f64,
 ) -> Result<SearchResponse> {
     let total_start = Instant::now();
 
@@ -348,6 +388,7 @@ pub async fn search(
         return Ok(SearchResponse {
             results: Vec::new(),
             graph_context: Vec::new(),
+            edge_results: Vec::new(),
             timings: SearchTimings {
                 embed_secs: 0.0,
                 vector_search_secs: 0.0,
@@ -389,7 +430,7 @@ pub async fn search(
     // Get ranked candidates and query embedding based on mode.
     let mut query_embedding: Option<Vec<f32>> = None;
     let mut ranked_candidates: Vec<(String, f64)> = match effective_mode {
-        SearchMode::Semantic => {
+        SearchMode::Edge | SearchMode::Semantic => {
             let (candidates, qvec, es, vs) =
                 semantic_search(query, index, provider, over_fetch).await?;
             embed_secs = es;
@@ -438,11 +479,46 @@ pub async fn search(
         }
     };
 
+    // --- Edge-first retrieval mode ---
+    if effective_mode == SearchMode::Edge {
+        let assemble_start = Instant::now();
+        let link_graph = index.get_link_graph();
+        let edge_results = if let Some(qe) = &query_embedding {
+            let edge_candidates = index.search_edges(qe, query.limit)?;
+            assemble_edge_results(&edge_candidates, link_graph.as_ref())
+        } else {
+            Vec::new()
+        };
+        let assemble_secs = assemble_start.elapsed().as_secs_f64();
+        let total_secs = total_start.elapsed().as_secs_f64();
+
+        info!(
+            query = %query.query,
+            edge_results = edge_results.len(),
+            mode = %effective_mode,
+            "edge search complete"
+        );
+
+        return Ok(SearchResponse {
+            results: Vec::new(),
+            graph_context: Vec::new(),
+            edge_results,
+            timings: SearchTimings {
+                embed_secs,
+                vector_search_secs,
+                lexical_search_secs,
+                fusion_secs,
+                assemble_secs,
+                total_secs,
+            },
+        });
+    }
+
     // Normalize scores to [0, 1] for non-semantic modes.
     match effective_mode {
         SearchMode::Lexical => normalize_bm25_scores(&mut ranked_candidates, bm25_norm_k),
         SearchMode::Hybrid => normalize_rrf_scores(&mut ranked_candidates, rrf_k, 2),
-        SearchMode::Semantic => {} // already [0, 1] cosine similarity
+        SearchMode::Edge | SearchMode::Semantic => {} // already [0, 1] cosine similarity
     }
 
     debug!(
@@ -483,6 +559,8 @@ pub async fn search(
         link_graph.as_ref(),
         backlinks.as_ref(),
         now,
+        query_embedding.as_deref(),
+        edge_boost_weight,
     )?;
 
     // Graph context expansion: find relevant chunks from linked files.
@@ -527,6 +605,7 @@ pub async fn search(
     Ok(SearchResponse {
         results,
         graph_context,
+        edge_results: Vec::new(),
         timings,
     })
 }
@@ -575,6 +654,29 @@ fn lexical_search(
 /// Assemble SearchResult objects from ranked candidates, applying decay, filters, min_score,
 /// and multi-hop link-graph boosting.
 #[allow(clippy::too_many_arguments)]
+/// Compute cosine similarity between two vectors. Returns 0.0 if either is zero-length.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f64;
+    let mut norm_a = 0.0_f64;
+    let mut norm_b = 0.0_f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let x = *x as f64;
+        let y = *y as f64;
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom < 1e-12 {
+        0.0
+    } else {
+        (dot / denom).clamp(0.0, 1.0)
+    }
+}
+
 fn assemble_results(
     query: &SearchQuery,
     index: &Index,
@@ -588,6 +690,8 @@ fn assemble_results(
     link_graph: Option<&links::LinkGraph>,
     backlinks: Option<&HashMap<String, Vec<links::LinkEntry>>>,
     now: u64,
+    query_embedding: Option<&[f32]>,
+    edge_boost_weight: f64,
 ) -> Result<Vec<SearchResult>> {
     let file_mtimes = index.get_file_mtimes();
 
@@ -689,12 +793,55 @@ fn assemble_results(
             let neighbors = links::bfs_neighbors(graph, bl, &top_paths, boost_hops);
 
             if !neighbors.is_empty() {
+                // Pre-fetch edge vectors for semantic edge boosting.
+                let edge_vectors = if query_embedding.is_some() && edge_boost_weight > 0.0 {
+                    Some(index.get_edge_vectors())
+                } else {
+                    None
+                };
+
+                // Build a lookup: target_path → best edge cosine similarity with query.
+                // We look at all semantic edges and index the best score per target file.
+                let edge_scores: HashMap<String, f64> = if let (
+                    Some(qe),
+                    Some(ref evecs),
+                    Some(ref edges_map),
+                ) = (
+                    query_embedding,
+                    &edge_vectors,
+                    graph.semantic_edges.as_ref(),
+                ) {
+                    let mut best: HashMap<String, f64> = HashMap::new();
+                    for (eid, edge) in edges_map.iter() {
+                        if let Some(evec) = evecs.get(eid) {
+                            let sim = cosine_similarity(qe, evec);
+                            // Index by both source and target so any file connected
+                            // via a relevant edge gets the boost.
+                            for path in [&edge.source, &edge.target] {
+                                let entry = best.entry(path.to_string()).or_insert(0.0);
+                                if sim > *entry {
+                                    *entry = sim;
+                                }
+                            }
+                        }
+                    }
+                    best
+                } else {
+                    HashMap::new()
+                };
+
                 for result in &mut results {
                     if let Some(&distance) = neighbors.get(&result.file.path) {
-                        // Distance-decayed multiplier: 1.0 + 0.15 / 2^(distance - 1)
-                        // Hop 1: 1.150x, Hop 2: 1.075x, Hop 3: 1.0375x
+                        // Use edge-weighted boost when edge scores available,
+                        // otherwise fall back to flat boost.
+                        let boost = if let Some(&edge_sim) = edge_scores.get(&result.file.path) {
+                            edge_boost_weight * edge_sim
+                        } else {
+                            // Flat fallback: use edge_boost_weight as the base boost.
+                            edge_boost_weight
+                        };
                         let multiplier =
-                            1.0 + 0.15 / 2.0_f64.powi((distance as i32) - 1);
+                            1.0 + boost / 2.0_f64.powi((distance as i32) - 1);
                         result.score *= multiplier;
                         debug!(
                             path = %result.file.path,
@@ -715,6 +862,54 @@ fn assemble_results(
     }
 
     Ok(results)
+}
+
+/// Assemble EdgeSearchResult entries from edge search candidates and the link graph.
+///
+/// For each edge candidate (edge_id, score), looks up the SemanticEdge metadata from
+/// the link graph's semantic_edges map. Falls back to parsing the edge ID for source/target
+/// if the edge is not found in the graph.
+fn assemble_edge_results(
+    candidates: &[(String, f64)],
+    link_graph: Option<&links::LinkGraph>,
+) -> Vec<EdgeSearchResult> {
+    let semantic_edges = link_graph.and_then(|lg| lg.semantic_edges.as_ref());
+
+    candidates
+        .iter()
+        .filter_map(|(edge_id, score)| {
+            if let Some(edges) = semantic_edges {
+                if let Some(edge) = edges.get(edge_id) {
+                    return Some(EdgeSearchResult {
+                        score: *score,
+                        edge_id: edge_id.clone(),
+                        source_path: edge.source.clone(),
+                        target_path: edge.target.clone(),
+                        link_text: String::new(),
+                        context: edge.context_text.clone(),
+                        relationship_type: edge.relationship_type.clone(),
+                        cluster_id: edge.cluster_id,
+                        strength: edge.strength,
+                    });
+                }
+            }
+            // Fallback: parse edge ID format "edge:source->target@line"
+            let stripped = edge_id.strip_prefix("edge:")?;
+            let (source, rest) = stripped.split_once("->")?;
+            let target = rest.split('@').next()?;
+            Some(EdgeSearchResult {
+                score: *score,
+                edge_id: edge_id.clone(),
+                source_path: source.to_string(),
+                target_path: target.to_string(),
+                link_text: String::new(),
+                context: String::new(),
+                relationship_type: None,
+                cluster_id: None,
+                strength: None,
+            })
+        })
+        .collect()
 }
 
 /// Expand graph context by finding relevant chunks from files linked to top search results.
@@ -846,6 +1041,10 @@ fn expand_graph_context(
             // Find which seed file this neighbor is linked from.
             let linked_from = find_linked_from(&seeds, &path, link_graph, backlinks);
 
+            // Look up semantic edge context between the linked_from file and this neighbor.
+            let (edge_context, edge_relationship) =
+                find_edge_context(link_graph, &linked_from, &path);
+
             items.push(GraphContextItem {
                 chunk: SearchResultChunk {
                     chunk_id: chunk_id.clone(),
@@ -863,6 +1062,8 @@ fn expand_graph_context(
                 },
                 linked_from,
                 hop_distance: hop,
+                edge_context,
+                edge_relationship,
             });
         }
     }
@@ -875,6 +1076,30 @@ fn expand_graph_context(
     });
 
     items
+}
+
+/// Find semantic edge context between a source and target file.
+///
+/// Searches the link graph's semantic_edges for any edge from source to target,
+/// returning the context text and relationship type if found.
+fn find_edge_context(
+    link_graph: &links::LinkGraph,
+    source: &str,
+    target: &str,
+) -> (Option<String>, Option<String>) {
+    if let Some(edges) = &link_graph.semantic_edges {
+        for edge in edges.values() {
+            if edge.source == source && edge.target == target {
+                let ctx = if edge.context_text.is_empty() {
+                    None
+                } else {
+                    Some(edge.context_text.clone())
+                };
+                return (ctx, edge.relationship_type.clone());
+            }
+        }
+    }
+    (None, None)
 }
 
 /// Find which seed file has a link connection to the target file.
@@ -1077,6 +1302,136 @@ mod tests {
         // Case-insensitive
         assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
         assert_eq!("Semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
+    }
+
+    #[test]
+    fn test_search_mode_edge_from_str() {
+        assert_eq!("edge".parse::<SearchMode>().unwrap(), SearchMode::Edge);
+        assert_eq!("EDGE".parse::<SearchMode>().unwrap(), SearchMode::Edge);
+        assert_eq!("Edge".parse::<SearchMode>().unwrap(), SearchMode::Edge);
+    }
+
+    #[test]
+    fn test_search_mode_edge_display() {
+        assert_eq!(SearchMode::Edge.to_string(), "edge");
+    }
+
+    #[test]
+    fn test_search_mode_edge_serialize() {
+        assert_eq!(serde_json::to_string(&SearchMode::Edge).unwrap(), "\"edge\"");
+    }
+
+    #[test]
+    fn test_edge_search_result_serialize() {
+        let result = EdgeSearchResult {
+            score: 0.85,
+            edge_id: "a.md->b.md".into(),
+            source_path: "a.md".into(),
+            target_path: "b.md".into(),
+            link_text: "see also".into(),
+            context: "For more details, see also b.md".into(),
+            relationship_type: Some("references".into()),
+            cluster_id: Some(2),
+            strength: Some(0.9),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["score"], 0.85);
+        assert_eq!(json["edge_id"], "a.md->b.md");
+        assert_eq!(json["relationship_type"], "references");
+        assert_eq!(json["cluster_id"], 2);
+        assert_eq!(json["strength"], 0.9);
+    }
+
+    #[test]
+    fn test_edge_search_result_optional_fields_skipped() {
+        let result = EdgeSearchResult {
+            score: 0.5,
+            edge_id: "x->y".into(),
+            source_path: "x.md".into(),
+            target_path: "y.md".into(),
+            link_text: "link".into(),
+            context: "ctx".into(),
+            relationship_type: None,
+            cluster_id: None,
+            strength: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("relationship_type"));
+        assert!(!json.contains("cluster_id"));
+        assert!(!json.contains("strength"));
+    }
+
+    #[test]
+    fn test_search_response_edge_results_skipped_when_empty() {
+        let resp = SearchResponse {
+            results: Vec::new(),
+            graph_context: Vec::new(),
+            edge_results: Vec::new(),
+            timings: SearchTimings {
+                embed_secs: 0.0,
+                vector_search_secs: 0.0,
+                lexical_search_secs: 0.0,
+                fusion_secs: 0.0,
+                assemble_secs: 0.0,
+                total_secs: 0.0,
+            },
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(!json.contains("edge_results"));
+    }
+
+    #[test]
+    fn test_graph_context_item_edge_fields() {
+        let item = GraphContextItem {
+            chunk: SearchResultChunk {
+                chunk_id: "a.md#0".into(),
+                heading_hierarchy: vec![],
+                content: "test".into(),
+                start_line: 1,
+                end_line: 5,
+            },
+            file: SearchResultFile {
+                path: "a.md".into(),
+                frontmatter: None,
+                file_size: 100,
+                path_components: vec!["a.md".into()],
+                modified_at: None,
+            },
+            linked_from: "b.md".into(),
+            hop_distance: 1,
+            edge_context: Some("related to".into()),
+            edge_relationship: Some("extends".into()),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["edge_context"], "related to");
+        assert_eq!(json["edge_relationship"], "extends");
+    }
+
+    #[test]
+    fn test_graph_context_item_edge_fields_skipped_when_none() {
+        let item = GraphContextItem {
+            chunk: SearchResultChunk {
+                chunk_id: "a.md#0".into(),
+                heading_hierarchy: vec![],
+                content: "test".into(),
+                start_line: 1,
+                end_line: 5,
+            },
+            file: SearchResultFile {
+                path: "a.md".into(),
+                frontmatter: None,
+                file_size: 100,
+                path_components: vec!["a.md".into()],
+                modified_at: None,
+            },
+            linked_from: "b.md".into(),
+            hop_distance: 1,
+            edge_context: None,
+            edge_relationship: None,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(!json.contains("edge_context"));
+        assert!(!json.contains("edge_relationship"));
     }
 
     #[test]
@@ -1713,5 +2068,237 @@ mod tests {
         assert!(should_apply_decay("docs/guides/setup.md", &exclude, &include));
         assert!(should_apply_decay("wiki/articles/rust.md", &exclude, &include));
         assert!(!should_apply_decay("notes/random.md", &exclude, &include));
+    }
+
+    // --- Cosine similarity tests ---
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let v = vec![1.0_f32, 2.0, 3.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0_f32, 0.0, 0.0];
+        let b = vec![0.0_f32, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_similar_vectors() {
+        let a = vec![1.0_f32, 1.0, 0.0];
+        let b = vec![1.0_f32, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        // cos(45°) = 1/√2
+        assert!((sim - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty_vectors() {
+        let empty: Vec<f32> = vec![];
+        assert_eq!(cosine_similarity(&empty, &empty), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_vector() {
+        let a = vec![0.0_f32, 0.0, 0.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_mismatched_lengths() {
+        let a = vec![1.0_f32, 2.0];
+        let b = vec![1.0_f32, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    // --- Edge-weighted boost tests ---
+
+    #[test]
+    fn test_edge_boost_weight_used_in_multiplier() {
+        // With edge_boost_weight = 0.15 and no edge vectors, flat boost applies.
+        // Hop 1: 1.0 + 0.15 / 2^0 = 1.15
+        let weight = 0.15;
+        let distance = 1;
+        let multiplier = 1.0 + weight / 2.0_f64.powi((distance as i32) - 1);
+        assert!((multiplier - 1.15).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_edge_boost_weight_zero_disables_boost() {
+        // With edge_boost_weight = 0.0, multiplier should be 1.0 (no boost).
+        let weight = 0.0;
+        let distance = 1;
+        let multiplier = 1.0 + weight / 2.0_f64.powi((distance as i32) - 1);
+        assert!((multiplier - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_edge_weighted_boost_high_similarity_boosts_more() {
+        // An edge with high cosine similarity to query should boost more
+        // than one with low similarity.
+        let weight = 0.15;
+        let high_sim = 0.95;
+        let low_sim = 0.2;
+
+        let high_boost = weight * high_sim;
+        let low_boost = weight * low_sim;
+
+        let high_multiplier = 1.0 + high_boost / 2.0_f64.powi(0); // hop 1
+        let low_multiplier = 1.0 + low_boost / 2.0_f64.powi(0); // hop 1
+
+        assert!(high_multiplier > low_multiplier,
+            "high sim edge ({high_multiplier}) should boost more than low sim ({low_multiplier})");
+        // High: 1.0 + 0.15 * 0.95 = 1.1425
+        assert!((high_multiplier - 1.1425).abs() < 1e-10);
+        // Low: 1.0 + 0.15 * 0.2 = 1.03
+        assert!((low_multiplier - 1.03).abs() < 1e-10);
+    }
+
+    // --- Edge-first retrieval tests ---
+
+    #[test]
+    fn test_assemble_edge_results_from_semantic_edges() {
+        let mut semantic_edges = HashMap::new();
+        semantic_edges.insert(
+            "edge:a.md->b.md@5".to_string(),
+            links::SemanticEdge {
+                edge_id: "edge:a.md->b.md@5".to_string(),
+                source: "a.md".to_string(),
+                target: "b.md".to_string(),
+                context_text: "See b.md for details".to_string(),
+                line_number: 5,
+                strength: Some(0.9),
+                relationship_type: Some("references".to_string()),
+                cluster_id: Some(1),
+            },
+        );
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: Some(semantic_edges),
+            edge_cluster_state: None,
+        };
+        let candidates = vec![("edge:a.md->b.md@5".to_string(), 0.85)];
+        let results = assemble_edge_results(&candidates, Some(&lg));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].score, 0.85);
+        assert_eq!(results[0].source_path, "a.md");
+        assert_eq!(results[0].target_path, "b.md");
+        assert_eq!(results[0].context, "See b.md for details");
+        assert_eq!(results[0].relationship_type, Some("references".to_string()));
+        assert_eq!(results[0].cluster_id, Some(1));
+        assert_eq!(results[0].strength, Some(0.9));
+    }
+
+    #[test]
+    fn test_assemble_edge_results_fallback_parsing() {
+        // No link graph — falls back to parsing edge ID
+        let candidates = vec![("edge:x.md->y.md@10".to_string(), 0.7)];
+        let results = assemble_edge_results(&candidates, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_path, "x.md");
+        assert_eq!(results[0].target_path, "y.md");
+        assert!(results[0].context.is_empty());
+        assert!(results[0].relationship_type.is_none());
+    }
+
+    #[test]
+    fn test_assemble_edge_results_invalid_edge_id_skipped() {
+        let candidates = vec![("not-an-edge-id".to_string(), 0.5)];
+        let results = assemble_edge_results(&candidates, None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_assemble_edge_results_empty_candidates() {
+        let results = assemble_edge_results(&[], None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_edge_context_found() {
+        let mut semantic_edges = HashMap::new();
+        semantic_edges.insert(
+            "edge:src.md->tgt.md@3".to_string(),
+            links::SemanticEdge {
+                edge_id: "edge:src.md->tgt.md@3".to_string(),
+                source: "src.md".to_string(),
+                target: "tgt.md".to_string(),
+                context_text: "This links to tgt".to_string(),
+                line_number: 3,
+                strength: None,
+                relationship_type: Some("extends".to_string()),
+                cluster_id: None,
+            },
+        );
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: Some(semantic_edges),
+            edge_cluster_state: None,
+        };
+        let (ctx, rel) = find_edge_context(&lg, "src.md", "tgt.md");
+        assert_eq!(ctx, Some("This links to tgt".to_string()));
+        assert_eq!(rel, Some("extends".to_string()));
+    }
+
+    #[test]
+    fn test_find_edge_context_not_found() {
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: None,
+            edge_cluster_state: None,
+        };
+        let (ctx, rel) = find_edge_context(&lg, "a.md", "b.md");
+        assert!(ctx.is_none());
+        assert!(rel.is_none());
+    }
+
+    #[test]
+    fn test_find_edge_context_empty_context_text() {
+        let mut semantic_edges = HashMap::new();
+        semantic_edges.insert(
+            "edge:a.md->b.md@1".to_string(),
+            links::SemanticEdge {
+                edge_id: "edge:a.md->b.md@1".to_string(),
+                source: "a.md".to_string(),
+                target: "b.md".to_string(),
+                context_text: String::new(),
+                line_number: 1,
+                strength: None,
+                relationship_type: None,
+                cluster_id: None,
+            },
+        );
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: Some(semantic_edges),
+            edge_cluster_state: None,
+        };
+        let (ctx, rel) = find_edge_context(&lg, "a.md", "b.md");
+        assert!(ctx.is_none()); // empty string becomes None
+        assert!(rel.is_none());
+    }
+
+    #[test]
+    fn test_edge_weighted_boost_decays_with_distance() {
+        let weight = 0.15;
+        let sim = 0.8;
+        let boost = weight * sim;
+
+        let m1 = 1.0 + boost / 2.0_f64.powi(0); // hop 1
+        let m2 = 1.0 + boost / 2.0_f64.powi(1); // hop 2
+        let m3 = 1.0 + boost / 2.0_f64.powi(2); // hop 3
+
+        assert!(m1 > m2);
+        assert!(m2 > m3);
+        assert!(m3 > 1.0);
     }
 }

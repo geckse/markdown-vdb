@@ -220,7 +220,7 @@ impl Watcher {
                 self.index.remove_file(&relative)?;
 
                 // Update link graph: remove links from deleted file.
-                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0 });
+                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0, semantic_edges: None, edge_cluster_state: None });
                 crate::links::remove_file_links(&mut graph, &relative);
                 self.index.update_link_graph(Some(graph));
 
@@ -235,7 +235,7 @@ impl Watcher {
                 self.index.remove_file(&from_str)?;
 
                 // Remove old path links from graph before processing new path.
-                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0 });
+                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0, semantic_edges: None, edge_cluster_state: None });
                 crate::links::remove_file_links(&mut graph, &from_str);
                 self.index.update_link_graph(Some(graph));
 
@@ -296,7 +296,7 @@ impl Watcher {
 
         // Update link graph with links from this file.
         if !file.links.is_empty() {
-            let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0 });
+            let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0, semantic_edges: None, edge_cluster_state: None });
             crate::links::update_file_links(&mut graph, &file);
             self.index.update_link_graph(Some(graph));
         }
@@ -471,6 +471,9 @@ mod tests {
             search_expand_limit: 3,
             vector_quantization: crate::config::VectorQuantization::F16,
             index_compression: true,
+            edge_embeddings: true,
+            edge_boost_weight: 0.15,
+            edge_cluster_rebalance: 50,
         };
         FileDiscovery::new(Path::new("/tmp/test"), &config)
     }

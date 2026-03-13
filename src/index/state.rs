@@ -68,7 +68,21 @@ impl Index {
             id_to_key.insert((*chunk_id).clone(), idx as u64);
         }
 
-        let next_key = sorted_chunk_ids.len() as u64;
+        let mut next_key = sorted_chunk_ids.len() as u64;
+
+        // Also load edge IDs from the link graph's semantic_edges map.
+        // Edge vectors exist in the HNSW index from a prior save() but are
+        // NOT in metadata.chunks, so we must reconstruct their id_to_key entries.
+        if let Some(ref link_graph) = metadata.link_graph {
+            if let Some(ref semantic_edges) = link_graph.semantic_edges {
+                let mut sorted_edge_ids: Vec<&String> = semantic_edges.keys().collect();
+                sorted_edge_ids.sort();
+                for edge_id in sorted_edge_ids {
+                    id_to_key.insert(edge_id.clone(), next_key);
+                    next_key += 1;
+                }
+            }
+        }
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -215,6 +229,51 @@ impl Index {
         Ok(())
     }
 
+    /// Upsert edge vectors into the HNSW index.
+    ///
+    /// Each edge is a `(edge_id, embedding)` pair where `edge_id` uses the format
+    /// `"edge:source.md->target.md@offset"`. Old edge vectors with the same IDs are
+    /// removed first. Edge vectors are NOT added to `metadata.chunks` — they only
+    /// exist in the HNSW index and `id_to_key` mapping.
+    pub fn upsert_edges(&self, edges: &[(String, Vec<f32>)]) -> Result<()> {
+        let mut state = self.state.write();
+
+        debug!(count = edges.len(), "upserting edge vectors");
+
+        // Remove old edge vectors with the same IDs.
+        for (edge_id, _) in edges {
+            if let Some(key) = state.id_to_key.remove(edge_id) {
+                let _ = state.hnsw.remove(key);
+            }
+        }
+
+        // Ensure HNSW has capacity for new vectors.
+        let current_size = state.hnsw.size();
+        let needed = current_size + edges.len();
+        if needed > state.hnsw.capacity() {
+            state
+                .hnsw
+                .reserve(needed.max(current_size * 2))
+                .map_err(|e| Error::Serialization(format!("usearch reserve: {e}")))?;
+        }
+
+        // Insert new edge vectors.
+        for (edge_id, embedding) in edges {
+            let key = state.next_key;
+            state.next_key += 1;
+
+            state
+                .hnsw
+                .add(key, embedding)
+                .map_err(|e| Error::Serialization(format!("usearch add: {e}")))?;
+
+            state.id_to_key.insert(edge_id.clone(), key);
+        }
+
+        state.dirty = true;
+        Ok(())
+    }
+
     /// Remove a file and all its chunks from the index.
     ///
     /// Returns `Ok(())` if the file is not found (no-op).
@@ -233,6 +292,20 @@ impl Index {
                 let _ = state.hnsw.remove(key);
             }
             state.metadata.chunks.remove(chunk_id);
+        }
+
+        // Remove edge vectors where edge ID starts with "edge:{file_path}->".
+        let edge_prefix = format!("edge:{}->", relative_path);
+        let edge_ids_to_remove: Vec<String> = state
+            .id_to_key
+            .keys()
+            .filter(|id| id.starts_with(&edge_prefix))
+            .cloned()
+            .collect();
+        for edge_id in &edge_ids_to_remove {
+            if let Some(key) = state.id_to_key.remove(edge_id) {
+                let _ = state.hnsw.remove(key);
+            }
         }
 
         // Remove mtime entry.
@@ -280,6 +353,8 @@ impl Index {
     ///
     /// Converts usearch distance to cosine similarity: `score = 1.0 - distance`.
     /// Results are sorted by score descending (most similar first).
+    /// Edge vectors (IDs starting with `"edge:"`) are post-filtered out.
+    /// Over-fetches by 2x to compensate for filtered edge entries.
     pub fn search_vectors(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f64)>> {
         let state = self.state.read();
 
@@ -287,9 +362,11 @@ impl Index {
             return Ok(Vec::new());
         }
 
+        // Over-fetch by 2x to compensate for edge vectors that will be filtered out.
+        let over_fetch = limit * 2;
         let results = state
             .hnsw
-            .search(query, limit)
+            .search(query, over_fetch)
             .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
 
         // Build reverse lookup: key → chunk_id.
@@ -299,6 +376,10 @@ impl Index {
         let mut output = Vec::with_capacity(results.keys.len());
         for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
             if let Some(chunk_id) = key_to_id.get(key) {
+                // Post-filter out edge vectors.
+                if chunk_id.starts_with("edge:") {
+                    continue;
+                }
                 let score = 1.0 - *distance as f64;
                 output.push(((*chunk_id).clone(), score));
             }
@@ -306,6 +387,7 @@ impl Index {
 
         // Sort by score descending.
         output.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        output.truncate(limit);
 
         Ok(output)
     }
@@ -337,6 +419,8 @@ impl Index {
     /// Search the HNSW index for the nearest neighbors to the query vector.
     ///
     /// Returns a list of `(chunk_id, distance)` pairs sorted by distance.
+    /// Edge vectors (IDs starting with `"edge:"`) are post-filtered out.
+    /// Over-fetches by 2x to compensate for filtered edge entries.
     pub fn search(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f32)>> {
         let state = self.state.read();
 
@@ -344,9 +428,11 @@ impl Index {
             return Ok(Vec::new());
         }
 
+        // Over-fetch by 2x to compensate for edge vectors that will be filtered out.
+        let over_fetch = limit * 2;
         let results = state
             .hnsw
-            .search(query, limit)
+            .search(query, over_fetch)
             .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
 
         // Build reverse lookup: key → chunk_id.
@@ -356,10 +442,15 @@ impl Index {
         let mut output = Vec::with_capacity(results.keys.len());
         for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
             if let Some(chunk_id) = key_to_id.get(key) {
+                // Post-filter out edge vectors.
+                if chunk_id.starts_with("edge:") {
+                    continue;
+                }
                 output.push(((*chunk_id).clone(), *distance));
             }
         }
 
+        output.truncate(limit);
         Ok(output)
     }
 
@@ -484,6 +575,65 @@ impl Index {
         state.dirty = true;
     }
 
+    /// Retrieve all edge vectors from the HNSW index.
+    ///
+    /// Filters `id_to_key` for IDs with the `"edge:"` prefix and retrieves
+    /// their vectors from the HNSW index.
+    pub fn get_edge_vectors(&self) -> HashMap<String, Vec<f32>> {
+        let state = self.state.read();
+        let dims = state.metadata.embedding_config.dimensions;
+        let mut result = HashMap::new();
+
+        for (id, &key) in &state.id_to_key {
+            if id.starts_with("edge:") {
+                let mut buf = vec![0.0f32; dims];
+                if state.hnsw.get(key, &mut buf).is_ok() {
+                    result.insert(id.clone(), buf);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Search for nearest edge vectors, returning `(edge_id, cosine_similarity_score)` pairs.
+    ///
+    /// Over-fetches by 2x from the HNSW index, then post-filters to only `"edge:"` prefix
+    /// IDs, and truncates to the requested limit. Results are sorted by score descending.
+    pub fn search_edges(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f64)>> {
+        let state = self.state.read();
+
+        if state.hnsw.size() == 0 {
+            return Ok(Vec::new());
+        }
+
+        let over_fetch = limit * 2;
+        let results = state
+            .hnsw
+            .search(query, over_fetch)
+            .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
+
+        // Build reverse lookup: key → id.
+        let key_to_id: HashMap<u64, &String> =
+            state.id_to_key.iter().map(|(id, key)| (*key, id)).collect();
+
+        let mut output = Vec::new();
+        for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
+            if let Some(id) = key_to_id.get(key) {
+                if id.starts_with("edge:") {
+                    let score = 1.0 - *distance as f64;
+                    output.push(((*id).clone(), score));
+                }
+            }
+        }
+
+        // Sort by score descending.
+        output.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        output.truncate(limit);
+
+        Ok(output)
+    }
+
     /// Get all indexed file paths as a HashSet.
     pub fn get_indexed_file_paths(&self) -> std::collections::HashSet<String> {
         let state = self.state.read();
@@ -510,36 +660,60 @@ impl Index {
             .unwrap_or(0);
 
         // Compact HNSW keys: create a new index with sequential keys 0..N
-        // matching alphabetically sorted chunk IDs.
+        // matching alphabetically sorted chunk IDs, then edge IDs.
         let dims = state.metadata.embedding_config.dimensions;
         let mut sorted_chunk_ids: Vec<&String> = state.metadata.chunks.keys().collect();
         sorted_chunk_ids.sort();
 
+        // Collect edge IDs (those in id_to_key but not in metadata.chunks).
+        let mut sorted_edge_ids: Vec<String> = state
+            .id_to_key
+            .keys()
+            .filter(|id| !state.metadata.chunks.contains_key(*id))
+            .cloned()
+            .collect();
+        sorted_edge_ids.sort();
+
+        let total = sorted_chunk_ids.len() + sorted_edge_ids.len();
         let scalar_kind = storage::scalar_kind_for(&self.write_options.quantization);
         let new_hnsw = storage::create_hnsw(dims, scalar_kind)?;
-        let n = sorted_chunk_ids.len();
-        if n > 0 {
+        if total > 0 {
             new_hnsw
-                .reserve(n.max(10))
+                .reserve(total.max(10))
                 .map_err(|e| Error::Serialization(format!("usearch reserve: {e}")))?;
         }
 
         let mut new_id_to_key = HashMap::new();
         let mut buf = vec![0.0f32; dims];
-        for (new_key, chunk_id) in sorted_chunk_ids.iter().enumerate() {
+        let mut next = 0u64;
+
+        for chunk_id in &sorted_chunk_ids {
             if let Some(&old_key) = state.id_to_key.get(*chunk_id) {
                 if state.hnsw.get(old_key, &mut buf).is_ok() {
                     new_hnsw
-                        .add(new_key as u64, &buf)
+                        .add(next, &buf)
                         .map_err(|e| Error::Serialization(format!("usearch add: {e}")))?;
                 }
             }
-            new_id_to_key.insert((*chunk_id).clone(), new_key as u64);
+            new_id_to_key.insert((*chunk_id).clone(), next);
+            next += 1;
+        }
+
+        for edge_id in &sorted_edge_ids {
+            if let Some(&old_key) = state.id_to_key.get(edge_id) {
+                if state.hnsw.get(old_key, &mut buf).is_ok() {
+                    new_hnsw
+                        .add(next, &buf)
+                        .map_err(|e| Error::Serialization(format!("usearch add: {e}")))?;
+                }
+            }
+            new_id_to_key.insert(edge_id.clone(), next);
+            next += 1;
         }
 
         state.hnsw = new_hnsw;
         state.id_to_key = new_id_to_key;
-        state.next_key = n as u64;
+        state.next_key = next;
 
         storage::write_index(&self.path, &state.metadata, &state.hnsw, &self.write_options)?;
         state.dirty = false;
@@ -651,6 +825,449 @@ mod tests {
 
         let state = index.state.read();
         assert!(state.metadata.chunks.is_empty());
+    }
+
+    #[test]
+    fn upsert_edges_adds_vectors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        let edges = vec![
+            ("edge:a.md->b.md@0".to_string(), vec![1.0f32; 128]),
+            ("edge:a.md->c.md@5".to_string(), vec![0.5f32; 128]),
+        ];
+
+        index.upsert_edges(&edges).unwrap();
+
+        let state = index.state.read();
+        // Edge vectors should be in HNSW and id_to_key but NOT in metadata.chunks.
+        assert_eq!(state.hnsw.size(), 2);
+        assert!(state.id_to_key.contains_key("edge:a.md->b.md@0"));
+        assert!(state.id_to_key.contains_key("edge:a.md->c.md@5"));
+        assert!(state.metadata.chunks.is_empty());
+        assert!(state.dirty);
+    }
+
+    #[test]
+    fn upsert_edges_replaces_existing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        let edges1 = vec![
+            ("edge:a.md->b.md@0".to_string(), vec![1.0f32; 128]),
+        ];
+        index.upsert_edges(&edges1).unwrap();
+
+        // Upsert same ID with different vector.
+        let edges2 = vec![
+            ("edge:a.md->b.md@0".to_string(), vec![0.5f32; 128]),
+        ];
+        index.upsert_edges(&edges2).unwrap();
+
+        let state = index.state.read();
+        // Should still have only 1 vector (old removed, new added).
+        assert_eq!(state.hnsw.size(), 1);
+        assert!(state.id_to_key.contains_key("edge:a.md->b.md@0"));
+    }
+
+    #[test]
+    fn upsert_edges_coexists_with_chunks() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        // Add a regular file with chunks.
+        let file = MarkdownFile {
+            path: PathBuf::from("test.md"),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: "abc123".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = Chunk {
+            id: "test.md#0".to_string(),
+            content: "hello".to_string(),
+            source_path: PathBuf::from("test.md"),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        };
+        index.upsert(&file, &[chunk], &[vec![0.1f32; 128]]).unwrap();
+
+        // Now add edge vectors.
+        let edges = vec![
+            ("edge:test.md->other.md@0".to_string(), vec![0.9f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        let state = index.state.read();
+        assert_eq!(state.hnsw.size(), 2);
+        assert_eq!(state.metadata.chunks.len(), 1);
+        assert!(state.id_to_key.contains_key("test.md#0"));
+        assert!(state.id_to_key.contains_key("edge:test.md->other.md@0"));
+    }
+
+    #[test]
+    fn get_edge_vectors_returns_only_edges() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        // Add a regular chunk.
+        let file = MarkdownFile {
+            path: PathBuf::from("test.md"),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: "abc123".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = Chunk {
+            id: "test.md#0".to_string(),
+            content: "hello".to_string(),
+            source_path: PathBuf::from("test.md"),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        };
+        index.upsert(&file, &[chunk], &[vec![0.1f32; 128]]).unwrap();
+
+        // Add edge vectors.
+        let edges = vec![
+            ("edge:a.md->b.md@0".to_string(), vec![1.0f32; 128]),
+            ("edge:a.md->c.md@5".to_string(), vec![0.5f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        let edge_vectors = index.get_edge_vectors();
+        assert_eq!(edge_vectors.len(), 2);
+        assert!(edge_vectors.contains_key("edge:a.md->b.md@0"));
+        assert!(edge_vectors.contains_key("edge:a.md->c.md@5"));
+        // Should NOT contain the regular chunk.
+        assert!(!edge_vectors.contains_key("test.md#0"));
+    }
+
+    #[test]
+    fn get_edge_vectors_empty_when_no_edges() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        let edge_vectors = index.get_edge_vectors();
+        assert!(edge_vectors.is_empty());
+    }
+
+    #[test]
+    fn search_edges_filters_to_edge_ids() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        // Add a regular chunk.
+        let file = MarkdownFile {
+            path: PathBuf::from("test.md"),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: "abc123".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = Chunk {
+            id: "test.md#0".to_string(),
+            content: "hello".to_string(),
+            source_path: PathBuf::from("test.md"),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        };
+        index.upsert(&file, &[chunk], &[vec![0.1f32; 128]]).unwrap();
+
+        // Add edge vectors.
+        let edges = vec![
+            ("edge:a.md->b.md@0".to_string(), vec![1.0f32; 128]),
+            ("edge:a.md->c.md@5".to_string(), vec![0.8f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        // Search for edges similar to [1.0; 128].
+        let query = vec![1.0f32; 128];
+        let results = index.search_edges(&query, 10).unwrap();
+
+        // All results should be edge IDs only.
+        for (id, _score) in &results {
+            assert!(id.starts_with("edge:"), "Expected edge ID, got: {id}");
+        }
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn search_edges_respects_limit() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        let edges = vec![
+            ("edge:a.md->b.md@0".to_string(), vec![1.0f32; 128]),
+            ("edge:a.md->c.md@5".to_string(), vec![0.8f32; 128]),
+            ("edge:a.md->d.md@2".to_string(), vec![0.6f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        let query = vec![1.0f32; 128];
+        let results = index.search_edges(&query, 1).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_edges_empty_index() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        let query = vec![1.0f32; 128];
+        let results = index.search_edges(&query, 10).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_vectors_filters_out_edge_ids() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        // Add a regular chunk.
+        let file = MarkdownFile {
+            path: PathBuf::from("test.md"),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: "abc123".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = Chunk {
+            id: "test.md#0".to_string(),
+            content: "hello".to_string(),
+            source_path: PathBuf::from("test.md"),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        };
+        index.upsert(&file, &[chunk], &[vec![1.0f32; 128]]).unwrap();
+
+        // Add edge vectors.
+        let edges = vec![
+            ("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        // search_vectors should NOT return edge IDs.
+        let query = vec![1.0f32; 128];
+        let results = index.search_vectors(&query, 10).unwrap();
+        for (id, _) in &results {
+            assert!(!id.starts_with("edge:"), "search_vectors returned edge ID: {id}");
+        }
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "test.md#0");
+    }
+
+    #[test]
+    fn search_filters_out_edge_ids() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        let file = MarkdownFile {
+            path: PathBuf::from("test.md"),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: "abc123".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = Chunk {
+            id: "test.md#0".to_string(),
+            content: "hello".to_string(),
+            source_path: PathBuf::from("test.md"),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        };
+        index.upsert(&file, &[chunk], &[vec![1.0f32; 128]]).unwrap();
+
+        let edges = vec![
+            ("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        let query = vec![1.0f32; 128];
+        let results = index.search(&query, 10).unwrap();
+        for (id, _) in &results {
+            assert!(!id.starts_with("edge:"), "search returned edge ID: {id}");
+        }
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn remove_file_cleans_up_edge_vectors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        // Add a file with chunks.
+        let file = MarkdownFile {
+            path: PathBuf::from("source.md"),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: "abc123".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = Chunk {
+            id: "source.md#0".to_string(),
+            content: "hello".to_string(),
+            source_path: PathBuf::from("source.md"),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        };
+        index.upsert(&file, &[chunk], &[vec![0.1f32; 128]]).unwrap();
+
+        // Add edge vectors from this file.
+        let edges = vec![
+            ("edge:source.md->target.md@0".to_string(), vec![0.5f32; 128]),
+            ("edge:source.md->other.md@3".to_string(), vec![0.6f32; 128]),
+            // Edge from a different file — should NOT be removed.
+            ("edge:other.md->source.md@0".to_string(), vec![0.7f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        // Remove the file.
+        index.remove_file("source.md").unwrap();
+
+        let state = index.state.read();
+        // Chunks and file-sourced edges should be gone.
+        assert!(!state.id_to_key.contains_key("source.md#0"));
+        assert!(!state.id_to_key.contains_key("edge:source.md->target.md@0"));
+        assert!(!state.id_to_key.contains_key("edge:source.md->other.md@3"));
+        // Edge from other file should remain.
+        assert!(state.id_to_key.contains_key("edge:other.md->source.md@0"));
+        assert_eq!(state.hnsw.size(), 1);
+    }
+
+    #[test]
+    fn save_load_round_trips_edge_vectors() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        // Add a chunk.
+        let file = MarkdownFile {
+            path: PathBuf::from("test.md"),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: "abc123".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = Chunk {
+            id: "test.md#0".to_string(),
+            content: "hello".to_string(),
+            source_path: PathBuf::from("test.md"),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        };
+        index.upsert(&file, &[chunk], &[vec![0.1f32; 128]]).unwrap();
+
+        // Add edge vectors.
+        let edges = vec![
+            ("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        // Store edge info in link_graph so open_with_options can reconstruct id_to_key.
+        {
+            use crate::links::{LinkGraph, SemanticEdge};
+            let mut semantic_edges = HashMap::new();
+            semantic_edges.insert(
+                "edge:test.md->other.md@0".to_string(),
+                SemanticEdge {
+                    edge_id: "edge:test.md->other.md@0".to_string(),
+                    source: "test.md".to_string(),
+                    target: "other.md".to_string(),
+                    context_text: "link context".to_string(),
+                    line_number: 1,
+                    strength: None,
+                    relationship_type: None,
+                    cluster_id: None,
+                },
+            );
+            let lg = LinkGraph {
+                forward: HashMap::new(),
+                last_updated: 0,
+                semantic_edges: Some(semantic_edges),
+                edge_cluster_state: None,
+            };
+            index.update_link_graph(Some(lg));
+        }
+
+        // Save and reload.
+        index.save().unwrap();
+        let index2 = Index::open(&path).unwrap();
+
+        // Edge should be in id_to_key after reload.
+        let state2 = index2.state.read();
+        assert!(state2.id_to_key.contains_key("edge:test.md->other.md@0"));
+        assert!(state2.id_to_key.contains_key("test.md#0"));
+
+        // Verify edge vector can be retrieved.
+        drop(state2);
+        let edge_vecs = index2.get_edge_vectors();
+        assert_eq!(edge_vecs.len(), 1);
+        assert!(edge_vecs.contains_key("edge:test.md->other.md@0"));
     }
 
     #[test]
