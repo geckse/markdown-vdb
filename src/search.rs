@@ -479,6 +479,41 @@ pub async fn search(
         }
     };
 
+    // --- Edge-first retrieval mode ---
+    if effective_mode == SearchMode::Edge {
+        let assemble_start = Instant::now();
+        let link_graph = index.get_link_graph();
+        let edge_results = if let Some(qe) = &query_embedding {
+            let edge_candidates = index.search_edges(qe, query.limit)?;
+            assemble_edge_results(&edge_candidates, link_graph.as_ref())
+        } else {
+            Vec::new()
+        };
+        let assemble_secs = assemble_start.elapsed().as_secs_f64();
+        let total_secs = total_start.elapsed().as_secs_f64();
+
+        info!(
+            query = %query.query,
+            edge_results = edge_results.len(),
+            mode = %effective_mode,
+            "edge search complete"
+        );
+
+        return Ok(SearchResponse {
+            results: Vec::new(),
+            graph_context: Vec::new(),
+            edge_results,
+            timings: SearchTimings {
+                embed_secs,
+                vector_search_secs,
+                lexical_search_secs,
+                fusion_secs,
+                assemble_secs,
+                total_secs,
+            },
+        });
+    }
+
     // Normalize scores to [0, 1] for non-semantic modes.
     match effective_mode {
         SearchMode::Lexical => normalize_bm25_scores(&mut ranked_candidates, bm25_norm_k),
@@ -829,6 +864,54 @@ fn assemble_results(
     Ok(results)
 }
 
+/// Assemble EdgeSearchResult entries from edge search candidates and the link graph.
+///
+/// For each edge candidate (edge_id, score), looks up the SemanticEdge metadata from
+/// the link graph's semantic_edges map. Falls back to parsing the edge ID for source/target
+/// if the edge is not found in the graph.
+fn assemble_edge_results(
+    candidates: &[(String, f64)],
+    link_graph: Option<&links::LinkGraph>,
+) -> Vec<EdgeSearchResult> {
+    let semantic_edges = link_graph.and_then(|lg| lg.semantic_edges.as_ref());
+
+    candidates
+        .iter()
+        .filter_map(|(edge_id, score)| {
+            if let Some(edges) = semantic_edges {
+                if let Some(edge) = edges.get(edge_id) {
+                    return Some(EdgeSearchResult {
+                        score: *score,
+                        edge_id: edge_id.clone(),
+                        source_path: edge.source.clone(),
+                        target_path: edge.target.clone(),
+                        link_text: String::new(),
+                        context: edge.context_text.clone(),
+                        relationship_type: edge.relationship_type.clone(),
+                        cluster_id: edge.cluster_id,
+                        strength: edge.strength,
+                    });
+                }
+            }
+            // Fallback: parse edge ID format "edge:source->target@line"
+            let stripped = edge_id.strip_prefix("edge:")?;
+            let (source, rest) = stripped.split_once("->")?;
+            let target = rest.split('@').next()?;
+            Some(EdgeSearchResult {
+                score: *score,
+                edge_id: edge_id.clone(),
+                source_path: source.to_string(),
+                target_path: target.to_string(),
+                link_text: String::new(),
+                context: String::new(),
+                relationship_type: None,
+                cluster_id: None,
+                strength: None,
+            })
+        })
+        .collect()
+}
+
 /// Expand graph context by finding relevant chunks from files linked to top search results.
 ///
 /// For each file discovered via BFS around top result files (that isn't already in results),
@@ -958,6 +1041,10 @@ fn expand_graph_context(
             // Find which seed file this neighbor is linked from.
             let linked_from = find_linked_from(&seeds, &path, link_graph, backlinks);
 
+            // Look up semantic edge context between the linked_from file and this neighbor.
+            let (edge_context, edge_relationship) =
+                find_edge_context(link_graph, &linked_from, &path);
+
             items.push(GraphContextItem {
                 chunk: SearchResultChunk {
                     chunk_id: chunk_id.clone(),
@@ -975,8 +1062,8 @@ fn expand_graph_context(
                 },
                 linked_from,
                 hop_distance: hop,
-                edge_context: None,
-                edge_relationship: None,
+                edge_context,
+                edge_relationship,
             });
         }
     }
@@ -989,6 +1076,30 @@ fn expand_graph_context(
     });
 
     items
+}
+
+/// Find semantic edge context between a source and target file.
+///
+/// Searches the link graph's semantic_edges for any edge from source to target,
+/// returning the context text and relationship type if found.
+fn find_edge_context(
+    link_graph: &links::LinkGraph,
+    source: &str,
+    target: &str,
+) -> (Option<String>, Option<String>) {
+    if let Some(edges) = &link_graph.semantic_edges {
+        for edge in edges.values() {
+            if edge.source == source && edge.target == target {
+                let ctx = if edge.context_text.is_empty() {
+                    None
+                } else {
+                    Some(edge.context_text.clone())
+                };
+                return (ctx, edge.relationship_type.clone());
+            }
+        }
+    }
+    (None, None)
 }
 
 /// Find which seed file has a link connection to the target file.
@@ -2046,6 +2157,134 @@ mod tests {
         assert!((high_multiplier - 1.1425).abs() < 1e-10);
         // Low: 1.0 + 0.15 * 0.2 = 1.03
         assert!((low_multiplier - 1.03).abs() < 1e-10);
+    }
+
+    // --- Edge-first retrieval tests ---
+
+    #[test]
+    fn test_assemble_edge_results_from_semantic_edges() {
+        let mut semantic_edges = HashMap::new();
+        semantic_edges.insert(
+            "edge:a.md->b.md@5".to_string(),
+            links::SemanticEdge {
+                edge_id: "edge:a.md->b.md@5".to_string(),
+                source: "a.md".to_string(),
+                target: "b.md".to_string(),
+                context_text: "See b.md for details".to_string(),
+                line_number: 5,
+                strength: Some(0.9),
+                relationship_type: Some("references".to_string()),
+                cluster_id: Some(1),
+            },
+        );
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: Some(semantic_edges),
+            edge_cluster_state: None,
+        };
+        let candidates = vec![("edge:a.md->b.md@5".to_string(), 0.85)];
+        let results = assemble_edge_results(&candidates, Some(&lg));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].score, 0.85);
+        assert_eq!(results[0].source_path, "a.md");
+        assert_eq!(results[0].target_path, "b.md");
+        assert_eq!(results[0].context, "See b.md for details");
+        assert_eq!(results[0].relationship_type, Some("references".to_string()));
+        assert_eq!(results[0].cluster_id, Some(1));
+        assert_eq!(results[0].strength, Some(0.9));
+    }
+
+    #[test]
+    fn test_assemble_edge_results_fallback_parsing() {
+        // No link graph — falls back to parsing edge ID
+        let candidates = vec![("edge:x.md->y.md@10".to_string(), 0.7)];
+        let results = assemble_edge_results(&candidates, None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_path, "x.md");
+        assert_eq!(results[0].target_path, "y.md");
+        assert!(results[0].context.is_empty());
+        assert!(results[0].relationship_type.is_none());
+    }
+
+    #[test]
+    fn test_assemble_edge_results_invalid_edge_id_skipped() {
+        let candidates = vec![("not-an-edge-id".to_string(), 0.5)];
+        let results = assemble_edge_results(&candidates, None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_assemble_edge_results_empty_candidates() {
+        let results = assemble_edge_results(&[], None);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_edge_context_found() {
+        let mut semantic_edges = HashMap::new();
+        semantic_edges.insert(
+            "edge:src.md->tgt.md@3".to_string(),
+            links::SemanticEdge {
+                edge_id: "edge:src.md->tgt.md@3".to_string(),
+                source: "src.md".to_string(),
+                target: "tgt.md".to_string(),
+                context_text: "This links to tgt".to_string(),
+                line_number: 3,
+                strength: None,
+                relationship_type: Some("extends".to_string()),
+                cluster_id: None,
+            },
+        );
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: Some(semantic_edges),
+            edge_cluster_state: None,
+        };
+        let (ctx, rel) = find_edge_context(&lg, "src.md", "tgt.md");
+        assert_eq!(ctx, Some("This links to tgt".to_string()));
+        assert_eq!(rel, Some("extends".to_string()));
+    }
+
+    #[test]
+    fn test_find_edge_context_not_found() {
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: None,
+            edge_cluster_state: None,
+        };
+        let (ctx, rel) = find_edge_context(&lg, "a.md", "b.md");
+        assert!(ctx.is_none());
+        assert!(rel.is_none());
+    }
+
+    #[test]
+    fn test_find_edge_context_empty_context_text() {
+        let mut semantic_edges = HashMap::new();
+        semantic_edges.insert(
+            "edge:a.md->b.md@1".to_string(),
+            links::SemanticEdge {
+                edge_id: "edge:a.md->b.md@1".to_string(),
+                source: "a.md".to_string(),
+                target: "b.md".to_string(),
+                context_text: String::new(),
+                line_number: 1,
+                strength: None,
+                relationship_type: None,
+                cluster_id: None,
+            },
+        );
+        let lg = links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: Some(semantic_edges),
+            edge_cluster_state: None,
+        };
+        let (ctx, rel) = find_edge_context(&lg, "a.md", "b.md");
+        assert!(ctx.is_none()); // empty string becomes None
+        assert!(rel.is_none());
     }
 
     #[test]
