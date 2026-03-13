@@ -316,8 +316,11 @@ impl Watcher {
         // Update schema inference with the new/changed file's frontmatter.
         if file.frontmatter.is_some() {
             let schema = crate::schema::Schema::infer(&[file]);
-            let overlay = crate::schema::Schema::load_overlay(&self.project_root)
+            let overlay_schema = crate::schema::Schema::load_overlay(&self.project_root)
                 .unwrap_or(None);
+            let overlay = overlay_schema
+                .as_ref()
+                .map(|o| crate::schema::Schema::resolve_overlay_for_path(o, None));
             let merged = if let Some(existing) = self.index.get_schema() {
                 // Merge new schema fields into existing schema.
                 let combined = crate::schema::Schema::merge(existing, None);
