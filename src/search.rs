@@ -546,22 +546,22 @@ pub async fn search(
 
     // Filter, assemble results, and apply min_score + multi-hop link boost.
     let assemble_start = Instant::now();
-    let results = assemble_results(
+    let results = assemble_results(&AssembleParams {
         query,
         index,
-        &ranked_candidates,
-        should_decay,
-        effective_half_life,
-        effective_decay_exclude,
-        effective_decay_include,
-        effective_boost_links,
-        effective_boost_hops,
-        link_graph.as_ref(),
-        backlinks.as_ref(),
+        candidates: &ranked_candidates,
+        decay_enabled: should_decay,
+        decay_half_life: effective_half_life,
+        decay_exclude: effective_decay_exclude,
+        decay_include: effective_decay_include,
+        boost_links: effective_boost_links,
+        boost_hops: effective_boost_hops,
+        link_graph: link_graph.as_ref(),
+        backlinks: backlinks.as_ref(),
         now,
-        query_embedding.as_deref(),
+        query_embedding: query_embedding.as_deref(),
         edge_boost_weight,
-    )?;
+    })?;
 
     // Graph context expansion: find relevant chunks from linked files.
     let graph_context = if effective_expand_graph > 0 {
@@ -677,58 +677,60 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-fn assemble_results(
-    query: &SearchQuery,
-    index: &Index,
-    candidates: &[(String, f64)],
+struct AssembleParams<'a> {
+    query: &'a SearchQuery,
+    index: &'a Index,
+    candidates: &'a [(String, f64)],
     decay_enabled: bool,
     decay_half_life: f64,
-    decay_exclude: &[String],
-    decay_include: &[String],
+    decay_exclude: &'a [String],
+    decay_include: &'a [String],
     boost_links: bool,
     boost_hops: usize,
-    link_graph: Option<&links::LinkGraph>,
-    backlinks: Option<&HashMap<String, Vec<links::LinkEntry>>>,
+    link_graph: Option<&'a links::LinkGraph>,
+    backlinks: Option<&'a HashMap<String, Vec<links::LinkEntry>>>,
     now: u64,
-    query_embedding: Option<&[f32]>,
+    query_embedding: Option<&'a [f32]>,
     edge_boost_weight: f64,
-) -> Result<Vec<SearchResult>> {
-    let file_mtimes = index.get_file_mtimes();
+}
+
+fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
+    let file_mtimes = p.index.get_file_mtimes();
 
     let mut results = Vec::new();
-    for (chunk_id, score) in candidates {
+    for (chunk_id, score) in p.candidates {
         // Look up chunk metadata.
-        let Some(chunk) = index.get_chunk(chunk_id) else {
+        let Some(chunk) = p.index.get_chunk(chunk_id) else {
             continue;
         };
 
         // Apply path prefix filter (before file metadata lookup for early short-circuit).
-        if let Some(ref prefix) = query.path_prefix {
+        if let Some(ref prefix) = p.query.path_prefix {
             if !chunk.source_path.starts_with(prefix.as_str()) {
                 continue;
             }
         }
 
         // Look up file metadata.
-        let Some(file) = index.get_file_metadata(&chunk.source_path) else {
+        let Some(file) = p.index.get_file_metadata(&chunk.source_path) else {
             continue;
         };
 
         // Apply time decay if enabled and path is not excluded.
-        let effective_score = if decay_enabled
-            && should_apply_decay(&chunk.source_path, decay_exclude, decay_include)
+        let effective_score = if p.decay_enabled
+            && should_apply_decay(&chunk.source_path, p.decay_exclude, p.decay_include)
         {
             let modified = file_mtimes
                 .get(&chunk.source_path)
                 .copied()
                 .unwrap_or(file.indexed_at);
-            apply_time_decay(*score, modified, decay_half_life, now)
+            apply_time_decay(*score, modified, p.decay_half_life, p.now)
         } else {
             *score
         };
 
         // Apply min_score threshold (on potentially decayed score).
-        if effective_score < query.min_score {
+        if effective_score < p.query.min_score {
             continue;
         }
 
@@ -739,7 +741,7 @@ fn assemble_results(
             .and_then(|s| serde_json::from_str(s).ok());
 
         // Apply metadata filters.
-        if !evaluate_filters(&query.filters, frontmatter.as_ref()) {
+        if !evaluate_filters(&p.query.filters, frontmatter.as_ref()) {
             continue;
         }
 
@@ -764,24 +766,24 @@ fn assemble_results(
         });
 
         // Stop early if no decay (order preserved) and we have enough results.
-        if !decay_enabled && results.len() >= query.limit {
+        if !p.decay_enabled && results.len() >= p.query.limit {
             break;
         }
     }
 
     // When decay is applied, scores may reorder — re-sort and truncate.
-    if decay_enabled && results.len() > 1 {
+    if p.decay_enabled && results.len() > 1 {
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        results.truncate(query.limit);
+        results.truncate(p.query.limit);
     }
 
     // Apply multi-hop link-graph boosting if requested.
-    if boost_links && results.len() > 1 {
-        if let (Some(graph), Some(bl)) = (link_graph, backlinks) {
+    if p.boost_links && results.len() > 1 {
+        if let (Some(graph), Some(bl)) = (p.link_graph, p.backlinks) {
             // Collect top 3 result paths as BFS seeds.
             let top_paths: Vec<String> = results
                 .iter()
@@ -790,12 +792,12 @@ fn assemble_results(
                 .collect();
 
             // BFS to find neighbors at configurable depth (1–3 hops).
-            let neighbors = links::bfs_neighbors(graph, bl, &top_paths, boost_hops);
+            let neighbors = links::bfs_neighbors(graph, bl, &top_paths, p.boost_hops);
 
             if !neighbors.is_empty() {
                 // Pre-fetch edge vectors for semantic edge boosting.
-                let edge_vectors = if query_embedding.is_some() && edge_boost_weight > 0.0 {
-                    Some(index.get_edge_vectors())
+                let edge_vectors = if p.query_embedding.is_some() && p.edge_boost_weight > 0.0 {
+                    Some(p.index.get_edge_vectors())
                 } else {
                     None
                 };
@@ -804,10 +806,10 @@ fn assemble_results(
                 // We look at all semantic edges and index the best score per target file.
                 let edge_scores: HashMap<String, f64> = if let (
                     Some(qe),
-                    Some(ref evecs),
-                    Some(ref edges_map),
+                    Some(evecs),
+                    Some(edges_map),
                 ) = (
-                    query_embedding,
+                    p.query_embedding,
                     &edge_vectors,
                     graph.semantic_edges.as_ref(),
                 ) {
@@ -835,13 +837,13 @@ fn assemble_results(
                         // Use edge-weighted boost when edge scores available,
                         // otherwise fall back to flat boost.
                         let boost = if let Some(&edge_sim) = edge_scores.get(&result.file.path) {
-                            edge_boost_weight * edge_sim
+                            p.edge_boost_weight * edge_sim
                         } else {
                             // Flat fallback: use edge_boost_weight as the base boost.
-                            edge_boost_weight
+                            p.edge_boost_weight
                         };
                         let multiplier =
-                            1.0 + boost / 2.0_f64.powi((distance as i32) - 1);
+                            1.0 + boost / 2.0_f64.powi(distance as i32 - 1);
                         result.score *= multiplier;
                         debug!(
                             path = %result.file.path,
@@ -2124,7 +2126,7 @@ mod tests {
         // Hop 1: 1.0 + 0.15 / 2^0 = 1.15
         let weight = 0.15;
         let distance = 1;
-        let multiplier = 1.0 + weight / 2.0_f64.powi((distance as i32) - 1);
+        let multiplier = 1.0 + weight / 2.0_f64.powi(distance - 1);
         assert!((multiplier - 1.15).abs() < 1e-10);
     }
 
@@ -2133,7 +2135,7 @@ mod tests {
         // With edge_boost_weight = 0.0, multiplier should be 1.0 (no boost).
         let weight = 0.0;
         let distance = 1;
-        let multiplier = 1.0 + weight / 2.0_f64.powi((distance as i32) - 1);
+        let multiplier = 1.0 + weight / 2.0_f64.powi(distance - 1);
         assert!((multiplier - 1.0).abs() < 1e-10);
     }
 
