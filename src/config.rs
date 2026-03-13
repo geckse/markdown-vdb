@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn default_values_match_spec() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Clear all MDVDB env vars to ensure defaults
         let vars_to_clear = [
             "MDVDB_EMBEDDING_PROVIDER",
@@ -432,12 +432,32 @@ mod tests {
             "MDVDB_VECTOR_QUANTIZATION",
             "MDVDB_INDEX_COMPRESSION",
         ];
+        // Save original values so we can restore them after the test
+        let saved: Vec<(&str, Option<String>)> = vars_to_clear
+            .iter()
+            .map(|v| (*v, std::env::var(v).ok()))
+            .collect();
         for var in &vars_to_clear {
             std::env::remove_var(var);
         }
+        // Disable user config file (~/.mdvdb/config) so it doesn't inject values
+        let had_no_user = std::env::var("MDVDB_NO_USER_CONFIG").ok();
+        std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
 
         // Load from a non-existent dir to get pure defaults
         let config = Config::load(Path::new("/nonexistent")).unwrap();
+
+        // Restore original env vars before assertions (prevents poison on failure)
+        match &had_no_user {
+            Some(v) => std::env::set_var("MDVDB_NO_USER_CONFIG", v),
+            None => std::env::remove_var("MDVDB_NO_USER_CONFIG"),
+        }
+        for (var, val) in &saved {
+            match val {
+                Some(v) => std::env::set_var(var, v),
+                None => std::env::remove_var(var),
+            }
+        }
 
         assert_eq!(config.embedding_provider, EmbeddingProviderType::OpenAI);
         assert_eq!(config.embedding_model, "text-embedding-3-small");
@@ -473,7 +493,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_dimensions() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "0");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
@@ -486,7 +506,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_batch_size() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_EMBEDDING_BATCH_SIZE", "0");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_BATCH_SIZE");
@@ -499,7 +519,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_overlap_exceeds_max() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_CHUNK_MAX_TOKENS", "10");
         std::env::set_var("MDVDB_CHUNK_OVERLAP_TOKENS", "20");
         let result = Config::load(Path::new("/nonexistent"));
@@ -514,7 +534,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_score_out_of_range() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_SEARCH_MIN_SCORE", "1.5");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_SEARCH_MIN_SCORE");
@@ -524,7 +544,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_negative_score() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_SEARCH_MIN_SCORE", "-0.1");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_SEARCH_MIN_SCORE");
@@ -533,7 +553,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_rrf_k() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_SEARCH_RRF_K", "0");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_SEARCH_RRF_K");
@@ -543,7 +563,7 @@ mod tests {
 
     #[test]
     fn validation_rejects_negative_rrf_k() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_SEARCH_RRF_K", "-10.0");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_SEARCH_RRF_K");
@@ -553,7 +573,7 @@ mod tests {
 
     #[test]
     fn parse_error_on_non_numeric() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "abc");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
@@ -566,7 +586,7 @@ mod tests {
 
     #[test]
     fn comma_separated_source_dirs() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_SOURCE_DIRS", " docs , notes ");
         let dirs = parse_comma_list_path("MDVDB_SOURCE_DIRS", vec![]);
         std::env::remove_var("MDVDB_SOURCE_DIRS");
@@ -575,7 +595,7 @@ mod tests {
 
     #[test]
     fn comma_separated_ignore_patterns() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_IGNORE_PATTERNS", " *.tmp , .git ");
         let patterns = parse_comma_list_string("MDVDB_IGNORE_PATTERNS", vec![]);
         std::env::remove_var("MDVDB_IGNORE_PATTERNS");
@@ -584,7 +604,7 @@ mod tests {
 
     #[test]
     fn user_config_dir_uses_mdvdb_config_home() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_CONFIG_HOME", "/custom/config");
         let dir = Config::user_config_dir();
         std::env::remove_var("MDVDB_CONFIG_HOME");
@@ -593,7 +613,7 @@ mod tests {
 
     #[test]
     fn user_config_dir_empty_env_falls_back() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_CONFIG_HOME", "");
         let dir = Config::user_config_dir();
         std::env::remove_var("MDVDB_CONFIG_HOME");
@@ -605,7 +625,7 @@ mod tests {
 
     #[test]
     fn user_config_dir_unset_falls_back() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("MDVDB_CONFIG_HOME");
         let dir = Config::user_config_dir();
         // Falls back to ~/.mdvdb (home dir dependent).
@@ -616,7 +636,7 @@ mod tests {
 
     #[test]
     fn user_config_path_appends_config() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_CONFIG_HOME", "/custom");
         let path = Config::user_config_path();
         std::env::remove_var("MDVDB_CONFIG_HOME");
@@ -625,7 +645,7 @@ mod tests {
 
     #[test]
     fn no_user_config_env_skips_user_config() {
-        let _lock = ENV_MUTEX.lock().unwrap();
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 
         // Clear all MDVDB vars first.
         for var in &[

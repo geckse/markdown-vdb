@@ -51,6 +51,8 @@ fn clear_env() {
 #[serial]
 fn defaults_applied_when_no_config() {
     clear_env();
+    // Disable user config file (~/.mdvdb/config) so it doesn't inject values
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
     let tmp = TempDir::new().unwrap();
     let config = Config::load(tmp.path()).unwrap();
 
