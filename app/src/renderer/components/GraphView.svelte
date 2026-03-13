@@ -18,12 +18,18 @@
     setGraphLevel,
     setGraphPathFilter,
     setGraphHighlightedFolder,
+    graphEdgeFilter,
+    graphSemanticEdgesEnabled,
+    graphEdgeWeakThreshold,
+    toggleEdgeClusterFilter,
+    clearEdgeFilter,
   } from '../stores/graph';
   import type { GraphColoringMode } from '../stores/graph';
   import type { GraphLevel } from '../types/cli';
   import type { GraphNode, GraphEdge, GraphData } from '../types/cli';
   import { selectedFilePath } from '../stores/files';
   import { convexHull, padHull, centroid, polygonArea, hexToRgb } from '../lib/convex-hull';
+  import { edgeClusterColor, isEdgeVisible, edgeLineWidth, isWeakEdge, pointToSegmentDist } from '../lib/edge-utils';
 
   /** Cluster color palette (12 colors, cycling). */
   const CLUSTER_COLORS = [
@@ -49,6 +55,14 @@
     source: SimNode | string;
     target: SimNode | string;
     weight: number | null;
+    /** Semantic relationship type (e.g. "related", "references"). */
+    relationship_type?: string | null;
+    /** Semantic strength score [0, 1]. */
+    strength?: number | null;
+    /** Context text excerpt describing the relationship. */
+    context_text?: string | null;
+    /** Edge cluster ID for color grouping. */
+    edge_cluster_id?: number | null;
   }
 
   interface ClusterHull {
@@ -89,6 +103,7 @@
 
   // Hover state
   let hoveredNode: SimNode | null = null;
+  let hoveredEdge: SimEdge | null = null;
   let tooltipX = 0;
   let tooltipY = 0;
 
@@ -107,6 +122,9 @@
   let unsubPathFilter: (() => void) | null = null;
   let unsubHighlightedFolder: (() => void) | null = null;
   let unsubHoveredFilePath: (() => void) | null = null;
+  let unsubEdgeFilter: (() => void) | null = null;
+  let unsubSemanticEdges: (() => void) | null = null;
+  let unsubEdgeWeakThreshold: (() => void) | null = null;
 
   // Reactive local copies for template use
   let currentData: GraphData | null = $state(null);
@@ -119,6 +137,9 @@
   let currentPathFilter: string | null = $state(null);
   let currentHighlightedFolder: string | null = $state(null);
   let currentHoveredFilePath: string | null = $state(null);
+  let currentEdgeFilter: Set<number> = $state(new Set());
+  let currentSemanticEdgesEnabled: boolean = $state(true);
+  let currentEdgeWeakThreshold: number = $state(0.3);
 
   /** Hash a string to a stable index for color assignment. */
   function fileColor(path: string): string {
@@ -259,6 +280,18 @@
       currentHoveredFilePath = p;
       dirty = true;
     });
+    unsubEdgeFilter = graphEdgeFilter.subscribe((f) => {
+      currentEdgeFilter = f;
+      dirty = true;
+    });
+    unsubSemanticEdges = graphSemanticEdgesEnabled.subscribe((v) => {
+      currentSemanticEdgesEnabled = v;
+      dirty = true;
+    });
+    unsubEdgeWeakThreshold = graphEdgeWeakThreshold.subscribe((v) => {
+      currentEdgeWeakThreshold = v;
+      dirty = true;
+    });
     graphLoading.subscribe((v) => { currentLoading = v; });
     graphError.subscribe((v) => { currentError = v; });
     graphLevel.subscribe((v) => {
@@ -293,6 +326,9 @@
     unsubPathFilter?.();
     unsubHighlightedFolder?.();
     unsubHoveredFilePath?.();
+    unsubEdgeFilter?.();
+    unsubSemanticEdges?.();
+    unsubEdgeWeakThreshold?.();
   });
 
   function resizeCanvas() {
@@ -370,7 +406,15 @@
     const nodeMap = new Map(simNodes.map((n) => [n.id, n]));
     simEdges = data.edges
       .filter((e) => nodeMap.has(e.source) && nodeMap.has(e.target))
-      .map((e) => ({ source: e.source, target: e.target, weight: e.weight }));
+      .map((e) => ({
+        source: e.source,
+        target: e.target,
+        weight: e.weight,
+        relationship_type: e.relationship_type ?? null,
+        strength: e.strength ?? null,
+        context_text: e.context_text ?? null,
+        edge_cluster_id: e.edge_cluster_id ?? null,
+      }));
 
     const isLarge = simNodes.length > 300;
 
@@ -721,35 +765,83 @@
 
     // --- Edges ---
     // 1. Draw non-highlighted edges first (dimmed when there's a selection or any highlight)
-    ctx.lineWidth = 1 / zoom;
+    // Collect edges into solid and dashed batches for performance
+    const dimFactor = hasSelection || hasHoverHighlight || hasFileHighlight || hasFolderHighlight;
+    const solidEdges: { s: SimNode; t: SimNode; color: string; width: number }[] = [];
+    const dashedEdges: { s: SimNode; t: SimNode; color: string; width: number }[] = [];
+
     for (const edge of simEdges) {
       if (outEdges.has(edge) || inEdges.has(edge)) continue;
-      // Skip hover-highlighted edges; drawn later
       if (hasHoverHighlight && hoverEdges.has(edge)) continue;
-      // Skip file-highlighted edges here; they're drawn later with brighter style
       if (hasFileHighlight && fileEdges.has(edge)) continue;
-      // Skip folder-highlighted edges here; they're drawn later with cyan style
       if (hasFolderHighlight && folderEdges.has(edge)) continue;
+
+      // Apply edge cluster visibility filter
+      const edgeFilterSet = currentEdgeFilter.size > 0 ? currentEdgeFilter : null;
+      if (!isEdgeVisible(edge, edgeFilterSet)) continue;
+
       const s = edge.source as SimNode;
       const t = edge.target as SimNode;
       if (s.x == null || t.x == null) continue;
 
-      const dimFactor = hasSelection || hasHoverHighlight || hasFileHighlight || hasFolderHighlight;
-      // In chunk mode, edge opacity is proportional to weight
-      if (chunk && edge.weight != null) {
+      // Determine if this is a semantic edge (has strength and/or edge_cluster_id)
+      const isSemantic = currentSemanticEdgesEnabled && (edge.strength != null || edge.edge_cluster_id != null);
+
+      if (isSemantic && edge.strength != null) {
+        // Semantic edge: variable thickness by strength, color by cluster
+        const lw = edgeLineWidth(edge.strength, zoom);
+        const baseAlpha = dimFactor ? 0.3 : 0.7;
+        const alpha = baseAlpha * Math.max(0.2, edge.strength);
+        let color: string;
+        if (edge.edge_cluster_id != null) {
+          const hex = edgeClusterColor(edge.edge_cluster_id);
+          const { r, g, b } = hexToRgb(hex);
+          color = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        } else {
+          color = `rgba(255, 255, 255, ${alpha})`;
+        }
+
+        if (isWeakEdge(edge.strength, currentEdgeWeakThreshold)) {
+          dashedEdges.push({ s, t, color, width: lw });
+        } else {
+          solidEdges.push({ s, t, color, width: lw });
+        }
+      } else if (chunk && edge.weight != null) {
+        // Chunk mode: edge opacity proportional to weight
         const alpha = dimFactor ? (0.05 + edge.weight * 0.2) * 0.3 : 0.05 + edge.weight * 0.2;
-        ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-        ctx.beginPath();
-        ctx.moveTo(s.x, s.y);
-        ctx.lineTo(t.x, t.y);
-        ctx.stroke();
+        solidEdges.push({ s, t, color: `rgba(255, 255, 255, ${alpha})`, width: 1 / zoom });
       } else {
-        ctx.strokeStyle = dimFactor ? 'rgba(255, 255, 255, 0.03)' : 'rgba(255, 255, 255, 0.08)';
+        // Default edge style
+        const color = dimFactor ? 'rgba(255, 255, 255, 0.03)' : 'rgba(255, 255, 255, 0.08)';
+        solidEdges.push({ s, t, color, width: 1 / zoom });
+      }
+    }
+
+    // Batch render: solid edges first
+    ctx.setLineDash([]);
+    for (const { s, t, color, width: lw } of solidEdges) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lw;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(t.x, t.y);
+      ctx.stroke();
+    }
+
+    // Batch render: dashed edges (weak semantic edges)
+    if (dashedEdges.length > 0) {
+      const dashLen = 4 / zoom;
+      const gapLen = 3 / zoom;
+      ctx.setLineDash([dashLen, gapLen]);
+      for (const { s, t, color, width: lw } of dashedEdges) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lw;
         ctx.beginPath();
         ctx.moveTo(s.x, s.y);
         ctx.lineTo(t.x, t.y);
         ctx.stroke();
       }
+      ctx.setLineDash([]);
     }
 
     // 1b. Draw hover-highlighted edges (search result hover)
@@ -1051,6 +1143,27 @@
     return simulation.find(gx, gy, hitRadius) ?? null;
   }
 
+  /** Find the nearest edge within 6 screen-pixels of the given screen coordinates. */
+  function findEdgeAt(sx: number, sy: number): SimEdge | null {
+    if (isChunkMode()) return null;
+    const [gx, gy] = screenToGraph(sx, sy);
+    const hitDist = 6 / zoom;
+    let closest: SimEdge | null = null;
+    let closestDist = hitDist;
+    for (const edge of simEdges) {
+      const s = edge.source as SimNode;
+      const t = edge.target as SimNode;
+      if (s.x == null || t.x == null) continue;
+      if (!isEdgeVisible(edge, currentEdgeFilter.size > 0 ? currentEdgeFilter : null)) continue;
+      const dist = pointToSegmentDist(gx, gy, s.x, s.y, t.x, t.y);
+      if (dist < closestDist) {
+        closestDist = dist;
+        closest = edge;
+      }
+    }
+    return closest;
+  }
+
   function handleMouseDown(e: MouseEvent) {
     if (e.button !== 0) return;
     const rect = canvasEl!.getBoundingClientRect();
@@ -1099,8 +1212,22 @@
     }
 
     const node = findNodeAt(sx, sy);
-    if (node !== hoveredNode) {
-      hoveredNode = node;
+    if (node) {
+      if (node !== hoveredNode) {
+        hoveredNode = node;
+        hoveredEdge = null;
+        tooltipX = e.clientX;
+        tooltipY = e.clientY;
+        dirty = true;
+      }
+      return;
+    }
+
+    // No node hovered — check for edge hover
+    const edge = findEdgeAt(sx, sy);
+    if (edge !== hoveredEdge || hoveredNode) {
+      hoveredNode = null;
+      hoveredEdge = edge;
       tooltipX = e.clientX;
       tooltipY = e.clientY;
       dirty = true;
@@ -1146,6 +1273,7 @@
       selectGraphNode(null);
       setGraphHighlightedFolder(null);
       hoveredNode = null;
+      hoveredEdge = null;
       dirty = true;
     }
   }
@@ -1178,6 +1306,38 @@
     }
     return items.sort((a, b) => a.folder.localeCompare(b.folder));
   }
+
+  /** Get unique edge clusters present in the current edges for legend display. */
+  function getEdgeClusters(): { id: number; color: string; label: string; count: number }[] {
+    const counts = new Map<number, { label: string; count: number }>();
+    for (const edge of simEdges) {
+      const e = edge as SimEdge;
+      if (e.edge_cluster_id == null) continue;
+      const existing = counts.get(e.edge_cluster_id);
+      if (existing) {
+        existing.count++;
+      } else {
+        counts.set(e.edge_cluster_id, {
+          label: e.relationship_type ?? `Type ${e.edge_cluster_id}`,
+          count: 1,
+        });
+      }
+    }
+    return Array.from(counts.entries())
+      .map(([id, info]) => ({
+        id,
+        color: edgeClusterColor(id),
+        label: info.label,
+        count: info.count,
+      }))
+      .sort((a, b) => a.id - b.id);
+  }
+
+  /** Check if a given edge cluster is currently filtered out. */
+  function isEdgeClusterFiltered(clusterId: number): boolean {
+    if (currentEdgeFilter.size === 0) return false;
+    return !currentEdgeFilter.has(clusterId);
+  }
 </script>
 
 <div class="graph-view" bind:this={containerEl}>
@@ -1205,7 +1365,7 @@
       onmouseup={handleMouseUp}
       onmouseleave={handleMouseUp}
       onwheel={handleWheel}
-      style="cursor: {draggedNode ? 'grabbing' : isPanning ? 'grabbing' : hoveredNode ? 'pointer' : 'grab'}"
+      style="cursor: {draggedNode ? 'grabbing' : isPanning ? 'grabbing' : hoveredNode || hoveredEdge ? 'pointer' : 'grab'}"
     ></canvas>
 
     <!-- Level tab switcher -->
@@ -1261,6 +1421,36 @@
       </div>
     {/if}
 
+    <!-- Edge tooltip -->
+    {#if hoveredEdge && !hoveredNode}
+      {@const edgeSrc = hoveredEdge.source as SimNode}
+      {@const edgeTgt = hoveredEdge.target as SimNode}
+      <div
+        class="graph-tooltip edge-tooltip"
+        style="left: {tooltipX + 12}px; top: {tooltipY - 30}px"
+      >
+        {#if hoveredEdge.relationship_type}
+          <div class="edge-tooltip-type">
+            <span class="edge-tooltip-dot" style="background: {hoveredEdge.edge_cluster_id != null ? edgeClusterColor(hoveredEdge.edge_cluster_id) : 'rgba(255,255,255,0.5)'}"></span>
+            {hoveredEdge.relationship_type}
+          </div>
+        {/if}
+        <div class="edge-tooltip-nodes">{edgeSrc.path} → {edgeTgt.path}</div>
+        {#if hoveredEdge.strength != null}
+          <div class="edge-tooltip-strength">
+            <span class="edge-tooltip-strength-label">Strength</span>
+            <div class="edge-tooltip-bar">
+              <div class="edge-tooltip-bar-fill" style="width: {Math.round(hoveredEdge.strength * 100)}%"></div>
+            </div>
+            <span class="edge-tooltip-strength-value">{Math.round(hoveredEdge.strength * 100)}%</span>
+          </div>
+        {/if}
+        {#if hoveredEdge.context_text}
+          <div class="edge-tooltip-context">{hoveredEdge.context_text.length > 120 ? hoveredEdge.context_text.slice(0, 120) + '…' : hoveredEdge.context_text}</div>
+        {/if}
+      </div>
+    {/if}
+
     <!-- Legend: tri-state coloring mode -->
     {#if currentColoringMode === 'none'}
       <div class="graph-legend-collapsed">
@@ -1296,6 +1486,29 @@
                   <span class="legend-label">{item.folder}</span>
                   <span class="legend-count">{item.count}</span>
                 </div>
+              {/each}
+            {/if}
+            {#if getEdgeClusters().length > 0}
+              <div class="legend-separator"></div>
+              <div class="legend-section-title">
+                <span>Edge Types</span>
+                {#if currentEdgeFilter.size > 0}
+                  <button class="legend-clear-filter" onclick={clearEdgeFilter} title="Show all edges">
+                    <span class="material-symbols-outlined">filter_alt_off</span>
+                  </button>
+                {/if}
+              </div>
+              {#each getEdgeClusters() as ec}
+                <button
+                  class="legend-item legend-item-clickable"
+                  class:legend-item-muted={isEdgeClusterFiltered(ec.id)}
+                  onclick={() => toggleEdgeClusterFilter(ec.id)}
+                  title={isEdgeClusterFiltered(ec.id) ? `Show ${ec.label} edges` : `Hide ${ec.label} edges`}
+                >
+                  <span class="legend-line" style="background: {ec.color}"></span>
+                  <span class="legend-label">{ec.label}</span>
+                  <span class="legend-count">{ec.count}</span>
+                </button>
               {/each}
             {/if}
           </div>
@@ -1422,6 +1635,81 @@
     margin-top: var(--space-1, 0.25rem);
   }
 
+  .edge-tooltip {
+    max-width: 320px;
+  }
+
+  .edge-tooltip-type {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 0.5rem);
+    color: var(--color-text, #e4e4e7);
+    font-family: var(--font-display, 'Space Grotesk', sans-serif);
+    font-size: var(--text-sm, 0.75rem);
+    font-weight: var(--weight-medium, 500);
+  }
+
+  .edge-tooltip-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: var(--radius-full, 9999px);
+    flex-shrink: 0;
+  }
+
+  .edge-tooltip-nodes {
+    color: var(--color-text-dim, #71717a);
+    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-size: var(--text-xs, 0.625rem);
+    margin-top: var(--space-1, 0.25rem);
+    word-break: break-all;
+  }
+
+  .edge-tooltip-strength {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 0.5rem);
+    margin-top: var(--space-2, 0.5rem);
+    font-family: var(--font-display, 'Space Grotesk', sans-serif);
+    font-size: var(--text-xs, 0.625rem);
+  }
+
+  .edge-tooltip-strength-label {
+    color: var(--color-text-dim, #71717a);
+    flex-shrink: 0;
+  }
+
+  .edge-tooltip-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--color-border, #27272a);
+    border-radius: 2px;
+    overflow: hidden;
+    min-width: 60px;
+  }
+
+  .edge-tooltip-bar-fill {
+    height: 100%;
+    background: var(--color-primary, #00E5FF);
+    border-radius: 2px;
+    transition: width var(--transition-fast, 150ms ease);
+  }
+
+  .edge-tooltip-strength-value {
+    color: var(--color-text, #e4e4e7);
+    flex-shrink: 0;
+    min-width: 30px;
+    text-align: right;
+  }
+
+  .edge-tooltip-context {
+    color: var(--color-text-dim, #71717a);
+    font-family: var(--font-display, 'Space Grotesk', sans-serif);
+    font-size: var(--text-xs, 0.625rem);
+    margin-top: var(--space-2, 0.5rem);
+    line-height: 1.4;
+    font-style: italic;
+  }
+
   .graph-legend-collapsed {
     position: absolute;
     top: var(--space-4, 1rem);
@@ -1514,6 +1802,70 @@
 
   .legend-count {
     color: var(--color-text-dim, #71717a);
+    flex-shrink: 0;
+  }
+
+  .legend-separator {
+    height: 1px;
+    background: var(--color-border, #27272a);
+    margin: var(--space-2, 0.5rem) 0;
+  }
+
+  .legend-section-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 0.5rem);
+    font-family: var(--font-display, 'Space Grotesk', sans-serif);
+    font-size: var(--text-xs, 0.625rem);
+    font-weight: var(--weight-medium, 500);
+    color: var(--color-text-dim, #71717a);
+    margin-bottom: var(--space-1, 0.25rem);
+  }
+
+  .legend-section-title span {
+    flex: 1;
+  }
+
+  .legend-clear-filter {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--color-text-dim, #71717a);
+    display: flex;
+    align-items: center;
+  }
+
+  .legend-clear-filter .material-symbols-outlined {
+    font-size: 14px;
+  }
+
+  .legend-clear-filter:hover {
+    color: var(--color-text, #e4e4e7);
+  }
+
+  .legend-item-clickable {
+    background: none;
+    border: none;
+    padding: var(--space-1, 0.25rem) 0;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    transition: opacity var(--transition-fast, 150ms ease);
+  }
+
+  .legend-item-clickable:hover {
+    opacity: 0.8;
+  }
+
+  .legend-item-muted {
+    opacity: 0.35;
+  }
+
+  .legend-line {
+    width: 12px;
+    height: 3px;
+    border-radius: 1.5px;
     flex-shrink: 0;
   }
 
