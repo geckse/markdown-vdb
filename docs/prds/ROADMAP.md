@@ -286,6 +286,22 @@ Make the app's FrontmatterEditor schema-aware with field name suggestions, value
 
 ---
 
+## Sprint 5 — Discovery & Filtering (Phase 24)
+
+### Phase 24 — `.mdvdbignore` File Support
+> [phase-24-mdvdbignore.md](phase-24-mdvdbignore.md)
+
+Project-local `.mdvdbignore` file using `.gitignore` syntax to exclude files from the index without removing them from git. Nested files scope to their subtree. Parsed via the `ignore` crate — zero new dependencies.
+
+**No new crate dependencies.** Uses `ignore` (existing) for custom ignore filename support.
+
+**Key additions:**
+- `.mdvdbignore` file support with full `.gitignore` syntax (globs, negation, comments)
+- Automatic reading during both `discover()` and `should_index()` (watcher)
+- Composes with `.gitignore`, built-in ignores, and `MDVDB_IGNORE_PATTERNS`
+
+---
+
 ## Dependency Graph
 
 ```

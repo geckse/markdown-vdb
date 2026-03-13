@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mdvdb::config::Config;
 use mdvdb::discovery::FileDiscovery;
@@ -190,4 +190,111 @@ fn discover_sorted_output() {
     let mut sorted = files.clone();
     sorted.sort();
     assert_eq!(files, sorted, "Output should be sorted");
+}
+
+#[test]
+#[serial]
+fn discover_mdvdbignore() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    create_file(tmp.path(), ".mdvdbignore", "drafts/\n");
+    create_file(tmp.path(), "visible.md", "# Visible");
+    create_file(tmp.path(), "drafts/wip.md", "# WIP");
+    create_file(tmp.path(), "docs/guide.md", "# Guide");
+
+    let config = Config::load(tmp.path()).unwrap();
+    let discovery = FileDiscovery::new(tmp.path(), &config);
+    let files = discovery.discover().unwrap();
+
+    assert_eq!(files.len(), 2);
+    assert!(files.contains(&PathBuf::from("visible.md")));
+    assert!(files.contains(&PathBuf::from("docs/guide.md")));
+    assert!(!files.contains(&PathBuf::from("drafts/wip.md")));
+}
+
+#[test]
+#[serial]
+fn discover_mdvdbignore_with_comments() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    create_file(
+        tmp.path(),
+        ".mdvdbignore",
+        "# This is a comment\narchive/\n",
+    );
+    create_file(tmp.path(), "visible.md", "# Visible");
+    create_file(tmp.path(), "archive/old.md", "# Old");
+
+    let config = Config::load(tmp.path()).unwrap();
+    let discovery = FileDiscovery::new(tmp.path(), &config);
+    let files = discovery.discover().unwrap();
+
+    assert_eq!(files, vec![PathBuf::from("visible.md")]);
+}
+
+#[test]
+#[serial]
+fn discover_mdvdbignore_and_gitignore_compose() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    // .gitignore needs .git dir to activate
+    fs::create_dir(tmp.path().join(".git")).unwrap();
+    create_file(tmp.path(), ".gitignore", "git-ignored/\n");
+    create_file(tmp.path(), ".mdvdbignore", "mdvdb-ignored/\n");
+    create_file(tmp.path(), "visible.md", "# Visible");
+    create_file(tmp.path(), "git-ignored/secret.md", "# Secret");
+    create_file(tmp.path(), "mdvdb-ignored/draft.md", "# Draft");
+
+    let config = Config::load(tmp.path()).unwrap();
+    let discovery = FileDiscovery::new(tmp.path(), &config);
+    let files = discovery.discover().unwrap();
+
+    assert_eq!(files, vec![PathBuf::from("visible.md")]);
+}
+
+#[test]
+#[serial]
+fn discover_mdvdbignore_glob_pattern() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    create_file(tmp.path(), ".mdvdbignore", "*.draft.md\n");
+    create_file(tmp.path(), "visible.md", "# Visible");
+    create_file(tmp.path(), "idea.draft.md", "# Draft");
+    create_file(tmp.path(), "sub/wip.draft.md", "# Sub Draft");
+
+    let config = Config::load(tmp.path()).unwrap();
+    let discovery = FileDiscovery::new(tmp.path(), &config);
+    let files = discovery.discover().unwrap();
+
+    assert_eq!(files, vec![PathBuf::from("visible.md")]);
+}
+
+#[test]
+#[serial]
+fn should_index_respects_mdvdbignore() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    create_file(tmp.path(), ".mdvdbignore", "drafts/\n*.wip.md\n");
+
+    let config = Config::load(tmp.path()).unwrap();
+    let discovery = FileDiscovery::new(tmp.path(), &config);
+
+    assert!(!discovery.should_index(Path::new("drafts/note.md")));
+    assert!(!discovery.should_index(Path::new("ideas/thing.wip.md")));
+    assert!(discovery.should_index(Path::new("docs/readme.md")));
+}
+
+#[test]
+#[serial]
+fn discover_missing_mdvdbignore_is_fine() {
+    clear_env();
+    let tmp = TempDir::new().unwrap();
+    // No .mdvdbignore file — should work without errors
+    create_file(tmp.path(), "readme.md", "# Hello");
+
+    let config = Config::load(tmp.path()).unwrap();
+    let discovery = FileDiscovery::new(tmp.path(), &config);
+    let files = discovery.discover().unwrap();
+
+    assert_eq!(files, vec![PathBuf::from("readme.md")]);
 }

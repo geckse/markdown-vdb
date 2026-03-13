@@ -43,7 +43,7 @@ src/
 ├── format.rs            # Human-readable output formatting (colors, bars, timestamps)
 ├── error.rs             # Error enum (thiserror)
 ├── logging.rs           # Tracing subscriber setup
-├── discovery.rs         # File scanning with ignore patterns
+├── discovery.rs         # File scanning with ignore patterns (.gitignore + .mdvdbignore)
 ├── parser.rs            # Markdown parsing: frontmatter, headings, body
 ├── chunker.rs           # Heading-based chunking + token size guard
 ├── search.rs            # Query pipeline, metadata filtering, time decay, graph expansion, results
@@ -99,6 +99,7 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Writes:** Always atomic — write to `.tmp`, fsync, rename. Never write directly to index file.
 - **Frontmatter:** Read-only. The system NEVER writes to markdown files. All computed data lives in the index.
 - **Embeddings:** Trait-based pluggable providers. Batch-first (up to 4 concurrent). Skip unchanged files via SHA-256 hash.
+- **Ignore files:** `.gitignore` respected automatically. `.mdvdbignore` (same syntax) for index-only exclusions. 15 built-in dir ignores always applied. `MDVDB_IGNORE_PATTERNS` env var for additional patterns.
 - **Chunking:** Primary split by headings, secondary token-count size guard. Deterministic `"path#index"` IDs.
 - **Clustering:** Document-level vectors (averaged chunk vectors per file). K-means with cross-cluster TF-IDF keyword extraction.
 - **CLI output:** stdout for data (JSON with `--json`, human-readable otherwise), stderr for errors/logs. Search JSON uses wrapped format: `{"results": [...], "query": "...", "total_results": N}`. When `--expand` is used, includes `"graph_context": [...]` with linked-file chunks.
@@ -217,3 +218,4 @@ Full specifications for all 18 phases live in `docs/prds/`. These document the d
 | 17 | `phase-17-interactive-ingest-progress.md` | Rich progress display, `--preview`, `--reindex`, Ctrl+C cancellation |
 | 18 | `phase-18-time-decay.md` | Optional time-based decay for search scores (exponential half-life) |
 | 21 | *(spec)* | Multi-hop graph traversal: BFS link boost, graph context expansion, deep neighborhood |
+| 24 | `phase-24-mdvdbignore.md` | `.mdvdbignore` file support (`.gitignore` syntax, index-only exclusions) |

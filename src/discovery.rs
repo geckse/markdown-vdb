@@ -1,11 +1,15 @@
 use std::path::{Path, PathBuf};
 
+use ignore::gitignore::Gitignore;
 use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
 use tracing::debug;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
+
+/// Filename for project-specific ignore patterns (`.gitignore` syntax).
+pub const MDVDB_IGNORE_FILENAME: &str = ".mdvdbignore";
 
 /// Directories that are always excluded from file discovery.
 pub const BUILTIN_IGNORE_PATTERNS: &[&str] = &[
@@ -27,21 +31,36 @@ pub const BUILTIN_IGNORE_PATTERNS: &[&str] = &[
 ];
 
 /// Discovers markdown files in configured source directories, applying
-/// gitignore rules, built-in ignore patterns, and user-configured patterns.
+/// gitignore rules, `.mdvdbignore` rules, built-in ignore patterns, and
+/// user-configured patterns.
 #[derive(Debug)]
 pub struct FileDiscovery {
     source_dirs: Vec<PathBuf>,
     ignore_patterns: Vec<String>,
     project_root: PathBuf,
+    /// Parsed `.mdvdbignore` from the project root (if present).
+    mdvdb_ignore: Option<Gitignore>,
 }
 
 impl FileDiscovery {
     /// Create a new `FileDiscovery` from a project root and config.
     pub fn new(project_root: &Path, config: &Config) -> Self {
+        let ignore_path = project_root.join(MDVDB_IGNORE_FILENAME);
+        let mdvdb_ignore = if ignore_path.exists() {
+            let (gi, err) = Gitignore::new(&ignore_path);
+            if let Some(e) = err {
+                debug!("warning parsing {}: {}", ignore_path.display(), e);
+            }
+            Some(gi)
+        } else {
+            None
+        };
+
         Self {
             source_dirs: config.source_dirs.clone(),
             ignore_patterns: config.ignore_patterns.clone(),
             project_root: project_root.to_path_buf(),
+            mdvdb_ignore,
         }
     }
 
@@ -63,6 +82,7 @@ impl FileDiscovery {
             let walker = WalkBuilder::new(&abs_dir)
                 .standard_filters(true)
                 .overrides(overrides)
+                .add_custom_ignore_filename(MDVDB_IGNORE_FILENAME)
                 .build();
 
             for entry in walker {
@@ -141,6 +161,16 @@ impl FileDiscovery {
             }
         }
 
+        // Check against .mdvdbignore patterns
+        if let Some(ref gi) = self.mdvdb_ignore {
+            if gi
+                .matched_path_or_any_parents(relative_path, false)
+                .is_ignore()
+            {
+                return false;
+            }
+        }
+
         true
     }
 
@@ -197,6 +227,7 @@ mod tests {
             source_dirs: vec![PathBuf::from(".")],
             ignore_patterns,
             project_root: PathBuf::from("/tmp/test"),
+            mdvdb_ignore: None,
         }
     }
 
@@ -236,6 +267,23 @@ mod tests {
     fn should_index_handles_custom_pattern_with_bang() {
         let fd = make_discovery(vec!["!private/".to_string()]);
         assert!(!fd.should_index(Path::new("private/secret.md")));
+    }
+
+    #[test]
+    fn should_index_respects_mdvdbignore() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ignore_path = tmp.path().join(MDVDB_IGNORE_FILENAME);
+        std::fs::write(&ignore_path, "drafts/\n*.draft.md\n").unwrap();
+        let (gi, _) = Gitignore::new(&ignore_path);
+        let fd = FileDiscovery {
+            source_dirs: vec![PathBuf::from(".")],
+            ignore_patterns: vec![],
+            project_root: tmp.path().to_path_buf(),
+            mdvdb_ignore: Some(gi),
+        };
+        assert!(!fd.should_index(Path::new("drafts/wip.md")));
+        assert!(!fd.should_index(Path::new("notes/idea.draft.md")));
+        assert!(fd.should_index(Path::new("docs/readme.md")));
     }
 
     #[test]
