@@ -969,6 +969,77 @@ impl MarkdownVdb {
                         graph.semantic_edges = Some(semantic_edges);
                     }
                 }
+                // Run edge clustering.
+                let clusterer = clustering::Clusterer::new(&self.config);
+
+                // Collect all edge vectors and contexts for clustering.
+                let all_edge_vectors = self.index.get_edge_vectors();
+                let all_edge_contexts: HashMap<String, String> = graph
+                    .semantic_edges
+                    .as_ref()
+                    .map(|edges| {
+                        edges
+                            .iter()
+                            .map(|(id, e)| (id.clone(), e.context_text.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                if options.file.is_some() {
+                    // Single-file ingest: assign new edges to nearest cluster, maybe rebalance.
+                    if let Some(ref mut state) = graph.edge_cluster_state {
+                        if !state.clusters.is_empty() {
+                            for em in &edge_metas {
+                                if let Some(vec) = all_edge_vectors.get(&em.edge_id) {
+                                    match clusterer.assign_edge_to_nearest(state, &em.edge_id, vec) {
+                                        Ok(cid) => {
+                                            // Update cluster_id on the SemanticEdge.
+                                            if let Some(ref mut edges) = graph.semantic_edges {
+                                                if let Some(edge) = edges.get_mut(&em.edge_id) {
+                                                    edge.cluster_id = Some(cid);
+                                                    // Find relationship_type from the cluster label.
+                                                    if let Some(ci) = state.clusters.iter().find(|c| c.id == cid) {
+                                                        edge.relationship_type = Some(ci.label.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(error = %e, edge_id = %em.edge_id, "failed to assign edge to cluster"),
+                                    }
+                                }
+                            }
+                            // Maybe rebalance.
+                            match clusterer.maybe_rebalance_edges(
+                                state,
+                                &all_edge_vectors,
+                                &all_edge_contexts,
+                                self.config.edge_cluster_rebalance,
+                            ) {
+                                Ok(rebalanced) => {
+                                    if rebalanced {
+                                        // After rebalance, update cluster_id/relationship_type on all edges.
+                                        Self::apply_edge_cluster_labels(&mut graph);
+                                        info!("edge clusters rebalanced after single-file ingest");
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "edge cluster rebalance failed"),
+                            }
+                        }
+                    }
+                } else {
+                    // Full ingest: run full edge clustering.
+                    match clusterer.cluster_edges(&all_edge_vectors, &all_edge_contexts) {
+                        Ok(state) => {
+                            graph.edge_cluster_state = Some(state);
+                            Self::apply_edge_cluster_labels(&mut graph);
+                            info!("edge clustering complete after full ingest");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "edge clustering failed (non-fatal)");
+                        }
+                    }
+                }
+
                 self.index.update_link_graph(Some(graph));
             }
         }
@@ -1144,6 +1215,27 @@ impl MarkdownVdb {
         );
 
         Ok(result)
+    }
+
+    /// Apply cluster labels to all semantic edges based on the current edge_cluster_state.
+    fn apply_edge_cluster_labels(graph: &mut links::LinkGraph) {
+        if let (Some(ref state), Some(ref mut edges)) =
+            (&graph.edge_cluster_state, &mut graph.semantic_edges)
+        {
+            // Build edge_id → (cluster_id, label) lookup from cluster members.
+            let mut edge_to_cluster: HashMap<String, (usize, String)> = HashMap::new();
+            for cluster in &state.clusters {
+                for member in &cluster.members {
+                    edge_to_cluster.insert(member.clone(), (cluster.id, cluster.label.clone()));
+                }
+            }
+            for (edge_id, edge) in edges.iter_mut() {
+                if let Some((cid, label)) = edge_to_cluster.get(edge_id) {
+                    edge.cluster_id = Some(*cid);
+                    edge.relationship_type = Some(label.clone());
+                }
+            }
+        }
     }
 
     /// Execute a semantic search query against the index.
