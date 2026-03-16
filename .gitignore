@@ -24,3 +24,6 @@ logs/security/
 /app/out
 /node_modules
 /.auto-claude
+
+# Marketint Repos
+/website/
