@@ -23,3 +23,4 @@ logs/security/
 /app/dist
 /app/out
 /node_modules
+/.auto-claude
