@@ -1,0 +1,77 @@
+---
+interface Props {
+  title?: string;
+  description?: string;
+  ogImage?: string;
+}
+
+const {
+  title = 'mdvdb -- Filesystem-Native Vector Database for Markdown',
+  description = 'A filesystem-native vector database built around Markdown files. Rust-powered, zero infrastructure, optimized for AI agents. Semantic search, hybrid BM25+vector retrieval, link graphs, and clustering -- all from your local filesystem.',
+  ogImage = '/og-image.png',
+} = Astro.props;
+
+const canonicalURL = new URL(Astro.url.pathname, Astro.site ?? 'https://mdvdb.com');
+---
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonicalURL} />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:image" content={ogImage} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonicalURL} />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- Font Preloads -->
+    <link rel="preload" href="/fonts/SpaceGrotesk-Variable.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/JetBrainsMono-Variable.woff2" as="font" type="font/woff2" crossorigin />
+
+    <!-- Styles -->
+    <style>
+      @import '../styles/tokens.css';
+      @import '../styles/global.css';
+      @import '../styles/synthwave.css';
+      @import '../styles/sections.css';
+    </style>
+
+    <!-- JSON-LD Structured Data -->
+    <script type="application/ld+json" set:html={JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "mdvdb",
+      "description": description,
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "macOS, Linux, Windows",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "url": "https://mdvdb.com",
+      "downloadUrl": "https://github.com/nicholasoxford/markdown-vdb/releases",
+      "softwareVersion": "0.1.0",
+      "programmingLanguage": "Rust",
+      "license": "https://opensource.org/licenses/MIT"
+    })} />
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
