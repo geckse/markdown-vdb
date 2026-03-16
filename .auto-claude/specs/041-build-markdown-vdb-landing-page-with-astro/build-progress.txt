@@ -1,0 +1,91 @@
+=== AUTO-BUILD PROGRESS ===
+
+Project: Build Markdown VDB Landing Page with Astro
+Spec: 041-build-markdown-vdb-landing-page-with-astro
+Workspace: managed by orchestrator
+Started: 2026-03-16
+
+Workflow Type: feature
+Rationale: Greenfield static website at website/mdvdb/. All ~29 files created from scratch. Single service (website-mdvdb) with reference-only dependencies on desktop app (design tokens, graph patterns) and Rust CLI (command definitions).
+
+Session 1 (Planner):
+- Created implementation_plan.json
+- Phases: 7
+- Total subtasks: 22
+- Created init.sh
+- Created/updated project_index.json and context.json
+
+Phase Summary:
+- Phase 1 (Project Scaffold): 1 subtask, depends on nothing
+  Scaffold Astro.js project, add Svelte integration, install D3 deps, create config files
+
+- Phase 2 (Design System & Styles): 4 subtasks, depends on Phase 1
+  tokens.css (desktop app parity + web extensions), global.css (resets, grain, fonts),
+  synthwave.css (neon utilities, grid keyframes), sections.css (layout, responsive)
+
+- Phase 3 (Layout & Reusable Components): 4 subtasks, depends on Phase 2
+  Base.astro layout, Terminal.astro, Badge.astro, Button.astro, SectionHeading.astro,
+  SynthwaveGrid.astro, NeonDivider.astro
+
+- Phase 4 (Interactive Svelte Islands): 2 subtasks, depends on Phase 2
+  ForceGraph.svelte (D3 force-directed graph), CommandExplorer.svelte (16 CLI commands)
+
+  ** Phase 3 and Phase 4 can run in PARALLEL (different file sets, same dependency) **
+
+- Phase 5 (Page Sections): 6 subtasks, depends on Phase 3 + Phase 4
+  Hero.astro, WhatIs.astro, HowToUse.astro, Features.astro, Comparison.astro, Footer.astro
+
+- Phase 6 (Assembly & Assets): 3 subtasks, depends on Phase 5
+  Font files (.woff2), favicon.svg, og-image.png, index.astro page assembly
+
+- Phase 7 (Build Verification & Polish): 2 subtasks, depends on Phase 6
+  Full build verification, accessibility/structure checks, JS bundle size check
+
+Services Involved:
+- website-mdvdb (primary): New Astro.js static site at website/mdvdb/
+- app (reference only): Desktop app design tokens, graph component patterns
+- rust-cli (reference only): CLI command definitions for CommandExplorer
+
+Key Reference Files:
+- app/src/renderer/styles/tokens.css (design tokens - copy verbatim)
+- app/src/renderer/styles/global.css (grain texture SVG, scrollbars, focus)
+- app/src/renderer/components/LocalGraph.svelte (D3 force graph reference)
+- app/src/renderer/lib/edge-utils.ts (edge cluster colors, line width)
+- src/main.rs lines 82-345 (16 CLI command definitions)
+- website/prds/phase-1-landing-page.md (full PRD specification)
+
+Critical Constraints:
+- Vanilla CSS only (NO Tailwind)
+- Synthwave palette is CYAN ONLY (#00E5FF) - no pink/purple/magenta
+- < 150KB JS shipped gzipped
+- Lighthouse 90+ performance, WCAG 2.1 AA accessibility
+- Self-hosted .woff2 fonts (no CDN)
+- Svelte 5 runes only (no Svelte 4 patterns)
+- D3 tree-shakeable imports only (never import * as d3)
+
+Parallelism Analysis:
+- Max parallel phases: 2
+- Recommended workers: 2
+- Parallel group: Phase 3 (Layout+Components) || Phase 4 (Svelte Islands)
+  Both depend only on Phase 2, modify completely different files
+- Speedup estimate: 1.3x faster than sequential
+
+=== STARTUP COMMAND ===
+
+To continue building this spec, run:
+
+  source auto-claude/.venv/bin/activate && python auto-claude/run.py --spec 041 --parallel 2
+
+=== END SESSION 1 ===
+
+=== SUBTASK 7-2: Final Quality Checks ===
+All checks passed:
+- Single <h1>: YES (1 found)
+- <h2> section ids: what-is, how-to-use, features, cli, comparison - all present
+- ARIA: role=listbox (1), role=option (16), aria-selected (1)
+- focus-visible styles: present in global CSS
+- prefers-reduced-motion: present in global CSS
+- No horizontal overflow: large px values are border-radius/max-width only
+- JS bundle size: ~83KB total (well under 150KB limit)
+- Build: clean, no errors
+Status: COMPLETED
