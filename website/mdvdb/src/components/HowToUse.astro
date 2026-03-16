@@ -1,0 +1,138 @@
+---
+import SectionHeading from './SectionHeading.astro';
+import Terminal from './Terminal.astro';
+
+const steps = [
+  {
+    number: 1,
+    title: 'Install',
+    description: 'Install markdown-vdb with Cargo, the Rust package manager.',
+  },
+  {
+    number: 2,
+    title: 'Initialize',
+    description: 'Create a .markdownvdb config in your project directory.',
+  },
+  {
+    number: 3,
+    title: 'Ingest',
+    description: 'Index your markdown files with automatic chunking and embedding.',
+  },
+  {
+    number: 4,
+    title: 'Search',
+    description: 'Query your knowledge base with semantic or hybrid search.',
+  },
+];
+
+const terminalLines = [
+  { type: 'comment' as const, text: 'Install markdown-vdb' },
+  { type: 'command' as const, text: 'cargo install mdvdb' },
+  { type: 'output' as const, text: 'Installing mdvdb v0.1.0...' },
+  { type: 'output' as const, text: '' },
+  { type: 'comment' as const, text: 'Initialize in your project' },
+  { type: 'command' as const, text: 'mdvdb init' },
+  { type: 'output' as const, text: '✓ Created .markdownvdb/config' },
+  { type: 'output' as const, text: '' },
+  { type: 'comment' as const, text: 'Index your markdown files' },
+  { type: 'command' as const, text: 'mdvdb ingest' },
+  { type: 'output' as const, text: '✓ Indexed 142 files (387 chunks)' },
+  { type: 'output' as const, text: '' },
+  { type: 'comment' as const, text: 'Search your knowledge base' },
+  { type: 'command' as const, text: 'mdvdb search "authentication flow"' },
+  { type: 'output' as const, text: '0.94  docs/auth/oauth2.md#overview', color: '#00e5ff' },
+  { type: 'output' as const, text: '0.87  docs/auth/jwt-tokens.md#usage', color: '#00e5ff' },
+  { type: 'output' as const, text: '0.81  docs/api/middleware.md#auth', color: '#00e5ff' },
+];
+---
+
+<section class="how-to-use">
+  <SectionHeading id="how-to-use" subtitle="Get up and running in under a minute">
+    How to Use
+  </SectionHeading>
+
+  <div class="how-to-use__grid">
+    <div class="how-to-use__steps">
+      {steps.map((step) => (
+        <div class="step">
+          <div class="step__number">{step.number}</div>
+          <div class="step__content">
+            <h3 class="step__title">{step.title}</h3>
+            <p class="step__description">{step.description}</p>
+          </div>
+        </div>
+      ))}
+    </div>
+
+    <div class="how-to-use__terminal">
+      <Terminal title="Getting Started" lines={terminalLines} />
+    </div>
+  </div>
+</section>
+
+<style>
+  .how-to-use {
+    padding: 4rem 1.5rem;
+    max-width: 72rem;
+    margin-inline: auto;
+  }
+
+  .how-to-use__grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3rem;
+    align-items: start;
+  }
+
+  .how-to-use__steps {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .step {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+
+  .step__number {
+    flex-shrink: 0;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 50%;
+    background: rgba(0, 229, 255, 0.15);
+    color: #00e5ff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-weight: 700;
+    font-size: 1rem;
+  }
+
+  .step__content {
+    padding-top: 0.25rem;
+  }
+
+  .step__title {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 1.125rem;
+    font-weight: 700;
+    color: var(--color-text, #e0e0f0);
+    margin: 0 0 0.25rem;
+  }
+
+  .step__description {
+    font-size: 0.9375rem;
+    color: var(--color-text-muted, #8888aa);
+    margin: 0;
+    line-height: 1.5;
+  }
+
+  @media (max-width: 768px) {
+    .how-to-use__grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

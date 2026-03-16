@@ -1,0 +1,39 @@
+---
+interface Props {
+  id?: string;
+  subtitle?: string;
+  class?: string;
+}
+
+const { id, subtitle, class: className } = Astro.props;
+---
+
+<div class:list={['section-heading', className]}>
+  <h2 {id}><slot /></h2>
+  {subtitle && <p class="subtitle">{subtitle}</p>}
+</div>
+
+<style>
+  .section-heading {
+    text-align: center;
+    margin-bottom: 2rem;
+  }
+
+  h2 {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: clamp(1.75rem, 4vw, 2.5rem);
+    font-weight: 700;
+    color: var(--color-text, #E0E0E0);
+    margin: 0 0 0.5rem;
+    line-height: 1.2;
+  }
+
+  .subtitle {
+    font-size: 1.125rem;
+    color: var(--color-text-muted, #8888aa);
+    margin: 0;
+    max-width: 40rem;
+    margin-inline: auto;
+    line-height: 1.6;
+  }
+</style>

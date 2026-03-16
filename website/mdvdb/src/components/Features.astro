@@ -1,0 +1,339 @@
+---
+import SectionHeading from './SectionHeading.astro';
+import ForceGraph from './ForceGraph.svelte';
+
+const graphNodes = [
+  { id: 'readme', label: 'README.md', isCenter: true, cluster: 0 },
+  { id: 'setup', label: 'setup.md', cluster: 0 },
+  { id: 'api', label: 'api-ref.md', cluster: 1 },
+  { id: 'auth', label: 'auth.md', cluster: 1 },
+  { id: 'deploy', label: 'deploy.md', cluster: 2 },
+  { id: 'ci', label: 'ci-cd.md', cluster: 2 },
+  { id: 'changelog', label: 'CHANGELOG.md', cluster: 0 },
+  { id: 'faq', label: 'faq.md', cluster: 3 },
+  { id: 'arch', label: 'architecture.md', cluster: 1 },
+  { id: 'contrib', label: 'CONTRIBUTING.md', cluster: 3 },
+];
+
+const graphEdges = [
+  { source: 'readme', target: 'setup', direction: 'outbound', strength: 0.9 },
+  { source: 'readme', target: 'api', direction: 'outbound', strength: 0.8 },
+  { source: 'readme', target: 'contrib', direction: 'outbound', strength: 0.7 },
+  { source: 'api', target: 'auth', direction: 'bidirectional', strength: 0.85 },
+  { source: 'api', target: 'arch', direction: 'inbound', strength: 0.6 },
+  { source: 'deploy', target: 'ci', direction: 'bidirectional', strength: 0.9 },
+  { source: 'setup', target: 'deploy', direction: 'outbound', strength: 0.5 },
+  { source: 'changelog', target: 'readme', direction: 'inbound', strength: 0.4 },
+  { source: 'faq', target: 'setup', direction: 'outbound', strength: 0.3 },
+  { source: 'arch', target: 'deploy', direction: 'outbound', strength: 0.5 },
+  { source: 'contrib', target: 'faq', direction: 'outbound', strength: 0.4 },
+];
+---
+
+<section class="features">
+  <SectionHeading id="features" subtitle="Built for the way AI agents actually work with knowledge">Core Features</SectionHeading>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Markdown First</h3>
+      <p>Index your existing Markdown files in-place. Frontmatter becomes searchable metadata automatically.</p>
+      <pre class="code-block"><code>---
+title: "API Reference"
+tags: [rust, api]
+status: published
+---
+
+# Endpoints
+Your content stays untouched.</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Hybrid Search</h3>
+      <p>Semantic vectors meet BM25 lexical search, fused with Reciprocal Rank Fusion for the best of both worlds.</p>
+      <div class="query-flow">
+        <div class="flow-step">
+          <span class="flow-label">Query</span>
+          <span class="flow-arrow">&darr;</span>
+        </div>
+        <div class="flow-branches">
+          <div class="flow-branch">
+            <span class="flow-tag semantic">Semantic</span>
+            <span class="flow-detail">HNSW vectors</span>
+          </div>
+          <div class="flow-branch">
+            <span class="flow-tag lexical">Lexical</span>
+            <span class="flow-detail">BM25 / Tantivy</span>
+          </div>
+        </div>
+        <div class="flow-step">
+          <span class="flow-arrow">&darr;</span>
+          <span class="flow-label fusion">RRF Fusion</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Agent Memory with Decay</h3>
+      <p>Time-decay scoring surfaces recent knowledge while preserving long-term recall. Configurable half-life.</p>
+      <div class="decay-chart">
+        <svg viewBox="0 0 200 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Exponential decay curve">
+          <path d="M10 70 Q30 68 50 55 Q70 40 90 30 Q120 18 150 14 Q175 12 190 11" stroke="#22d3ee" stroke-width="2" fill="none" stroke-linecap="round"/>
+          <path d="M10 70 Q30 68 50 55 Q70 40 90 30 Q120 18 150 14 Q175 12 190 11 L190 70 Z" fill="url(#decay-gradient)" opacity="0.2"/>
+          <defs>
+            <linearGradient id="decay-gradient" x1="100" y1="10" x2="100" y2="70" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#22d3ee"/>
+              <stop offset="100%" stop-color="transparent"/>
+            </linearGradient>
+          </defs>
+          <line x1="10" y1="70" x2="190" y2="70" stroke="#2a2a4a" stroke-width="1"/>
+          <line x1="10" y1="10" x2="10" y2="70" stroke="#2a2a4a" stroke-width="1"/>
+          <text x="95" y="78" fill="#8888aa" font-size="6" text-anchor="middle" font-family="'JetBrains Mono', monospace">time &rarr;</text>
+          <text x="6" y="40" fill="#8888aa" font-size="6" text-anchor="middle" font-family="'JetBrains Mono', monospace" transform="rotate(-90 6 40)">score</text>
+        </svg>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Schema Inference</h3>
+      <p>Automatically discovers field types across your frontmatter. Filter searches by any metadata field with zero config.</p>
+      <pre class="code-block"><code>$ mdvdb schema
+title    : String  (148 docs)
+tags     : List    (132 docs)
+status   : String  (89 docs)
+priority : Number  (45 docs)</code></pre>
+    </div>
+  </div>
+
+  <div class="graph-showcase">
+    <div class="graph-card">
+      <div class="graph-text">
+        <h3>GraphRAG &mdash; Link-Aware Search</h3>
+        <p>
+          Wikilinks and Markdown references build a navigable knowledge graph.
+          Multi-hop BFS traversal expands search context across linked documents,
+          boosting results that are structurally connected. Graph-enhanced retrieval
+          gives AI agents richer, more relevant context.
+        </p>
+      </div>
+      <div class="graph-viz">
+        <ForceGraph
+          client:visible
+          nodes={graphNodes}
+          edges={graphEdges}
+          width={480}
+          height={350}
+          interactive={true}
+          showLabels={true}
+          glowEdges={true}
+        />
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .features {
+    padding: 4rem 1.5rem;
+    max-width: 1100px;
+    margin-inline: auto;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+  }
+
+  .card {
+    background: var(--color-surface, #1a1a2e);
+    border: 1px solid var(--color-border, #2a2a4a);
+    border-radius: var(--radius-lg, 12px);
+    padding: 2rem;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  }
+
+  .card:hover {
+    border-color: rgba(34, 211, 238, 0.4);
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.08);
+  }
+
+  .card h3 {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-text, #E0E0E0);
+    margin: 0 0 0.75rem;
+  }
+
+  .card > p {
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--color-text-muted, #8888aa);
+    margin: 0 0 1rem;
+  }
+
+  .code-block {
+    background: var(--color-bg, #0d0d1a);
+    border: 1px solid var(--color-border, #2a2a4a);
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--color-text-muted, #8888aa);
+  }
+
+  .code-block code {
+    color: inherit;
+  }
+
+  /* Query flow diagram */
+  .query-flow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 0;
+  }
+
+  .flow-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .flow-label {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.85rem;
+    color: var(--color-text, #E0E0E0);
+    background: var(--color-bg, #0d0d1a);
+    padding: 0.3em 0.8em;
+    border-radius: 6px;
+    border: 1px solid var(--color-border, #2a2a4a);
+  }
+
+  .flow-label.fusion {
+    color: #22d3ee;
+    border-color: rgba(34, 211, 238, 0.4);
+  }
+
+  .flow-arrow {
+    color: var(--color-text-muted, #8888aa);
+    font-size: 1rem;
+  }
+
+  .flow-branches {
+    display: flex;
+    gap: 1.5rem;
+  }
+
+  .flow-branch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .flow-tag {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.75rem;
+    padding: 0.2em 0.6em;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+
+  .flow-tag.semantic {
+    background: rgba(167, 139, 250, 0.2);
+    color: #A78BFA;
+  }
+
+  .flow-tag.lexical {
+    background: rgba(34, 211, 238, 0.2);
+    color: #22d3ee;
+  }
+
+  .flow-detail {
+    font-size: 0.7rem;
+    color: var(--color-text-muted, #8888aa);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+
+  /* Decay chart */
+  .decay-chart {
+    max-width: 280px;
+    margin: 0 auto;
+  }
+
+  .decay-chart svg {
+    width: 100%;
+    height: auto;
+  }
+
+  /* Graph showcase */
+  .graph-showcase {
+    margin-top: 0;
+  }
+
+  .graph-card {
+    background: var(--color-surface, #1a1a2e);
+    border: 1px solid var(--color-border, #2a2a4a);
+    border-radius: var(--radius-lg, 12px);
+    padding: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  }
+
+  .graph-card:hover {
+    border-color: rgba(34, 211, 238, 0.4);
+    box-shadow: 0 0 20px rgba(34, 211, 238, 0.08);
+  }
+
+  .graph-text {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .graph-text h3 {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--color-text, #E0E0E0);
+    margin: 0 0 0.75rem;
+  }
+
+  .graph-text p {
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--color-text-muted, #8888aa);
+    margin: 0;
+  }
+
+  .graph-viz {
+    flex-shrink: 0;
+    width: 480px;
+    height: 350px;
+  }
+
+  @media (max-width: 900px) {
+    .graph-card {
+      flex-direction: column;
+    }
+
+    .graph-viz {
+      width: 100%;
+      max-width: 480px;
+    }
+  }
+
+  @media (max-width: 768px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

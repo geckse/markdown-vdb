@@ -1,0 +1,114 @@
+---
+interface TerminalLine {
+  type: 'command' | 'output' | 'comment';
+  text: string;
+  color?: string;
+}
+
+interface Props {
+  title?: string;
+  lines: TerminalLine[];
+}
+
+const { title = 'Terminal', lines } = Astro.props;
+---
+
+<div class="terminal">
+  <div class="terminal-titlebar">
+    <div class="terminal-buttons">
+      <span class="terminal-btn terminal-btn--close"></span>
+      <span class="terminal-btn terminal-btn--minimize"></span>
+      <span class="terminal-btn terminal-btn--maximize"></span>
+    </div>
+    <span class="terminal-title">{title}</span>
+  </div>
+  <div class="terminal-body">
+    {lines.map((line) => (
+      <div class={`terminal-line terminal-line--${line.type}`}>
+        {line.type === 'command' && <span class="terminal-prompt">$ </span>}
+        {line.type === 'comment' && <span class="terminal-comment"># </span>}
+        <span style={line.color ? `color: ${line.color}` : undefined}>{line.text}</span>
+      </div>
+    ))}
+  </div>
+</div>
+
+<style>
+  .terminal {
+    border-radius: 8px;
+    overflow: hidden;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  }
+
+  .terminal-titlebar {
+    background: var(--color-surface, #1a1a2e);
+    display: flex;
+    align-items: center;
+    padding: 0.625rem 1rem;
+    gap: 0.5rem;
+  }
+
+  .terminal-buttons {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .terminal-btn {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+
+  .terminal-btn--close {
+    background: #FF5F57;
+  }
+
+  .terminal-btn--minimize {
+    background: #FFBD2E;
+  }
+
+  .terminal-btn--maximize {
+    background: #27C93F;
+  }
+
+  .terminal-title {
+    flex: 1;
+    text-align: center;
+    color: var(--color-text-muted, #8888aa);
+    font-size: 0.75rem;
+  }
+
+  .terminal-body {
+    background: var(--color-surface-dark, #0f0f1a);
+    padding: 1rem 1.25rem;
+  }
+
+  .terminal-line {
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .terminal-line--command {
+    color: var(--color-text, #e0e0f0);
+  }
+
+  .terminal-line--output {
+    color: var(--color-text-muted, #8888aa);
+  }
+
+  .terminal-line--comment {
+    color: var(--color-text-muted, #666680);
+    font-style: italic;
+  }
+
+  .terminal-prompt {
+    color: var(--color-text-muted, #666680);
+  }
+
+  .terminal-comment {
+    color: var(--color-text-muted, #666680);
+  }
+</style>

@@ -1,0 +1,108 @@
+/* ==========================================================================
+   Synthwave — Neon glow utilities, grid animation, and divider styles.
+   All glows use cyan only, referencing tokens from tokens.css.
+   ========================================================================== */
+
+/* --- Neon Text Glow --- */
+.neon-text {
+  color: var(--color-neon-cyan);
+  text-shadow:
+    0 0 7px rgba(0, 229, 255, 0.5),
+    0 0 20px rgba(0, 229, 255, 0.3),
+    0 0 40px rgba(0, 229, 255, 0.15);
+}
+
+/* --- Neon Border Glow --- */
+.neon-border {
+  border: 1px solid var(--color-neon-cyan);
+  box-shadow:
+    var(--glow-cyan),
+    inset 0 0 10px rgba(0, 229, 255, 0.1);
+}
+
+/* --- Neon Border (subtle) --- */
+.neon-border-dim {
+  border: 1px solid rgba(0, 229, 255, 0.3);
+  box-shadow: 0 0 6px rgba(0, 229, 255, 0.15);
+}
+
+/* --- Neon Text Glow (strong) --- */
+.neon-text-strong {
+  color: var(--color-neon-cyan);
+  text-shadow:
+    0 0 7px rgba(0, 229, 255, 0.6),
+    0 0 20px rgba(0, 229, 255, 0.4),
+    0 0 40px rgba(0, 229, 255, 0.25),
+    0 0 80px rgba(0, 229, 255, 0.1);
+}
+
+/* --- Synthwave Grid Background --- */
+.synthwave-grid {
+  position: relative;
+  overflow: hidden;
+}
+
+.synthwave-grid::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(0, 229, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 229, 255, 0.05) 1px, transparent 1px);
+  background-size: 40px 40px;
+  animation: grid-scroll 20s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes grid-scroll {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(40px);
+  }
+}
+
+/* --- Neon Divider --- */
+.neon-divider {
+  border: none;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--color-neon-cyan) 50%,
+    transparent
+  );
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+  margin: var(--space-8) 0;
+}
+
+/* --- Neon Divider (vertical) --- */
+.neon-divider-vertical {
+  border: none;
+  width: 1px;
+  height: 100%;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    var(--color-neon-cyan) 50%,
+    transparent
+  );
+  box-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
+}
+
+/* --- Neon Glow Pulse (opt-in animation) --- */
+.neon-pulse {
+  animation: neon-pulse 3s ease-in-out infinite;
+}
+
+@keyframes neon-pulse {
+  0%, 100% {
+    opacity: 1;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 0.85;
+    filter: brightness(1.2);
+  }
+}

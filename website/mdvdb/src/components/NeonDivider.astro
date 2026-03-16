@@ -1,0 +1,25 @@
+---
+interface Props {
+  class?: string;
+}
+
+const { class: className } = Astro.props;
+---
+
+<hr class:list={['neon-divider', className]} />
+
+<style>
+  .neon-divider {
+    border: none;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--color-primary, #00E5FF),
+      transparent
+    );
+    box-shadow: 0 0 8px rgba(0, 229, 255, 0.4),
+                0 0 20px rgba(0, 229, 255, 0.15);
+    margin: 3rem 0;
+  }
+</style>

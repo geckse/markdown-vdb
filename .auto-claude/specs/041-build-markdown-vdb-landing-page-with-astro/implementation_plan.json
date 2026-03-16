@@ -1,0 +1,655 @@
+{
+  "feature": "Build Markdown VDB landing page with Astro",
+  "workflow_type": "feature",
+  "workflow_rationale": "Greenfield static website built from scratch at website/mdvdb/. No existing code to refactor or migrate. All ~29 files created fresh. Single service (website-mdvdb) with reference-only dependencies on app/ (design tokens, graph patterns) and src/main.rs (CLI command data).",
+  "phases": [
+    {
+      "id": "phase-1-scaffold",
+      "name": "Project Scaffold",
+      "type": "setup",
+      "description": "Initialize Astro.js project at website/mdvdb/ with Svelte 5 integration, D3 dependencies, and configuration files. This creates the foundation that all other phases build on.",
+      "depends_on": [],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-1-1",
+          "description": "Scaffold Astro project at website/mdvdb/ with npm create astro, add Svelte integration, install D3 dependencies, and create all config files (package.json, astro.config.mjs, tsconfig.json, svelte.config.js, .gitignore). Verify dev server starts and build produces dist/.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/package.json",
+            "website/mdvdb/astro.config.mjs",
+            "website/mdvdb/tsconfig.json",
+            "website/mdvdb/svelte.config.js",
+            "website/mdvdb/.gitignore"
+          ],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "cd website/mdvdb && npm run build",
+            "expected": "Build completes with zero errors, dist/ directory created"
+          },
+          "status": "completed",
+          "notes": "Scaffolded Astro project with Svelte 5 + D3 deps. Build produces dist/ with zero errors. Note: /website/ is in root .gitignore so files were force-added.",
+          "updated_at": "2026-03-16T19:54:46.156092+00:00"
+        }
+      ]
+    },
+    {
+      "id": "phase-2-styles",
+      "name": "Design System & Styles",
+      "type": "implementation",
+      "description": "Create the complete CSS design system: tokens mirrored from desktop app, global resets/typography/grain texture, synthwave utilities, and section layout styles. This is the visual foundation for all components.",
+      "depends_on": [
+        "phase-1-scaffold"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-2-1",
+          "description": "Create tokens.css by copying ALL custom properties from app/src/renderer/styles/tokens.css verbatim (colors, fonts, sizes, spacing, radius, transitions, z-index, scrollbar tokens). Then add web-specific extensions (--content-width, --section-padding, --section-padding-mobile) and synthwave tokens (--color-neon-cyan, --glow-cyan, --glow-cyan-strong). CRITICAL: No pink/purple/magenta tokens.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/styles/tokens.css"
+          ],
+          "patterns_from": [
+            "app/src/renderer/styles/tokens.css"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'color-primary: #00E5FF' website/mdvdb/src/styles/tokens.css && grep -c 'color-bg: #0f0f10' website/mdvdb/src/styles/tokens.css && grep -c 'neon-cyan' website/mdvdb/src/styles/tokens.css && ! grep -qi 'magenta\\|neon-pink\\|neon-purple' website/mdvdb/src/styles/tokens.css && echo 'PASS'",
+            "expected": "Token file contains all desktop app tokens + web extensions, no magenta/pink/purple"
+          },
+          "status": "completed",
+          "notes": "Created tokens.css with all desktop app tokens copied verbatim, plus web-specific extensions (--content-width, --section-padding, --section-padding-mobile) and synthwave tokens (--color-neon-cyan, --glow-cyan, --glow-cyan-strong). No pink/purple/magenta tokens. Verification passes.",
+          "updated_at": "2026-03-16T19:56:12.375566+00:00"
+        },
+        {
+          "id": "subtask-2-2",
+          "description": "Create global.css with CSS reset (box-sizing, margin/padding), @font-face declarations for Space Grotesk and JetBrains Mono variable fonts with font-display: swap, body styles (bg, color, font-family, antialiasing), grain texture on body::before (identical SVG data URI from desktop app global.css), scrollbar styles, ::selection (cyan bg, dark text), focus-visible styles (2px solid cyan outline), and @media (prefers-reduced-motion: reduce) handler.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/styles/global.css"
+          ],
+          "patterns_from": [
+            "app/src/renderer/styles/global.css"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'feTurbulence' website/mdvdb/src/styles/global.css && grep -c 'font-display: swap' website/mdvdb/src/styles/global.css && grep -c 'prefers-reduced-motion' website/mdvdb/src/styles/global.css && echo 'PASS'",
+            "expected": "Global CSS contains grain texture SVG, font-display swap, and reduced-motion handler"
+          },
+          "status": "completed",
+          "notes": "Created global.css with CSS reset, @font-face for Space Grotesk and JetBrains Mono with font-display: swap, body styles, grain texture on body::before (identical SVG data URI), scrollbar styles, ::selection, focus-visible styles, link base styles, and prefers-reduced-motion handler. Verification passed.",
+          "updated_at": "2026-03-16T19:57:37.549323+00:00"
+        },
+        {
+          "id": "subtask-2-3",
+          "description": "Create synthwave.css with neon glow utility classes (.neon-text for cyan text-shadow, .neon-border for box-shadow glow), synthwave grid keyframes (@keyframes grid-scroll), and neon divider base styles. All glows are cyan only.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/styles/synthwave.css"
+          ],
+          "patterns_from": [
+            "website/prds/phase-1-landing-page.md"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'neon-text' website/mdvdb/src/styles/synthwave.css && grep -c 'grid-scroll' website/mdvdb/src/styles/synthwave.css && echo 'PASS'",
+            "expected": "Synthwave CSS contains neon-text class and grid-scroll keyframes"
+          },
+          "status": "completed",
+          "notes": "Created synthwave.css with neon-text, neon-border, neon-divider utilities, grid-scroll keyframes, and neon-pulse animation. All glows cyan only, referencing tokens.css variables.",
+          "updated_at": "2026-03-16T19:58:54.799265+00:00"
+        },
+        {
+          "id": "subtask-2-4",
+          "description": "Create sections.css with shared section layout (.section padding, .section-inner max-width + centering) and responsive breakpoint overrides for all 5 breakpoints (480px, 768px, 1024px, 1440px). Mobile-first with min-width queries.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/styles/sections.css"
+          ],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'min-width' website/mdvdb/src/styles/sections.css && grep -c 'content-width' website/mdvdb/src/styles/sections.css && echo 'PASS'",
+            "expected": "Sections CSS contains min-width media queries and content-width references"
+          },
+          "status": "completed",
+          "notes": "Created sections.css with mobile-first .section/.section-inner layout and min-width media queries for all 5 breakpoints (480px, 768px, 1024px, 1440px). Verification passed.",
+          "updated_at": "2026-03-16T20:00:32.509713+00:00"
+        }
+      ]
+    },
+    {
+      "id": "phase-3-layout-components",
+      "name": "Layout & Reusable Components",
+      "type": "implementation",
+      "description": "Create the Base.astro layout (HTML shell, head, meta, OG, fonts, JSON-LD) and 6 reusable Astro components used across multiple sections. These are the building blocks for page sections.",
+      "depends_on": [
+        "phase-2-styles"
+      ],
+      "parallel_safe": true,
+      "subtasks": [
+        {
+          "id": "subtask-3-1",
+          "description": "Create Base.astro layout with HTML shell (<!DOCTYPE html>, <html lang='en'>), <head> containing charset, viewport, title ('mdvdb -- Filesystem-Native Vector Database for Markdown'), meta description, Open Graph tags (og:title, og:description, og:image, og:type), favicon link, font preload <link> tags for both .woff2 files, CSS imports (tokens.css, global.css, synthwave.css, sections.css), and JSON-LD structured data for SoftwareApplication. <body> with <slot />.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/layouts/Base.astro"
+          ],
+          "patterns_from": [
+            "website/prds/phase-1-landing-page.md"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'og:title' website/mdvdb/src/layouts/Base.astro && grep -c 'SoftwareApplication' website/mdvdb/src/layouts/Base.astro && grep -c 'preload' website/mdvdb/src/layouts/Base.astro && echo 'PASS'",
+            "expected": "Base layout contains OG tags, JSON-LD structured data, and font preload links"
+          },
+          "status": "completed",
+          "notes": "Created Base.astro with HTML shell, charset/viewport meta, title, description, OG tags, Twitter Card tags, favicon link, font preloads for both .woff2 files, CSS imports, and JSON-LD SoftwareApplication structured data. Verification passed.",
+          "updated_at": "2026-03-16T20:02:05.422738+00:00"
+        },
+        {
+          "id": "subtask-3-2",
+          "description": "Create Terminal.astro component -- reusable macOS-style terminal window mockup. Props: title (default 'Terminal'), lines array (type: command|output|comment, text, optional color). Renders title bar with 3 colored dots (red #FF5F57, yellow #FFBD2E, green #27C93F), surface-dark body with monospace font. Command lines have '$ ' prefix in dim. Scoped styles.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/Terminal.astro"
+          ],
+          "patterns_from": [
+            "website/prds/phase-1-landing-page.md"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'FF5F57' website/mdvdb/src/components/Terminal.astro && grep -c 'FFBD2E' website/mdvdb/src/components/Terminal.astro && grep -c '27C93F' website/mdvdb/src/components/Terminal.astro && echo 'PASS'",
+            "expected": "Terminal component contains all 3 macOS window button colors"
+          },
+          "status": "completed",
+          "notes": "Created Terminal.astro with macOS-style title bar (3 colored dots), monospace body, support for command/output/comment line types. Verification passed.",
+          "updated_at": "2026-03-16T20:03:22.459973+00:00"
+        },
+        {
+          "id": "subtask-3-3",
+          "description": "Create Badge.astro (pill badge, JetBrains Mono, variant colors: primary/success/warning/info, 10% opacity bg + 1px border, border-radius-full) and Button.astro (primary: cyan bg + dark text + uppercase; secondary: transparent + cyan border; renders <a> if href provided, <button> otherwise; focus-visible ring). Both with scoped styles.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/Badge.astro",
+            "website/mdvdb/src/components/Button.astro"
+          ],
+          "patterns_from": [
+            "website/prds/phase-1-landing-page.md"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'variant' website/mdvdb/src/components/Badge.astro && grep -c 'focus-visible' website/mdvdb/src/components/Button.astro && echo 'PASS'",
+            "expected": "Badge has variant prop, Button has focus-visible styles"
+          },
+          "status": "completed",
+          "notes": "Created Badge.astro (pill badge, JetBrains Mono, 4 variant colors with 10% opacity bg + 1px border, border-radius-full) and Button.astro (primary/secondary variants, renders <a> or <button>, focus-visible ring). Verification passed.",
+          "updated_at": "2026-03-16T20:04:51.491623+00:00"
+        },
+        {
+          "id": "subtask-3-4",
+          "description": "Create SectionHeading.astro (renders <h2> + optional <p> subtitle, centered, with anchor id prop), SynthwaveGrid.astro (pure CSS perspective grid with cyan lines, horizon glow line, radial glow, grid-scroll animation with prefers-reduced-motion respect), and NeonDivider.astro (glowing horizontal rule with cyan gradient + glow-cyan box-shadow). All with scoped styles.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/SectionHeading.astro",
+            "website/mdvdb/src/components/SynthwaveGrid.astro",
+            "website/mdvdb/src/components/NeonDivider.astro"
+          ],
+          "patterns_from": [
+            "website/prds/phase-1-landing-page.md"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'perspective' website/mdvdb/src/components/SynthwaveGrid.astro && grep -c 'neon-divider' website/mdvdb/src/components/NeonDivider.astro && grep -c '<h2' website/mdvdb/src/components/SectionHeading.astro && echo 'PASS'",
+            "expected": "SynthwaveGrid has perspective, NeonDivider has neon-divider class, SectionHeading renders h2"
+          },
+          "status": "completed",
+          "notes": "Created SectionHeading.astro (h2 + optional subtitle, centered, anchor id), SynthwaveGrid.astro (CSS perspective grid with cyan lines, horizon glow, radial glow, grid-scroll animation, prefers-reduced-motion), and NeonDivider.astro (glowing hr with cyan gradient + box-shadow). All with scoped styles following existing component patterns.",
+          "updated_at": "2026-03-16T20:06:46.051883+00:00"
+        }
+      ]
+    },
+    {
+      "id": "phase-4-svelte-islands",
+      "name": "Interactive Svelte Islands",
+      "type": "implementation",
+      "description": "Create the two interactive Svelte 5 components that are the most complex parts of the site: ForceGraph.svelte (D3 force-directed graph) and CommandExplorer.svelte (CLI command explorer). These ship JS via client:visible hydration.",
+      "depends_on": [
+        "phase-2-styles"
+      ],
+      "parallel_safe": true,
+      "subtasks": [
+        {
+          "id": "subtask-4-1",
+          "description": "Create ForceGraph.svelte -- interactive D3 force-directed graph as a Svelte 5 component. Props: nodes (GraphNode[]), edges (GraphEdge[]), width, height, interactive, showLabels, glowEdges. SVG-based rendering. D3 force simulation: link distance=80, charge=-120, collide=radius+4, alphaDecay=0.05, velocityDecay=0.4, warmup=100 ticks. Node rendering: center nodes cyan with glow, cluster-colored nodes via 8-color palette, default gray. Edge rendering: outbound cyan, inbound red, bidirectional green, weak edges dashed (strength<0.3), width=0.5+strength*2. SVG neon glow filter (feGaussianBlur+feComposite). Drag interaction (D3 drag, reheat simulation). Hover highlight (connected edges + dim others). Labels (11px Space Grotesk, dark bg rect). prefers-reduced-motion: skip animation, show final state. Svelte 5 runes only ($state, $effect, $props, $derived). onDestroy to stop simulation.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/ForceGraph.svelte"
+          ],
+          "patterns_from": [
+            "app/src/renderer/components/LocalGraph.svelte",
+            "app/src/renderer/lib/edge-utils.ts"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'forceSimulation' website/mdvdb/src/components/ForceGraph.svelte && grep -c 'forceManyBody' website/mdvdb/src/components/ForceGraph.svelte && grep -c '\\$state' website/mdvdb/src/components/ForceGraph.svelte && grep -c 'neon-glow' website/mdvdb/src/components/ForceGraph.svelte && echo 'PASS'",
+            "expected": "ForceGraph contains D3 force simulation, Svelte 5 $state, and neon-glow SVG filter"
+          },
+          "status": "completed",
+          "notes": "Created ForceGraph.svelte with D3 force simulation, Svelte 5 runes, neon-glow SVG filter, drag interaction, hover highlighting, cluster colors, edge direction coloring, prefers-reduced-motion support.",
+          "updated_at": "2026-03-16T20:08:33.963610+00:00"
+        },
+        {
+          "id": "subtask-4-2",
+          "description": "Create CommandExplorer.svelte -- interactive CLI command explorer as a Svelte 5 component. Two-panel layout: left = scrollable command list, right = command detail view. Internal $state for selectedCommand (default: 'search'). Hardcoded typed array of all 16 CLI commands sourced from src/main.rs (search, ingest, status, schema, clusters, tree, get, watch, init, config, doctor, links, backlinks, orphans, edges, graph) with args, description, flags (name, short, type, description), and example (input + output). Left panel: command name (monospace, cyan on hover), one-line description (dim), active = primary-dim bg + left cyan border. Right panel: command signature, description, flags table, example terminal. ARIA listbox pattern (role=listbox, role=option, aria-selected, aria-live=polite). Keyboard navigation (arrow keys + Enter). Mobile: <select> dropdown via matchMedia. Scoped styles using CSS custom properties from tokens. Svelte 5 runes only.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/CommandExplorer.svelte"
+          ],
+          "patterns_from": [
+            "src/main.rs"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'role=\"listbox\"' website/mdvdb/src/components/CommandExplorer.svelte && grep -c '\\$state' website/mdvdb/src/components/CommandExplorer.svelte && grep -c 'search' website/mdvdb/src/components/CommandExplorer.svelte && grep -c 'orphans' website/mdvdb/src/components/CommandExplorer.svelte && echo 'PASS'",
+            "expected": "CommandExplorer has ARIA listbox, Svelte 5 $state, and contains search + orphans commands"
+          },
+          "status": "completed",
+          "notes": "Created CommandExplorer.svelte with all 16 CLI commands, two-panel layout, ARIA listbox, keyboard nav, mobile dropdown, Svelte 5 runes. Verification passed.",
+          "updated_at": "2026-03-16T20:10:52.664443+00:00"
+        }
+      ]
+    },
+    {
+      "id": "phase-5-sections",
+      "name": "Page Sections",
+      "type": "implementation",
+      "description": "Create all 6 page sections that compose the landing page. Each section is a self-contained Astro component using the reusable components from Phase 3 and Svelte islands from Phase 4.",
+      "depends_on": [
+        "phase-3-layout-components",
+        "phase-4-svelte-islands"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-5-1",
+          "description": "Create Hero.astro section -- full viewport height (100vh/100svh) with SynthwaveGrid backdrop. Two-column CSS grid on desktop (text left, visuals right), stacked on mobile. Left column: OPEN SOURCE pill badge, headline 'The Vector Database That Lives in Your Filesystem' (h1, white, 3.5rem, .neon-text), subtitle (dim, 1.25rem), CTA row (primary GET STARTED -> #how-to-use, secondary VIEW ON GITHUB -> external, inline cargo install mdvdb badge). Right column: Terminal mockup showing mdvdb search command with colored output, Tesseract placeholder div (hidden on mobile <768px). Optional low-opacity atmospheric ForceGraph (client:idle, hidden on mobile).",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/Hero.astro"
+          ],
+          "patterns_from": [
+            "website/mdvdb/src/components/Terminal.astro",
+            "website/mdvdb/src/components/SynthwaveGrid.astro",
+            "website/mdvdb/src/components/Badge.astro",
+            "website/mdvdb/src/components/Button.astro"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c '<h1' website/mdvdb/src/components/Hero.astro && grep -c 'SynthwaveGrid' website/mdvdb/src/components/Hero.astro && grep -c 'Terminal' website/mdvdb/src/components/Hero.astro && echo 'PASS'",
+            "expected": "Hero contains h1, SynthwaveGrid import, and Terminal import"
+          },
+          "status": "completed",
+          "notes": "Created Hero.astro with SynthwaveGrid backdrop, two-column grid (text+terminal), h1 headline with neon-text, OPEN SOURCE badge, CTA buttons, cargo install badge, terminal mockup. Responsive: stacks on mobile, hides visuals below 768px.",
+          "updated_at": "2026-03-16T20:12:24.158851+00:00"
+        },
+        {
+          "id": "subtask-5-2",
+          "description": "Create WhatIs.astro section -- SectionHeading with 'What is Markdown VDB?' + id='what-is'. Centered paragraph (max-width 800px). 3-column CSS grid of value prop cards (surface bg, 1px border, border-radius-lg): 1) Filesystem Native, 2) Zero Infrastructure, 3) Rust Performance. Each card: icon area (Unicode/SVG in cyan), h3 title, description paragraph. Cards stack vertically on mobile.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/WhatIs.astro"
+          ],
+          "patterns_from": [
+            "website/mdvdb/src/components/SectionHeading.astro"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'what-is' website/mdvdb/src/components/WhatIs.astro && grep -c 'Filesystem' website/mdvdb/src/components/WhatIs.astro && grep -c 'Infrastructure' website/mdvdb/src/components/WhatIs.astro && echo 'PASS'",
+            "expected": "WhatIs has anchor id, Filesystem Native card, Zero Infrastructure card"
+          },
+          "status": "completed",
+          "notes": "Created WhatIs.astro with SectionHeading, centered description, and 3-column CSS grid of value prop cards (Filesystem Native, Zero Infrastructure, Rust Performance). Cards stack on mobile. Verification passes.",
+          "updated_at": "2026-03-16T20:14:01.818337+00:00"
+        },
+        {
+          "id": "subtask-5-3",
+          "description": "Create HowToUse.astro section -- SectionHeading with id='how-to-use'. Two-column layout: left = 4 numbered steps (Install, Initialize, Ingest, Search) with cyan circle step numbers, bold title, description text. Right = Terminal mockup showing sequential commands + output. Responsive: stacks vertically on mobile, terminal below steps.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/HowToUse.astro"
+          ],
+          "patterns_from": [
+            "website/mdvdb/src/components/Terminal.astro"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'how-to-use' website/mdvdb/src/components/HowToUse.astro && grep -c 'Install' website/mdvdb/src/components/HowToUse.astro && grep -c 'Terminal' website/mdvdb/src/components/HowToUse.astro && echo 'PASS'",
+            "expected": "HowToUse has anchor id, Install step, and Terminal import"
+          },
+          "status": "completed"
+        },
+        {
+          "id": "subtask-5-4",
+          "description": "Create Features.astro section -- SectionHeading with id='features'. 2x2 CSS grid for cards: 1) Markdown First (code block showing frontmatter), 2) Hybrid Search (query flow diagram), 3) Agent Memory with Decay (inline SVG decay curve). Full-width GraphRAG showcase card below the grid spanning full content width: title, description about wikilinks/BFS/graph-boosted search, interactive ForceGraph Svelte island (client:visible) with 8-10 nodes (file-like labels), directional edges (cyan/red/green), cluster colors, glowEdges=true, ~350px height. Subtle cyan neon border-glow on card hover.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/Features.astro"
+          ],
+          "patterns_from": [
+            "website/mdvdb/src/components/ForceGraph.svelte"
+          ],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'features' website/mdvdb/src/components/Features.astro && grep -c 'ForceGraph' website/mdvdb/src/components/Features.astro && grep -c 'client:visible' website/mdvdb/src/components/Features.astro && echo 'PASS'",
+            "expected": "Features has anchor id, ForceGraph import, and client:visible directive"
+          },
+          "status": "completed",
+          "notes": "Created Features.astro with 2x2 grid (Markdown First, Hybrid Search, Agent Memory with Decay, Schema Inference) plus full-width GraphRAG showcase card with interactive ForceGraph Svelte island (client:visible), 10 nodes, directional edges, cluster colors, glowEdges, cyan neon hover glow.",
+          "updated_at": "2026-03-16T20:17:57.689122+00:00"
+        },
+        {
+          "id": "subtask-5-5",
+          "description": "Create Comparison.astro section -- SectionHeading with id='comparison'. Sub-section A: HTML comparison table (mdvdb vs MySQL+vec vs SQLite-vec vs Pinecone) with surface bg cells, header row, checkmarks (--color-success) and X marks (--color-error). 7 feature rows (Infrastructure, Markdown-native, Link graph, Hybrid search, Offline, File watching, Agent-ready). Sub-section B: Vertical CSS bar chart, 4 categories (Index Speed, Index Size, RAG Engine Speed, Accuracy) x 3 bars each (mdvdb cyan, SQLite-vec blue, MySQL+vec dim). Placeholder values with HTML comments. Legend row. Table scrolls horizontally on mobile. Bars stack vertically on mobile.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/Comparison.astro"
+          ],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'comparison' website/mdvdb/src/components/Comparison.astro && grep -c 'PLACEHOLDER' website/mdvdb/src/components/Comparison.astro && grep -c 'Pinecone' website/mdvdb/src/components/Comparison.astro && echo 'PASS'",
+            "expected": "Comparison has anchor id, PLACEHOLDER comments for benchmark data, and Pinecone competitor"
+          },
+          "status": "completed",
+          "notes": "Created Comparison.astro with feature table (7 rows, 4 competitors) and CSS bar chart (4 categories x 3 bars). Verification passed.",
+          "updated_at": "2026-03-16T20:20:34.974530+00:00"
+        },
+        {
+          "id": "subtask-5-6",
+          "description": "Create Footer.astro section -- mdvdb text (cyan, bold), links row (GitHub, Docs, Install, Tesseract), copyright line with current year. Surface bg, top border. Links styled as cyan text with underline on hover.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/components/Footer.astro"
+          ],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'GitHub' website/mdvdb/src/components/Footer.astro && grep -c 'footer' website/mdvdb/src/components/Footer.astro && echo 'PASS'",
+            "expected": "Footer contains GitHub link and footer element"
+          },
+          "status": "completed",
+          "notes": "Created Footer.astro with mdvdb brand text (cyan, bold, mono), links row (GitHub, Docs, Install, Tesseract), copyright line with dynamic year. Surface background, top border, cyan link styling with underline on hover.",
+          "updated_at": "2026-03-16T20:22:45.772590+00:00"
+        }
+      ]
+    },
+    {
+      "id": "phase-6-assembly",
+      "name": "Page Assembly & Static Assets",
+      "type": "implementation",
+      "description": "Assemble the index.astro page with all sections in order, add font files, create favicon and OG image placeholder. This produces the complete, buildable site.",
+      "depends_on": [
+        "phase-5-sections"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-6-1",
+          "description": "Download and add self-hosted variable font files: SpaceGrotesk-Variable.woff2 and JetBrainsMono-Variable.woff2 to public/fonts/. Both are OFL-licensed. Use wget/curl from Google Fonts API or fontsource CDN to get the .woff2 files.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/public/fonts/SpaceGrotesk-Variable.woff2",
+            "website/mdvdb/public/fonts/JetBrainsMono-Variable.woff2"
+          ],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "test -f website/mdvdb/public/fonts/SpaceGrotesk-Variable.woff2 && test -f website/mdvdb/public/fonts/JetBrainsMono-Variable.woff2 && echo 'PASS'",
+            "expected": "Both .woff2 font files exist in public/fonts/"
+          },
+          "status": "completed",
+          "notes": "Downloaded SpaceGrotesk-Variable.woff2 (22KB) and JetBrainsMono-Variable.woff2 (12KB) from Google Fonts gstatic CDN. Both verified as valid WOFF2 files.",
+          "updated_at": "2026-03-16T20:24:54.096612+00:00"
+        },
+        {
+          "id": "subtask-6-2",
+          "description": "Create favicon.svg (simple cyan icon in #00E5FF -- the mdvdb logo/icon as SVG) and a placeholder og-image.png (1200x630, can be a simple SVG-based placeholder or minimal dark bg image with text).",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/public/favicon.svg",
+            "website/mdvdb/public/og-image.png"
+          ],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "test -f website/mdvdb/public/favicon.svg && test -f website/mdvdb/public/og-image.png && echo 'PASS'",
+            "expected": "favicon.svg and og-image.png exist in public/"
+          },
+          "status": "completed",
+          "notes": "Created favicon.svg (cyan V-shape icon on dark bg) and og-image.png (1200x630 dark image with cyan accents).",
+          "updated_at": "2026-03-16T20:26:15.602213+00:00"
+        },
+        {
+          "id": "subtask-6-3",
+          "description": "Assemble index.astro page. Import Base layout + all section components. Render in order: Hero, NeonDivider, WhatIs, NeonDivider, HowToUse, NeonDivider, Features, NeonDivider, CommandExplorer section wrapper (with client:visible), NeonDivider, Comparison, NeonDivider, Footer. Each major section wrapped in <section> with appropriate id for anchor navigation. CommandExplorer gets a section wrapper with SectionHeading (title='CLI Commands', id='cli').",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [
+            "website/mdvdb/src/pages/index.astro"
+          ],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "grep -c 'Hero' website/mdvdb/src/pages/index.astro && grep -c 'NeonDivider' website/mdvdb/src/pages/index.astro && grep -c 'Footer' website/mdvdb/src/pages/index.astro && grep -c 'CommandExplorer' website/mdvdb/src/pages/index.astro && echo 'PASS'",
+            "expected": "index.astro imports Hero, NeonDivider, Footer, and CommandExplorer"
+          },
+          "status": "completed",
+          "notes": "Assembled index.astro with Base layout, all section components, NeonDivider separators, anchor IDs, and CommandExplorer with client:visible and SectionHeading wrapper.",
+          "updated_at": "2026-03-16T20:27:19.131697+00:00"
+        }
+      ]
+    },
+    {
+      "id": "phase-7-verification",
+      "name": "Build Verification & Polish",
+      "type": "integration",
+      "description": "Verify the complete site builds successfully, check for common issues, ensure accessibility patterns are correct, and confirm the JS bundle stays within budget.",
+      "depends_on": [
+        "phase-6-assembly"
+      ],
+      "parallel_safe": false,
+      "subtasks": [
+        {
+          "id": "subtask-7-1",
+          "description": "Run full static build (npm run build) and verify: zero build errors, dist/ directory created with index.html, check that the HTML output contains all 7 sections in correct order, verify no pink/purple/magenta color values in any output CSS, verify only ForceGraph and CommandExplorer ship JS (check dist/ for JS files). Fix any build errors.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "cd website/mdvdb && npm run build && test -f dist/index.html && echo 'BUILD PASS'",
+            "expected": "Build succeeds with zero errors, dist/index.html exists"
+          },
+          "status": "completed",
+          "notes": "Build succeeds with zero errors. dist/index.html exists. All 7 sections in correct order (hero, what-is, how-to-use, features, cli, comparison, footer). No pink/purple/magenta in CSS. JS files are ForceGraph + CommandExplorer + Svelte runtime only.",
+          "updated_at": "2026-03-16T20:28:53.851430+00:00"
+        },
+        {
+          "id": "subtask-7-2",
+          "description": "Final quality checks: Verify single <h1> in output HTML. Verify <h2> per section with correct ids (what-is, how-to-use, features, cli, comparison). Verify all ARIA attributes on CommandExplorer (role=listbox, role=option, aria-selected). Verify focus-visible styles exist. Verify prefers-reduced-motion media query in output CSS. Verify no horizontal overflow issues in the CSS (no fixed widths exceeding viewport). Check JS bundle size in dist/ is reasonable (< 150KB before gzip). Fix any issues found.",
+          "service": "website-mdvdb",
+          "files_to_modify": [],
+          "files_to_create": [],
+          "patterns_from": [],
+          "verification": {
+            "type": "command",
+            "command": "cd website/mdvdb && npm run build 2>&1 | tail -5 && echo '---' && ls -la dist/ && echo 'VERIFY PASS'",
+            "expected": "Clean build output, dist/ contents show reasonable file sizes"
+          },
+          "status": "completed",
+          "notes": "All quality checks passed: single h1, correct h2 ids (what-is, how-to-use, features, cli, comparison), ARIA attributes (role=listbox, role=option x16, aria-selected), focus-visible styles, prefers-reduced-motion, no overflow issues, JS bundle 83KB < 150KB limit."
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total_phases": 7,
+    "total_subtasks": 22,
+    "services_involved": [
+      "website-mdvdb"
+    ],
+    "reference_services": [
+      "app",
+      "rust-cli"
+    ],
+    "estimated_files_to_create": 29,
+    "parallelism": {
+      "max_parallel_phases": 2,
+      "parallel_groups": [
+        {
+          "phases": [
+            "phase-3-layout-components",
+            "phase-4-svelte-islands"
+          ],
+          "reason": "Both depend only on phase-2-styles, modify completely different files (Astro components vs Svelte components)"
+        }
+      ],
+      "recommended_workers": 2,
+      "speedup_estimate": "1.3x faster than sequential (phases 3+4 run in parallel, rest sequential)"
+    },
+    "critical_path": "phase-1-scaffold -> phase-2-styles -> [phase-3 || phase-4] -> phase-5-sections -> phase-6-assembly -> phase-7-verification",
+    "startup_command": "source auto-claude/.venv/bin/activate && python auto-claude/run.py --spec 041 --parallel 2"
+  },
+  "verification_strategy": {
+    "risk_level": "medium",
+    "skip_validation": false,
+    "test_creation_phase": "post_implementation",
+    "test_types_required": [
+      "integration"
+    ],
+    "security_scan_required": false,
+    "staging_deployment_required": false,
+    "acceptance_criteria": [
+      "npm run build produces static site in dist/ with zero errors",
+      "Total JS shipped < 150KB gzipped",
+      "All 7 sections render in correct order with anchor IDs",
+      "Both Svelte islands (ForceGraph + CommandExplorer) are present in output",
+      "All 16 CLI commands present in CommandExplorer data",
+      "Design tokens match desktop app tokens.css exactly",
+      "No pink/purple/magenta in any CSS output -- cyan only synthwave",
+      "Single <h1>, <h2> per section with correct IDs",
+      "ARIA listbox pattern on CommandExplorer",
+      "prefers-reduced-motion media query present",
+      "focus-visible styles on all interactive elements",
+      "Grain texture overlay present (SVG data URI in CSS)",
+      "Fonts load with font-display: swap"
+    ],
+    "verification_steps": [
+      {
+        "name": "Static Build",
+        "command": "cd website/mdvdb && npm run build",
+        "expected_outcome": "Zero errors, dist/index.html created",
+        "type": "command",
+        "required": true,
+        "blocking": true
+      },
+      {
+        "name": "HTML Structure Check",
+        "command": "grep -c '<h1' website/mdvdb/dist/index.html && grep -c 'id=\"what-is\"' website/mdvdb/dist/index.html && grep -c 'id=\"features\"' website/mdvdb/dist/index.html",
+        "expected_outcome": "Single h1, section IDs present",
+        "type": "command",
+        "required": true,
+        "blocking": false
+      },
+      {
+        "name": "No Prohibited Colors",
+        "command": "! grep -ri 'magenta\\|#FF2D95\\|#B026FF\\|neon-pink\\|neon-purple' website/mdvdb/src/styles/",
+        "expected_outcome": "No matches found (exit 0 from negated grep)",
+        "type": "command",
+        "required": true,
+        "blocking": true
+      }
+    ],
+    "reasoning": "Medium risk greenfield static site. No security concerns (no user data, auth, or API keys). Validation focuses on build success, JS bundle size, accessibility patterns, and design fidelity to desktop app tokens. No unit tests needed since Astro components are declarative templates -- the build itself is the primary validation."
+  },
+  "qa_acceptance": {
+    "unit_tests": {
+      "required": false,
+      "commands": [],
+      "notes": "Astro static components are declarative HTML templates -- build success IS the test. Svelte islands are interactive but validated via build + manual interaction."
+    },
+    "integration_tests": {
+      "required": true,
+      "commands": [
+        "cd website/mdvdb && npm run build"
+      ],
+      "services_to_test": [
+        "website-mdvdb"
+      ]
+    },
+    "e2e_tests": {
+      "required": false,
+      "commands": [],
+      "notes": "Full e2e (Playwright) is out of scope for initial build. Manual browser verification covers interactive components."
+    },
+    "browser_verification": {
+      "required": true,
+      "pages": [
+        {
+          "url": "http://localhost:4321/",
+          "checks": [
+            "All 7 sections render in order",
+            "Synthwave grid visible in hero",
+            "Terminal mockups render with macOS chrome",
+            "ForceGraph is interactive (drag nodes)",
+            "CommandExplorer shows all 16 commands",
+            "NeonDividers glow between sections",
+            "No horizontal scroll on any viewport 320-1440px",
+            "Responsive layout stacks on mobile",
+            "No pink/purple/magenta anywhere"
+          ]
+        }
+      ]
+    },
+    "database_verification": {
+      "required": false
+    }
+  },
+  "qa_signoff": null,
+  "status": "human_review",
+  "planStatus": "review",
+  "xstateState": "human_review",
+  "executionPhase": "complete",
+  "updated_at": "2026-03-16T20:31:08.670Z",
+  "lastEvent": {
+    "eventId": "1f5cb28b-3ce3-4e04-a101-e28c418575db",
+    "sequence": 0,
+    "type": "PLANNING_COMPLETE",
+    "timestamp": "2026-03-16T19:51:34.156256+00:00"
+  },
+  "last_updated": "2026-03-16T20:28:53.851435+00:00",
+  "reviewReason": "completed"
+}
