@@ -1,13 +1,53 @@
 ---
+import Base from '../layouts/Base.astro';
+import Hero from '../components/Hero.astro';
+import NeonDivider from '../components/NeonDivider.astro';
+import WhatIs from '../components/WhatIs.astro';
+import HowToUse from '../components/HowToUse.astro';
+import Features from '../components/Features.astro';
+import CommandExplorer from '../components/CommandExplorer.svelte';
+import SectionHeading from '../components/SectionHeading.astro';
+import Comparison from '../components/Comparison.astro';
+import Footer from '../components/Footer.astro';
 ---
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Markdown VDB</title>
-  </head>
-  <body>
-    <h1>Markdown VDB</h1>
-    <p>A filesystem-native vector database for Markdown files.</p>
-  </body>
-</html>
+
+<Base>
+  <section id="hero">
+    <Hero />
+  </section>
+
+  <NeonDivider />
+
+  <section id="what-is">
+    <WhatIs />
+  </section>
+
+  <NeonDivider />
+
+  <section id="how-to-use">
+    <HowToUse />
+  </section>
+
+  <NeonDivider />
+
+  <section id="features">
+    <Features />
+  </section>
+
+  <NeonDivider />
+
+  <section id="cli">
+    <SectionHeading title="CLI Commands" id="cli" />
+    <CommandExplorer client:visible />
+  </section>
+
+  <NeonDivider />
+
+  <section id="comparison">
+    <Comparison />
+  </section>
+
+  <NeonDivider />
+
+  <Footer />
+</Base>
