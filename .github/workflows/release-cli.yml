@@ -11,23 +11,24 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
-            use_cross: false
           - target: x86_64-apple-darwin
             os: macos-latest
-            use_cross: false
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            use_cross: false
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
+            # cross container GCC lacks bfloat16/SVE — disable simsimd
+            no_simsimd: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            use_cross: false
+            # MSVC lacks MAP_FAILED + Sapphire FP16 intrinsics — disable simsimd
+            no_simsimd: true
 
     runs-on: ${{ matrix.os }}
 
@@ -46,10 +47,14 @@ jobs:
 
       - name: Build release binary
         run: |
+          BUILD_CMD="cargo"
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            BUILD_CMD="cross"
+          fi
+          if [ "${{ matrix.no_simsimd }}" = "true" ]; then
+            $BUILD_CMD build --release --target ${{ matrix.target }} --no-default-features
           else
-            cargo build --release --target ${{ matrix.target }}
+            $BUILD_CMD build --release --target ${{ matrix.target }}
           fi
         shell: bash
 
@@ -60,7 +65,6 @@ jobs:
           ARCHIVE=mdvdb-${VERSION}-${{ matrix.target }}.tar.gz
           tar -czf "$ARCHIVE" -C target/${{ matrix.target }}/release mdvdb
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-        shell: bash
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
