@@ -25,5 +25,5 @@ logs/security/
 /node_modules
 /.auto-claude
 
-# Marketint Repos
-/website/
+# Marketing Repos
+website/*

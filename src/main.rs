@@ -1,4 +1,5 @@
 mod format;
+mod update;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -398,6 +399,9 @@ fn parse_filter(s: &str) -> anyhow::Result<MetadataFilter> {
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Spawn background update check (non-blocking, never causes failures)
+    let update_handle = update::spawn_check();
+
     // Disable colors if --no-color flag, NO_COLOR env var, or JSON mode is active.
     if cli.no_color || std::env::var_os("NO_COLOR").is_some() {
         colored::control::set_override(false);
@@ -405,6 +409,10 @@ async fn run() -> anyhow::Result<()> {
 
     if cli.version {
         format::print_version();
+        // Show update notice on --version if available
+        if let Ok(Some(msg)) = update_handle.await {
+            eprintln!("{msg}");
+        }
         return Ok(());
     }
 
@@ -1182,6 +1190,11 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
             format::print_logo();
             println!("{}", "  Run `mdvdb --help` for usage information.".dimmed());
         }
+    }
+
+    // Show update notice after command output completes
+    if let Ok(Some(msg)) = update_handle.await {
+        eprintln!("{msg}");
     }
 
     Ok(())
