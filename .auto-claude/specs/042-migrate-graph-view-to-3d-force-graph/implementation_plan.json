@@ -254,8 +254,8 @@
             "expected": "TypeScript compiles cleanly"
           },
           "status": "completed",
-          "notes": "All HTML overlays were already ported in subtask 2-1 when the template was adapted from Canvas 2D to 3d-force-graph WebGL. Verified all overlays present: context menu (right-click with open/select items, positioned at clientX/clientY), legend panel (cluster items with color dots + member_count, folder items with click-to-highlight, edge type items with color lines + toggle filter, coloring mode cycle button, legend collapse toggle), level switcher tabs (Document/Chunk), path filter badge (with clear button), folder highlight badge (with clear button), graph notices (no links + performance warning >1000 nodes). All overlays positioned absolutely via z-index. Pointer-events correctly set: notices/tooltips/cluster labels have pointer-events: none, context menu and legend have default pointer-events. TypeScript compiles cleanly. No code changes needed.",
-          "updated_at": "2026-03-18T19:45:00.000Z"
+          "notes": "All HTML overlays were already ported in subtask 2-1 when the template was adapted from Canvas 2D to 3d-force-graph WebGL. Verified all overlays present: context menu (right-click with open/select items, positioned at clientX/clientY), legend panel (cluster items with color dots + member_count, folder items with click-to-highlight, edge type items with color lines + toggle filter, coloring mode cycle button, legend collapse toggle), level switcher tabs (Document/Chunk), path filter badge (with clear button), folder highlight badge (with clear button), graph notices (no links + performance warning >1000 nodes), node/edge tooltips, cluster labels. All overlays positioned absolutely via z-index. Pointer-events correctly set: notices/tooltips/cluster labels have pointer-events: none, context menu and legend have default pointer-events. TypeScript compiles cleanly. No code changes needed. Committed plan update as f62e27b.",
+          "updated_at": "2026-03-18T19:45:54.334204+00:00"
         },
         {
           "id": "subtask-4-2",
@@ -274,7 +274,9 @@
             "command": "cd app && npx tsc --noEmit 2>&1 | head -10",
             "expected": "TypeScript compiles cleanly"
           },
-          "status": "pending"
+          "status": "completed",
+          "notes": "Added camera utilities and performance safeguards to GraphView.svelte. Camera: zoomToFit(400, 50) already in feedData() on data change; added focusCameraOnNode() with smooth 1000ms cameraPosition transition on node select (positions camera proportional to node's distance from origin, lookAt node position). Performance safeguards via applyPerformanceSafeguards() called in feedData(): >500 nodes reduces nodeResolution to 6, disables linkDirectionalParticles, reduces cooldownTime to 3000ms; >2000 nodes additionally sets linkWidth(0) for thin lines, reduces nodeOpacity to 0.7, disables edge labels on hover; ≤500 nodes restores full quality (resolution 12, particles, labels). WebGL detection: checkWebGLSupport() tests for WebGL2/WebGL1 context before graph init, sets webglSupported=false and shows error notice if missing. Empty graph handling: shows 'No files indexed' message when no nodes (no graph initialization). Loading/error states: spinning loader during fetch, error with retry button (already ported). Performance notices updated: >500 shows \"Some effects disabled\", >2000 shows \"Visual quality reduced\". Added graph-empty-hint CSS class for WebGL error explanation text. TypeScript compiles cleanly. All 96 graph-related tests pass. Committed as 19003ff.",
+          "updated_at": "2026-03-18T19:51:20.904150+00:00"
         },
         {
           "id": "subtask-4-3",
@@ -471,12 +473,12 @@
   "planStatus": "in_progress",
   "xstateState": "coding",
   "executionPhase": "coding",
-  "updated_at": "2026-03-18T19:44:57.638Z",
+  "updated_at": "2026-03-18T19:48:17.639Z",
   "lastEvent": {
     "eventId": "a760ff86-3693-4955-a7a1-6262e91ebd72",
     "sequence": 0,
     "type": "PLANNING_COMPLETE",
     "timestamp": "2026-03-18T18:25:10.243750+00:00"
   },
-  "last_updated": "2026-03-18T19:42:11.222191+00:00"
+  "last_updated": "2026-03-18T19:51:20.904160+00:00"
 }

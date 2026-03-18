@@ -220,3 +220,45 @@ Session 5 (Subtask 4-1 — Port HTML Overlays):
 - Updated implementation_plan.json: subtask-4-1 status → completed
 
 === END SESSION 5 ===
+
+Session 6 (Subtask 4-2 — Camera Utilities & Performance Safeguards):
+- Added camera utilities to GraphView.svelte
+  - zoomToFit(400, 50) already called in feedData() via setTimeout (from subtask 2-1)
+  - Added focusCameraOnNode(): smooth 1000ms camera transition on node select
+    - Computes camera position proportional to node's distance from origin
+    - Uses graph.cameraPosition() with lookAt target and transition duration
+    - Called in graphSelectedNode subscription after finding ForceNode with position data
+- Added performance safeguards via applyPerformanceSafeguards()
+  - Called in feedData() after computing nodeCount, before configureForces()
+  - Large graphs (>500 nodes):
+    - nodeResolution reduced from 12 to 6 (fewer sphere polygons)
+    - linkDirectionalParticles disabled (set to 0)
+    - cooldownTime reduced from 5000ms to 3000ms
+    - Keeps normal link width and opacity
+    - Keeps edge labels on hover
+  - Very large graphs (>2000 nodes):
+    - All large graph safeguards plus:
+    - linkWidth set to 0 (thin hairline links)
+    - nodeOpacity reduced from 0.9 to 0.7
+    - Edge labels disabled (linkLabel returns empty string)
+  - Normal graphs (≤500 nodes):
+    - Full quality restored: resolution 12, particles active, labels active
+    - Properly restores accessors for linkWidth, linkDirectionalParticles, linkLabel
+- Added WebGL detection
+  - checkWebGLSupport() attempts WebGL2 then WebGL1 context creation
+  - Called at start of onMount before graph initialization
+  - Sets webglSupported=false if neither context available
+  - Template shows error notice: "WebGL is not supported" with explanation hint
+- Empty graph handling verified (already present): "No files indexed" message
+- Loading/error states verified (already present): spinning loader, error with retry
+- Updated performance notice template:
+  - >2000 nodes: "Very large graph (N nodes). Visual quality reduced for performance."
+  - >500 nodes: "Large graph (N nodes). Some effects disabled for performance."
+- Added CSS: .graph-empty-hint for WebGL error explanation text
+- New state: webglSupported ($state(true))
+- Verification:
+  - TypeScript compiles cleanly (npx tsc --noEmit — no errors)
+  - All 96 graph-related tests pass (edge-utils: 35, graph-3d-bridge: 61)
+- Committed as 19003ff
+
+=== END SESSION 6 ===
