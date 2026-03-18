@@ -21,7 +21,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pulldown-cmark = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-usearch = "2"
+usearch = { version = "2", default-features = false, features = ["fp16lib"] }
 rkyv = { version = "0.8", features = ["bytecheck"] }
 memmap2 = "0.9"
 notify = "7"
@@ -43,6 +43,10 @@ tantivy = "0.22"
 zstd = "0.13"
 semver = "1"
 # clap_complete = "4" # TODO: re-enable when available offline
+
+[features]
+default = ["simd"]
+simd = ["usearch/simsimd"]
 
 [dev-dependencies]
 tempfile = "3"

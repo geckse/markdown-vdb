@@ -23,12 +23,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
-            # Disable SVE intrinsics — arm_sve.h unavailable in cross container
-            extra_cflags: "-DSIMSIMD_TARGET_SVE=0 -DSIMSIMD_TARGET_SVE2=0 -DSIMSIMD_TARGET_SVE_I8=0 -DSIMSIMD_TARGET_SVE_F16=0 -DSIMSIMD_TARGET_SVE_BF16=0"
+            # cross container GCC lacks bfloat16/SVE — disable simsimd
+            no_simsimd: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            # MSVC lacks _mm512_reduce_add_ph (Sapphire Rapids FP16 intrinsic)
-            extra_cflags: "-DSIMSIMD_TARGET_SAPPHIRE=0 -DSIMSIMD_TARGET_GENOA=0 -DSIMSIMD_TARGET_TURIN=0"
+            # MSVC lacks MAP_FAILED + Sapphire FP16 intrinsics — disable simsimd
+            no_simsimd: true
 
     runs-on: ${{ matrix.os }}
 
@@ -47,17 +47,16 @@ jobs:
 
       - name: Build release binary
         run: |
+          BUILD_CMD="cargo"
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            BUILD_CMD="cross"
+          fi
+          if [ "${{ matrix.no_simsimd }}" = "true" ]; then
+            $BUILD_CMD build --release --target ${{ matrix.target }} --no-default-features
           else
-            cargo build --release --target ${{ matrix.target }}
+            $BUILD_CMD build --release --target ${{ matrix.target }}
           fi
         shell: bash
-        env:
-          CXXFLAGS: ${{ matrix.extra_cflags }}
-          CFLAGS: ${{ matrix.extra_cflags }}
-          CROSS_BUILD_CXXFLAGS: ${{ matrix.extra_cflags }}
-          CROSS_BUILD_CFLAGS: ${{ matrix.extra_cflags }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
