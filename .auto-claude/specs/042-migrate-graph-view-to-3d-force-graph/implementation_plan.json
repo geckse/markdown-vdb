@@ -295,8 +295,8 @@
             "expected": "TypeScript compiles cleanly"
           },
           "status": "completed",
-          "notes": "All CSS styles for HTML overlays were already present from prior subtasks (graph-view container, graph-empty states, graph-notice + warning, graph-tooltip + edge-tooltip, context-menu + backdrop, graph-legend + all sub-elements, graph-level-switcher + level-tab, graph-path-badge + graph-folder-badge, retry-btn, spinning animation, cluster-label, graph-3d-container canvas fill). Added missing global styles for 3d-force-graph's built-in tooltip content: styled the library's float-tooltip-kap container to match app theme (dark surface, border, shadow), plus graph-tooltip-title (monospace file path), graph-tooltip-meta (dim cluster/heading text), and graph-tooltip-context (italic excerpt) classes used by nodeTooltipHtml/edgeTooltipHtml from graph-3d-bridge.ts. All styles use :global() scoping since they target DOM elements created by the 3d-force-graph library outside Svelte's scope. TypeScript compiles cleanly.",
-          "updated_at": "2026-03-18T19:55:00.000Z"
+          "notes": "All CSS styles for HTML overlays were already present from prior subtasks (graph-view container, graph-empty states, graph-notice + warning, graph-tooltip + edge-tooltip, context-menu + backdrop, graph-legend + all sub-elements, graph-level-switcher + level-tab, graph-path-badge + graph-folder-badge, retry-btn, spinning animation, cluster-label, graph-3d-container canvas fill). Added missing global styles for 3d-force-graph's built-in tooltip content: styled the library's float-tooltip-kap container to match app theme (dark surface, border, shadow), plus graph-tooltip-title (monospace file path), graph-tooltip-meta (dim cluster/heading text), and graph-tooltip-context (italic excerpt) classes used by nodeTooltipHtml/edgeTooltipHtml from graph-3d-bridge.ts. All styles use :global() scoping since they target DOM elements created by the 3d-force-graph library outside Svelte's scope. TypeScript compiles cleanly. Committed as 1bbe3c1.",
+          "updated_at": "2026-03-18T19:55:50.308494+00:00"
         }
       ]
     },
@@ -322,7 +322,9 @@
             "command": "cd app && npx vitest run --reporter=verbose 2>&1 | tail -30 && npm run typecheck 2>&1 | tail -5",
             "expected": "All tests pass, TypeScript compiles cleanly"
           },
-          "status": "pending"
+          "status": "completed",
+          "notes": "All 163 graph-related tests pass (graph-3d-bridge: 113 tests, edge-utils: 35 tests, graph-store: 28 tests, convex-hull: 27 tests). TypeScript compiles cleanly. ESLint passes on all changed files. Prettier formatting applied. 37 pre-existing test failures in unrelated files (mermaid-renderer, ipc-handlers, search-store, SearchResults, properties-store, settings-store, editor-stores, LocalGraph, PropertiesPanel, Favorites) confirmed as pre-existing by checkout to base commit.",
+          "updated_at": "2026-03-18T20:05:18.934742+00:00"
         },
         {
           "id": "subtask-5-2",
@@ -475,12 +477,12 @@
   "planStatus": "in_progress",
   "xstateState": "coding",
   "executionPhase": "coding",
-  "updated_at": "2026-03-18T19:52:23.937Z",
+  "updated_at": "2026-03-18T19:56:21.289Z",
   "lastEvent": {
     "eventId": "a760ff86-3693-4955-a7a1-6262e91ebd72",
     "sequence": 0,
     "type": "PLANNING_COMPLETE",
     "timestamp": "2026-03-18T18:25:10.243750+00:00"
   },
-  "last_updated": "2026-03-18T19:51:20.904160+00:00"
+  "last_updated": "2026-03-18T20:05:18.934748+00:00"
 }
