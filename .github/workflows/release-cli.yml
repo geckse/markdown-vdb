@@ -23,12 +23,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
-            # cross container GCC lacks bfloat16/SVE — disable simsimd
             no_simsimd: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            # MSVC lacks MAP_FAILED + Sapphire FP16 intrinsics — disable simsimd
             no_simsimd: true
+            # Define MAP_FAILED — usearch C++ header uses it but doesn't guard for MSVC
+            extra_cxxflags: "/DMAP_FAILED=((void*)-1)"
 
     runs-on: ${{ matrix.os }}
 
@@ -57,6 +57,8 @@ jobs:
             $BUILD_CMD build --release --target ${{ matrix.target }}
           fi
         shell: bash
+        env:
+          CXXFLAGS: ${{ matrix.extra_cxxflags }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
