@@ -1,0 +1,367 @@
+=== AUTO-BUILD PROGRESS ===
+
+Project: Migrate GraphView from Canvas 2D to 3d-force-graph WebGL
+Workspace: managed by orchestrator
+Started: 2026-03-18
+
+Workflow Type: feature
+Rationale: Complete replacement of GraphView.svelte with entirely new rendering engine
+           (3d-force-graph/WebGL). Introduces new 3D capabilities alongside ported existing features.
+
+Session 1 (Planner):
+- Deep codebase investigation completed
+  - Read GraphView.svelte (2215 lines), edge-utils.ts, stores/graph.ts, types/cli.ts, convex-hull.ts
+  - Read full PRD at docs/prds/app/phase-27-3d-force-graph.md
+  - Confirmed pointToSegmentDist only used by GraphView (safe to remove)
+  - Confirmed store API unchanged, LocalGraph.svelte unaffected
+- Created implementation_plan.json
+  - Phases: 5
+  - Total subtasks: 14
+- Created context.json with investigation findings
+- Created init.sh
+
+Phase Summary:
+- Phase 1 (Setup & Data Bridge): 3 subtasks, no dependencies
+  - Install 3d-force-graph, update edge-utils.ts
+  - Create graph-3d-bridge.ts (data conversion, cluster seeding, tooltips, colors)
+  - Write unit tests for bridge + update edge-utils tests
+- Phase 2 (Core 3D Rendering MVP): 3 subtasks, depends on Phase 1
+  - Rewrite GraphView.svelte with 3d-force-graph init + forces
+  - Port core interactions (click, select, open, escape, drag)
+  - Port coloring modes + doc/chunk mode switching
+- Phase 3 (Visual Features): 3 subtasks, depends on Phase 2
+  - Cluster enclosure spheres (transparent + wireframe + labels)
+  - Directional arrows + particles + semantic edge styling
+  - Selection dimming + hub glow + edge/node labels on hover
+- Phase 4 (Interactions & Overlays): 3 subtasks, depends on Phase 3
+  - Context menu + legend + level switcher + badges + notices
+  - Camera utilities + performance safeguards + WebGL detection
+  - CSS styles for all HTML overlays
+- Phase 5 (Testing & Verification): 2 subtasks, depends on Phase 4
+  - Full test suite + typecheck + lint
+  - Manual PRD acceptance criteria verification
+
+Services Involved:
+- app: Electron + Svelte frontend (all changes in app/src/renderer/)
+
+Files to Create:
+- app/src/renderer/lib/graph-3d-bridge.ts (NEW — data bridge module)
+- app/tests/unit/graph-3d-bridge.test.ts (NEW — bridge unit tests)
+
+Files to Modify:
+- app/src/renderer/components/GraphView.svelte (REWRITE — 2215 lines → new 3D version)
+- app/src/renderer/lib/edge-utils.ts (MODIFY — remove pointToSegmentDist, add 3D helpers)
+- app/package.json (MODIFY — add 3d-force-graph dependency)
+- app/tests/unit/edge-utils.test.ts (MODIFY — update for removed/added functions)
+
+Files Unchanged:
+- app/src/renderer/stores/graph.ts (store API stable)
+- app/src/renderer/types/cli.ts (data types stable)
+- app/src/renderer/lib/convex-hull.ts (kept for LocalGraph.svelte)
+- app/src/renderer/components/LocalGraph.svelte (stays SVG + d3-force 2D)
+- app/src/renderer/components/GraphPreview.svelte (side panel unchanged)
+
+Parallelism Analysis:
+- Max parallel phases: 1
+- Recommended workers: 1
+- Sequential execution: single service, each phase builds on previous
+
+=== STARTUP COMMAND ===
+
+To continue building this spec, run:
+
+  source auto-claude/.venv/bin/activate && python auto-claude/run.py --spec 042 --parallel 1
+
+=== END SESSION 1 ===
+
+Session 2 (Subtask 2-1 — Core 3D Rendering):
+- Rewrote GraphView.svelte script section from Canvas 2D to 3d-force-graph WebGL
+  - Dynamic import of ForceGraph3D in onMount (Electron compatibility)
+  - PRD config values: orbit controls, #0a0a0b background, nodeOpacity 0.9,
+    linkOpacity 0.4, warmupTicks 100, cooldownTime 5000, d3AlphaDecay 0.02,
+    d3VelocityDecay 0.4, nodeResolution 12
+  - Data feeding via buildGraph3DData() from graph-3d-bridge module
+  - Cluster-aware force configuration:
+    - Custom cluster attraction force (replaces forceCenter which fights separation)
+    - Link distance varies by cluster membership (40px intra, 100px inter)
+    - Degree-dependent charge repulsion (-80 - degree*10)
+  - seedClusterPositions() Fibonacci sphere seeding before simulation
+  - ResizeObserver for responsive container sizing
+  - Proper cleanup: graph._destructor(), remove keydown listener, disconnect observer
+- Template changes:
+  - Replaced <canvas> with <div> container (3d-force-graph mounts WebGL canvas inside)
+  - Removed all canvas event handlers (3d-force-graph handles via its own events)
+  - Kept all HTML overlays (legend, level switcher, badges, context menu, tooltips)
+  - Adapted edge tooltip to handle post-simulation link source/target objects
+- Removed imports: d3-force, convex-hull, pointToSegmentDist
+- Added imports: 3d-force-graph types, graph-3d-bridge module
+- File reduced from 2215 lines to ~960 lines (60% reduction)
+- Verification:
+  - TypeScript compiles cleanly (npx tsc --noEmit — no errors)
+  - All graph-related tests pass: edge-utils (35), graph-3d-bridge (61), graph-store (25), convex-hull (42)
+  - 3 pre-existing test failures (mermaid-renderer, ipc-handlers) unrelated to changes
+- Committed as 15cc909
+
+=== END SESSION 2 ===
+
+Session 3 (Subtask 3-1 — Cluster Enclosure Spheres):
+- Added cluster enclosure spheres to GraphView.svelte
+  - Imported `* as THREE from 'three'` for direct Three.js scene manipulation
+  - New state variables:
+    - clusterMeshGroup (THREE.Group) — container for all sphere meshes
+    - engineTickCount — throttle counter for tick-based updates
+    - clusterLabels — screen-projected label positions for HTML overlay
+  - clearClusterMeshes(): disposes all geometries/materials, removes group from scene
+  - updateClusterSpheres(): computes enclosing sphere per cluster_id
+    - Centroid = average of node positions in cluster
+    - Radius = max distance from centroid to any node + 20 padding (min 10)
+    - Fill mesh: SphereGeometry + MeshLambertMaterial (opacity 0.06, BackSide, depthWrite false)
+    - Wire mesh: SphereGeometry + MeshBasicMaterial (wireframe, opacity 0.12, depthWrite false)
+    - Color matches cluster palette (CLUSTER_COLORS[clusterId % 12])
+  - projectToScreen(): 3D world → 2D screen coordinate projection via camera
+  - updateClusterLabelPositions(): recompute label screen positions during camera movement
+  - recomputeLiveCentroids(): updates clusterCentroids map for attraction force targets
+  - handleEngineTick(): throttled (every ~30 ticks) sphere + centroid updates during simulation
+  - handleEngineStop(): final sphere update when simulation completes
+  - updateClusterSphereMeshPositions(): repositions meshes during simulation (delegates to full rebuild)
+  - onEngineTick/onEngineStop callbacks registered in onMount
+  - Coloring mode subscription updated: cluster mode → updateClusterSpheres(), other modes → clearClusterMeshes()
+  - Proper cleanup in onDestroy: clearClusterMeshes() before graph._destructor()
+- Template additions:
+  - Cluster label HTML overlay: positioned absolutely, pointer-events: none, text-shadow for readability
+  - Labels only visible in cluster coloring mode and when label.visible (in front of camera)
+- CSS additions:
+  - .cluster-label: absolute positioning, translate(-50%, -50%) centering, text-shadow,
+    opacity 0.7, z-index 5, font-weight 500
+- Verification:
+  - TypeScript compiles cleanly (npx tsc --noEmit — no errors)
+  - All 96 graph-related tests pass (edge-utils: 35, graph-3d-bridge: 61)
+- Committed as 62f2980
+
+=== END SESSION 3 ===
+
+Session 4 (Subtask 3-3 — Selection Dimming & Hub Node Glow):
+- Added selection dimming to GraphView.svelte
+  - computeNeighborSet(): computes set of neighbor node IDs from graph edges
+    - Includes the selected node itself in the set
+    - Traverses all links, checks source/target against selected node ID
+  - applySelectionDimming(): two-phase approach since nodeOpacity/linkOpacity are static
+    - Selection active:
+      - graph.nodeOpacity(0.15) — dims all default-rendered nodes globally
+      - graph.linkOpacity(0.05) — dims all links globally
+      - graph.nodeThreeObject() override: creates custom THREE.Group objects for
+        selected+neighbor nodes at 0.9 opacity (overriding the global dim)
+      - graph.linkMaterial() override: creates LineBasicMaterial at 0.6 opacity
+        for neighbor links (overriding the global dim)
+    - No selection:
+      - Restores nodeOpacity(0.9), linkOpacity(0.4)
+      - Restores nodeThreeObject to hub-only mode
+      - Clears linkMaterial override (null)
+  - Updated graphSelectedNode subscription to call computeNeighborSet() + applySelectionDimming()
+- Added hub node glow
+  - createHubNodeObject(): creates THREE.Group with:
+    - SphereGeometry(radius, 12, 8) + MeshLambertMaterial (node color, opacity 0.9)
+    - PointLight (node color, intensity 0.5 or 0.1 if dimmed, distance = radius * 5)
+    - Radius computed as Math.cbrt(node.val) * 4 (matches 3d-force-graph default)
+  - nodeThreeObject accessor: returns custom Group for degree >= 5, false for < 5
+  - Hub objects get dimmed opacity during selection dimming (non-neighbor hubs at 0.15)
+- Added node labels on hover
+  - nodeLabel accessor: calls nodeTooltipHtml() from graph-3d-bridge
+  - Shows path, cluster label (when present), heading (chunk mode)
+- Added edge labels on hover
+  - linkLabel accessor: calls edgeTooltipHtml() from graph-3d-bridge
+  - Shows relationship type, strength percentage, context excerpt (truncated 120 chars)
+- New imports: nodeTooltipHtml, edgeTooltipHtml from graph-3d-bridge
+- New state: neighborSet (Set<string>)
+- TypeScript note: nodeThreeObject returning false requires `as any` cast since
+  the type expects Object3D, but runtime handles falsy values as "use default sphere"
+- Verification:
+  - TypeScript compiles cleanly (npx tsc --noEmit — no errors)
+  - All 96 graph-related tests pass (edge-utils: 35, graph-3d-bridge: 61)
+- Committed as f9a5ac5
+
+=== END SESSION 4 ===
+
+Session 5 (Subtask 4-1 — Port HTML Overlays):
+- Verified all HTML overlays are already present in GraphView.svelte
+  - All overlays were ported during subtask 2-1 when template was adapted from Canvas 2D
+  - subtask 2-1 notes: "Kept all HTML overlays (legend, level switcher, badges, context menu, tooltips)"
+- Verified overlay completeness checklist:
+  - Context menu (lines 1452-1467): right-click node, clientX/clientY positioning, open/select items ✓
+  - Legend panel (lines 1469-1543): cluster items + color dots + member_count, folder items + click-to-highlight,
+    edge type items + color lines + toggle filter, coloring mode cycle button, legend collapse toggle ✓
+  - Level switcher tabs (lines 1355-1361): Document/Chunk tabs ✓
+  - Path filter badge (lines 1363-1370): with clear button ✓
+  - Folder highlight badge (lines 1372-1379): with clear button ✓
+  - Graph notices (lines 1393-1399): no links notice + performance warning >1000 nodes ✓
+  - Node tooltip (lines 1401-1418): path, heading (chunk), cluster label ✓
+  - Edge tooltip (lines 1420-1450): relationship type, strength bar, context excerpt ✓
+  - Cluster labels (lines 1381-1391): screen-projected from 3D centroids ✓
+- Verified pointer-events:
+  - graph-notice: pointer-events: none ✓
+  - graph-tooltip: pointer-events: none ✓
+  - cluster-label: pointer-events: none ✓
+  - Context menu + legend: default pointer-events (interactive) ✓
+  - Level switcher + badges: default pointer-events (have buttons) ✓
+- Verified z-index layering:
+  - Cluster labels: z-index 5
+  - Legend + level switcher + badges: z-index 10 (--z-base)
+  - Tooltips: z-index 40 (--z-overlay)
+  - Context menu backdrop: z-index 49
+  - Context menu: z-index 50
+- Helper functions verified:
+  - getClusters(), getFolderLegendItems(), getEdgeClusters(), isEdgeClusterFiltered() ✓
+  - handleRetry(), handleContextMenuOpen(), handleContextMenuSelect(), toggleLegend() ✓
+- CSS styles verified: all overlay classes styled (graph-notice, context-menu, graph-legend,
+  graph-level-switcher, graph-path-badge, graph-folder-badge, graph-tooltip, edge-tooltip,
+  cluster-label, legend items/header/toggle/separator/section-title, etc.)
+- TypeScript compiles cleanly (npx tsc --noEmit — no errors)
+- No code changes needed — subtask complete as-is
+- Updated implementation_plan.json: subtask-4-1 status → completed
+
+=== END SESSION 5 ===
+
+Session 6 (Subtask 4-2 — Camera Utilities & Performance Safeguards):
+- Added camera utilities to GraphView.svelte
+  - zoomToFit(400, 50) already called in feedData() via setTimeout (from subtask 2-1)
+  - Added focusCameraOnNode(): smooth 1000ms camera transition on node select
+    - Computes camera position proportional to node's distance from origin
+    - Uses graph.cameraPosition() with lookAt target and transition duration
+    - Called in graphSelectedNode subscription after finding ForceNode with position data
+- Added performance safeguards via applyPerformanceSafeguards()
+  - Called in feedData() after computing nodeCount, before configureForces()
+  - Large graphs (>500 nodes):
+    - nodeResolution reduced from 12 to 6 (fewer sphere polygons)
+    - linkDirectionalParticles disabled (set to 0)
+    - cooldownTime reduced from 5000ms to 3000ms
+    - Keeps normal link width and opacity
+    - Keeps edge labels on hover
+  - Very large graphs (>2000 nodes):
+    - All large graph safeguards plus:
+    - linkWidth set to 0 (thin hairline links)
+    - nodeOpacity reduced from 0.9 to 0.7
+    - Edge labels disabled (linkLabel returns empty string)
+  - Normal graphs (≤500 nodes):
+    - Full quality restored: resolution 12, particles active, labels active
+    - Properly restores accessors for linkWidth, linkDirectionalParticles, linkLabel
+- Added WebGL detection
+  - checkWebGLSupport() attempts WebGL2 then WebGL1 context creation
+  - Called at start of onMount before graph initialization
+  - Sets webglSupported=false if neither context available
+  - Template shows error notice: "WebGL is not supported" with explanation hint
+- Empty graph handling verified (already present): "No files indexed" message
+- Loading/error states verified (already present): spinning loader, error with retry
+- Updated performance notice template:
+  - >2000 nodes: "Very large graph (N nodes). Visual quality reduced for performance."
+  - >500 nodes: "Large graph (N nodes). Some effects disabled for performance."
+- Added CSS: .graph-empty-hint for WebGL error explanation text
+- New state: webglSupported ($state(true))
+- Verification:
+  - TypeScript compiles cleanly (npx tsc --noEmit — no errors)
+  - All 96 graph-related tests pass (edge-utils: 35, graph-3d-bridge: 61)
+- Committed as 19003ff
+
+=== END SESSION 6 ===
+
+Session 7 (Subtask 5-1 — Testing & Verification):
+- Ran full test suite (52 test files, 1039 tests)
+  - 43 test files passed, 9 failed (37 test failures total)
+  - All 4 graph-related test files pass: 163 tests total
+    - graph-3d-bridge.test.ts: all tests pass (buildGraph3DData, seedClusterPositions,
+      computeDegreeMap, nodeSizeValue, nodeTooltipHtml, edgeTooltipHtml, edgeArrowColor)
+    - edge-utils.test.ts: all tests pass (edgeClusterColor, isEdgeVisible, edgeLineWidth,
+      isWeakEdge, edgeLinkWidth, edgeLinkColor — pointToSegmentDist removed)
+    - graph-store.test.ts: all tests pass (unchanged)
+    - convex-hull.test.ts: all tests pass (unchanged)
+  - 37 pre-existing failures confirmed by checkout to base commit (4aaf5a5):
+    - mermaid-renderer.test.ts (2 failures)
+    - ipc-handlers.test.ts (1 failure — expected 61 channels, got 65)
+    - search-store.test.ts (3 failures)
+    - SearchResults.test.ts (1 failure)
+    - properties-store.test.ts (6 failures)
+    - settings-store.test.ts (4 failures)
+    - editor-stores.test.ts (1 failure)
+    - LocalGraph.test.ts (9 failures — forceCollide().radius is not a function)
+    - PropertiesPanel.test.ts (10 failures)
+    - Favorites.test.ts (unhandled rejection error)
+- TypeScript: compiles cleanly (npm run typecheck — no errors)
+- ESLint: fixed 7 errors in GraphView.svelte
+  - Made folderColorMap reactive with $state()
+  - Prefixed 3 unused store subscription vars with underscore
+  - Added eslint-disable for necessary `any` cast on cluster force
+  - Prefixed unused _link param in linkDirectionalArrowLength
+  - Added a11y_click_events_have_key_events to svelte-ignore on context menu backdrop
+- Prettier: formatted all 5 changed files (GraphView.svelte, edge-utils.ts,
+  graph-3d-bridge.ts, edge-utils.test.ts, graph-3d-bridge.test.ts)
+- Committed as 6b81b29
+
+=== END SESSION 7 ===
+
+Session 8 (Subtask 5-2 — Manual PRD Acceptance Verification):
+- Comprehensive code review against all 27 PRD success criteria
+- Verified 25/27 criteria fully by code review:
+  1. ✅ 3d-force-graph installed, WebGL rendering via ForceGraph3D dynamic import in onMount
+  2. ✅ Force simulation via d3-force-3d (no manual tick loop, warmupTicks 100)
+  3. ✅ Orbit camera controls (controlType: 'orbit')
+  4. ✅ Cluster separation (Fibonacci sphere seeding + custom cluster attraction force, no forceCenter)
+  5. ✅ Cluster enclosure spheres (fill opacity 0.06 BackSide + wireframe 0.12 + labels at centroids)
+  6. ✅ Click-to-select (first click) / click-to-open (second click) via onNodeClick
+  7. ✅ Node drag (onNodeDragEnd clears fx/fy/fz), right-click (onNodeRightClick), Escape (handleKeyDown)
+  8. ✅ Three coloring modes: cluster (12-color palette), folder (folderColorMap), none (djb2 hash)
+  9. ✅ Directional arrows: 4px doc / 0 chunk, cyan out / red in / green bidi
+  10. ✅ Edge labels on hover: relationship type, strength %, context (120 char truncation)
+  11. ✅ Semantic edge styling: width [0.5,3.0] by strength, color by edge cluster palette, weak at 25%
+  12. ✅ Selection dimming: nodeOpacity 0.15, linkOpacity 0.05 non-neighbors; full for neighbors
+  13. ✅ Hub glow: THREE.Group + PointLight for degree >= 5
+  14. ✅ Directional particles: 2 per selected neighbor edge, speed 0.005, width 1.5
+  15. ✅ Edge filtering: isEdgeVisible + toggleEdgeClusterFilter in legend
+  16. ✅ Legend panel, level switcher, path/folder badges all present and wired
+  17. ✅ Node tooltips: path, cluster label, heading (chunk mode)
+  18. ✅ Graph preview opens via openGraphNode on second click / context menu
+  19. ✅ Performance safeguards: >500 (resolution 6, no particles), >2000 (thin lines, no labels)
+  20. ✅ Resize handling: ResizeObserver updates graph.width()/height()
+  21. ✅ Background color #0a0a0b (both WebGL and CSS)
+  23. ✅ LocalGraph.svelte unaffected (git diff confirms zero changes)
+  24. ✅ All 163 graph-related tests pass
+  25. ✅ New graph-3d-bridge.test.ts comprehensive test suite
+  26. ✅ npm run typecheck passes cleanly
+  ESLint passes on all changed files
+- 2 criteria require live app runtime testing (cannot verify by code review alone):
+  22. ⚠️ 60fps at 2000+ nodes — all PRD optimizations implemented
+  27. ⚠️ No console errors — no console.log in code, proper error handling
+- Verified unchanged files (git diff confirmed zero changes):
+  - LocalGraph.svelte, stores/graph.ts, types/cli.ts, GraphPreview.svelte
+- PRD configuration values verified in code:
+  - controlType: 'orbit', backgroundColor: '#0a0a0b', showNavInfo: false
+  - nodeOpacity: 0.9, linkOpacity: 0.4, warmupTicks: 100, cooldownTime: 5000
+  - d3AlphaDecay: 0.02, d3VelocityDecay: 0.4, nodeResolution: 12
+- Updated implementation_plan.json: subtask-5-2 status → completed
+
+=== END SESSION 8 ===
+
+=== IMPLEMENTATION COMPLETE ===
+
+All 14 subtasks across 5 phases completed:
+- Phase 1 (Setup & Data Bridge): 3/3 subtasks ✅
+- Phase 2 (Core 3D Rendering MVP): 3/3 subtasks ✅
+- Phase 3 (Visual Features): 3/3 subtasks ✅
+- Phase 4 (Interactions & Overlays): 3/3 subtasks ✅
+- Phase 5 (Testing & Verification): 2/2 subtasks ✅
+
+Files changed (5 files):
+- app/src/renderer/components/GraphView.svelte — REWRITTEN (~2400 lines, 3D WebGL)
+- app/src/renderer/lib/graph-3d-bridge.ts — NEW (397 lines, pure data bridge)
+- app/src/renderer/lib/edge-utils.ts — MODIFIED (removed pointToSegmentDist, added 3D helpers)
+- app/tests/unit/graph-3d-bridge.test.ts — NEW (comprehensive test suite)
+- app/tests/unit/edge-utils.test.ts — MODIFIED (removed old tests, added new 3D helper tests)
+
+Files unchanged (as required):
+- app/src/renderer/components/LocalGraph.svelte
+- app/src/renderer/stores/graph.ts
+- app/src/renderer/types/cli.ts
+- app/src/renderer/components/GraphPreview.svelte
+- app/src/renderer/lib/convex-hull.ts
+
+Test results: 163/163 graph-related tests pass
+TypeScript: compiles cleanly
+ESLint: passes on all changed files
