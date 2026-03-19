@@ -1,0 +1,156 @@
+=== AUTO-BUILD PROGRESS ===
+
+Project: Create Comprehensive CLI Documentation Structure
+Workspace: /Users/gecko/Documents/GitHub/markdown-vdb
+Started: 2026-03-19
+
+Workflow Type: feature
+Rationale: New documentation suite created from scratch under docs/cli/. No existing code modified. CLI source code is the single source of truth.
+
+Session 1 (Planner):
+- Created implementation_plan.json
+- Phases: 8
+- Total subtasks: 18
+- Created init.sh
+- Updated context.json with patterns and CLI inventory
+
+Phase Summary:
+- Phase 1 (Scaffold & Navigation Index): 1 subtask, depends on nothing
+- Phase 2 (Foundation Pages): 4 subtasks, depends on phase-1
+- Phase 3 (Core Command References): 3 subtasks, depends on phase-2
+- Phase 4 (Data & Utility Command References): 2 subtasks, depends on phase-2
+- Phase 5 (Graph & Link Command References): 2 subtasks, depends on phase-2
+- Phase 6 (Concept Documentation): 3 subtasks, depends on phase-2
+- Phase 7 (JSON Output Reference): 1 subtask, depends on phases 3, 4, 5
+- Phase 8 (Cross-linking & Final Polish): 2 subtasks, depends on phases 3-7 (all content complete)
+
+Services Involved:
+- documentation: All 31 new Markdown files under docs/cli/
+
+Files to Create (31 total):
+  Navigation:
+  - docs/cli/index.md
+  - docs/cli/commands/index.md
+  Foundation:
+  - docs/cli/installation.md
+  - docs/cli/quickstart.md
+  - docs/cli/configuration.md
+  - docs/cli/shell-completions.md
+  Commands (16):
+  - docs/cli/commands/search.md
+  - docs/cli/commands/ingest.md
+  - docs/cli/commands/status.md
+  - docs/cli/commands/schema.md
+  - docs/cli/commands/clusters.md
+  - docs/cli/commands/tree.md
+  - docs/cli/commands/get.md
+  - docs/cli/commands/watch.md
+  - docs/cli/commands/init.md
+  - docs/cli/commands/config.md
+  - docs/cli/commands/doctor.md
+  - docs/cli/commands/links.md
+  - docs/cli/commands/backlinks.md
+  - docs/cli/commands/orphans.md
+  - docs/cli/commands/edges.md
+  - docs/cli/commands/graph.md
+  Concepts (8):
+  - docs/cli/concepts/search-modes.md
+  - docs/cli/concepts/embedding-providers.md
+  - docs/cli/concepts/chunking.md
+  - docs/cli/concepts/link-graph.md
+  - docs/cli/concepts/time-decay.md
+  - docs/cli/concepts/clustering.md
+  - docs/cli/concepts/ignore-files.md
+  - docs/cli/concepts/index-storage.md
+  Reference:
+  - docs/cli/json-output.md
+
+Parallelism Analysis:
+- Max parallel phases: 4 (phases 3, 4, 5, 6 can all run concurrently)
+- Recommended workers: 2 (content consistency benefits from fewer parallel writers)
+- Parallel groups: [phase-3, phase-4, phase-5, phase-6] — all depend only on phase-2, different files
+
+Key Constraints:
+- docs/prds/ and docs/guides/ must remain UNTOUCHED
+- All content must be 100% grounded in source code (zero hallucination)
+- Every file needs YAML front matter (title, description, category)
+- Minimum 5 Mermaid diagrams required
+- Cross-links between all related pages
+
+Source of Truth Files:
+- src/main.rs — 18 commands, all flags, arguments, conflicts, requires
+- src/config.rs — 37 env vars, defaults, resolution order
+- src/lib.rs — public API types (SearchQuery, IngestOptions, etc.)
+- src/search.rs — SearchMode, MetadataFilter, SearchTimings
+- src/discovery.rs — ignore patterns, built-in exclusions
+
+=== STARTUP COMMAND ===
+
+To continue building this spec, run:
+
+  source auto-claude/.venv/bin/activate && python auto-claude/run.py --spec 043 --parallel 2
+
+Example:
+  source auto-claude/.venv/bin/activate && python auto-claude/run.py --spec 043 --parallel 2
+
+=== END SESSION 1 ===
+
+=== SUBTASK 3-3 PROGRESS ===
+
+Completed: subtask-3-3 (Create init.md, config.md, doctor.md)
+
+Created files:
+- docs/cli/commands/init.md (215 lines) — documents --global flag, project vs user-level config, generated config templates, config resolution priority, error handling
+- docs/cli/commands/config.md (200 lines) — documents resolved config display, all 35 Config struct fields in JSON output, human-readable output format
+- docs/cli/commands/doctor.md (240 lines) — documents all 7 diagnostic checks, status meanings (Pass/Warn/Fail), troubleshooting table, JSON output
+
+All files have:
+- YAML front matter (title, description, category: "commands")
+- JSON output sections (init notes no JSON output exists; config and doctor have full JSON schemas)
+- Cross-links to configuration.md
+- Related Commands and See Also sections
+
+Verification: PASSED (all 3 files exist)
+Commit: 125a87f
+
+=== END SUBTASK 3-3 ===
+
+=== SUBTASK 8-2 PROGRESS ===
+
+Completed: subtask-8-2 (Final accuracy verification)
+
+Verified 6 critical facts against source code:
+
+1. --hops requires --boost-links: CONFIRMED
+   Source: src/main.rs line 233: `requires = "boost_links"`
+   Docs: docs/cli/commands/search.md correctly states "Requires: --boost-links must also be set"
+
+2. --semantic conflicts with --lexical and --mode: CONFIRMED
+   Source: src/main.rs line 197: `conflicts_with_all = ["lexical", "mode", "edge_search"]`
+   Docs: docs/cli/commands/search.md has correct conflict table showing all mutual exclusions
+
+3. Default search mode is hybrid: CONFIRMED
+   Source: src/config.rs line 186: `env_or_default("MDVDB_SEARCH_MODE", "hybrid")`
+   Docs: docs/cli/configuration.md, search.md, concepts/search-modes.md all correctly state hybrid as default
+
+4. Default embedding model is text-embedding-3-small: CONFIRMED
+   Source: src/config.rs line 153: `env_or_default("MDVDB_EMBEDDING_MODEL", "text-embedding-3-small")`
+   Docs: Correctly stated in configuration.md, quickstart.md, init.md, embedding-providers.md, status.md, doctor.md, config.md
+
+5. --depth on links defaults to 1, range 1-3: CONFIRMED
+   Source: src/main.rs line 295: `value_parser = clap::value_parser!(u8).range(1..=3), default_value = "1"`
+   Docs: docs/cli/commands/links.md correctly states default 1, range 1-3
+
+6. Graph --level accepts document or chunk: CONFIRMED
+   Source: src/main.rs lines 330-333: `enum GraphLevelArg { Document, Chunk }`
+   Docs: docs/cli/commands/graph.md correctly documents both levels with default "document"
+
+Additional verifications:
+- docs/prds/ directory: UNTOUCHED (29 PRD files present, no modifications)
+- docs/guides/ directory: UNTOUCHED (2 guide files present, no modifications)
+- cargo test: 408 passed, 1 failed (pre-existing failure in index::storage::tests::old_version_returns_mismatch — unrelated to documentation)
+- Integration tests: All pass
+- All 31 documentation files present under docs/cli/
+- No source code modifications in this worktree
+
+=== END SUBTASK 8-2 ===
