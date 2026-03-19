@@ -578,12 +578,12 @@ This average-of-chunks approach captures the overall semantic content of the fil
 The number of clusters K is determined by:
 
 ```
-K = clamp(floor(sqrt(N * granularity / 2)), 2, 50)
+K = clamp(floor(sqrt(N / 2)), 2, 50)
 ```
 
-where `N` is the number of documents and `granularity` is a configurable multiplier (default: 1.0, range: [0.25, 4.0]).
+where `N` is the number of documents.
 
-Example values for `granularity = 1.0`:
+Example values:
 
 | Documents (N) | K |
 |---------------|---|
@@ -733,7 +733,7 @@ A search query is represented by the `SearchQuery` structure:
 |-------|------|---------|-------------|
 | `query` | `String` | (required) | Natural-language query text |
 | `limit` | `usize` | 10 | Maximum results to return |
-| `min_score` | `f32` | 0.0 | Minimum score threshold [0.0, 1.0] |
+| `min_score` | `f64` | 0.0 | Minimum score threshold [0.0, 1.0] |
 | `mode` | `SearchMode` | `Hybrid` | One of: `Hybrid`, `Semantic`, `Lexical` |
 | `filters` | `Vec<MetadataFilter>` | `[]` | Frontmatter field predicates (AND logic) |
 | `path_prefix` | `Option<String>` | `None` | Restrict results to a directory subtree |
@@ -1099,7 +1099,6 @@ Validation is performed at load time. The `Config::load()` function returns a `R
 | `search_min_score` in [0.0, 1.0] | "Min score must be between 0 and 1" |
 | `search_boost_hops` in [1, 3] | "Boost hops must be 1-3" |
 | `search_expand_graph` in [0, 3] | "Expand graph must be 0-3" |
-| `clustering_granularity` in [0.25, 4.0] | "Granularity must be 0.25-4.0" |
 | `edge_boost_weight` in [0.0, 1.0] | "Edge boost weight must be 0-1" |
 | `search_decay_half_life > 0` | "Half-life must be positive" |
 
@@ -1245,7 +1244,7 @@ The hybrid search approach in Markdown VDB draws on established techniques from 
 
 - **HNSW** (Malkov & Yashunin, 2018) provides approximate nearest neighbor search with logarithmic query time and high recall. The choice of M=16 and ef_search=64 follows recommendations for balancing recall and latency in medium-scale deployments.
 - **BM25** (Robertson & Zaragoza, 2009) remains a strong baseline for lexical retrieval. The saturation normalization applied to BM25 scores (`score / (score + k)`) is a standard technique for bounding unbounded scoring functions.
-- **Linear score fusion** of semantic and lexical signals follows work on hybrid retrieval (e.g., Karpukhin et al., 2020 on DPR; Ma et al., 2021 on hybrid dense-sparse retrieval). The semantic weight of 0.7 reflects the finding that dense retrieval typically outperforms sparse retrieval for semantic queries but benefits from lexical reinforcement for exact-match terminology.
+- **Reciprocal Rank Fusion (RRF)** (Cormack et al., 2009) merges ranked lists by summing inverse ranks, avoiding the need to calibrate score-level weights between dense and sparse retrievers. Markdown VDB uses RRF with K=60 following the original paper's recommendation.
 - **Time decay** via exponential half-life is a standard technique in recommender systems and news retrieval for expressing recency preference (e.g., Ding & Li, 2005 on temporal interest modeling).
 
 ---
@@ -1296,7 +1295,7 @@ Markdown VDB demonstrates that a retrieval system purpose-built for a specific d
 
 **Link graph extraction** creates a document graph from Markdown cross-references, enabling multi-hop traversal for relevance boosting and context expansion. This graph is a byproduct of Markdown syntax — no additional annotation effort is required from users.
 
-**Hybrid search** with weighted linear fusion of dense (HNSW) and sparse (BM25) signals provides multiple complementary retrieval pathways. Semantic similarity captures topical relevance; lexical matching handles exact terminology, proper nouns, and code identifiers. The configurable fusion weight (default: 0.7 semantic, 0.3 lexical) allows tuning to corpus characteristics.
+**Hybrid search** via Reciprocal Rank Fusion (RRF) of dense (HNSW) and sparse (BM25) result lists provides multiple complementary retrieval pathways. Semantic similarity captures topical relevance; lexical matching handles exact terminology, proper nouns, and code identifiers. RRF's rank-based fusion is robust to score distribution differences between the two retrieval modes and requires no calibration of relative weights.
 
 **The single-file, filesystem-native architecture** eliminates infrastructure overhead. The index file lives alongside the Markdown files it indexes. There is no server to start, no database to provision, no Docker container to orchestrate, and no network dependency at query time. Moving the directory moves everything.
 
@@ -1447,6 +1446,8 @@ All configuration keys use dotenv syntax and the `MDVDB_` prefix. Values shown a
 | `MDVDB_SEARCH_EXPAND_GRAPH` | `0` | Graph context expansion depth [0, 3] |
 | `MDVDB_SEARCH_EXPAND_LIMIT` | `3` | Max graph context items per hop [1, 10] |
 | `MDVDB_EDGE_BOOST_WEIGHT` | `0.15` | Edge similarity boost weight [0.0, 1.0] |
+| `MDVDB_EDGE_EMBEDDINGS` | `true` | Enable edge embedding computation |
+| `MDVDB_EDGE_CLUSTER_REBALANCE` | `50` | Threshold for rebalancing edge clusters |
 
 ### Clustering
 
@@ -1454,7 +1455,6 @@ All configuration keys use dotenv syntax and the `MDVDB_` prefix. Values shown a
 |-----|---------|-------------|
 | `MDVDB_CLUSTERING_ENABLED` | `true` | Enable document clustering |
 | `MDVDB_CLUSTERING_REBALANCE_THRESHOLD` | `50` | Documents before re-clustering |
-| `MDVDB_CLUSTER_GRANULARITY` | `1.0` | K multiplier [0.25, 4.0] |
 
 ### Vector Storage
 
