@@ -6,7 +6,7 @@
 
 ## Abstract
 
-Markdown VDB is a single-binary, zero-infrastructure vector database designed for semantic and lexical retrieval over collections of Markdown files. The system combines hierarchical navigable small world (HNSW) approximate nearest neighbor search with BM25 lexical ranking, fused via weighted linear interpolation. Documents are chunked along heading boundaries with token-count overflow guards, embedded through pluggable providers (OpenAI, Ollama, or custom endpoints), and stored in a single memory-mapped binary index file using zero-copy deserialization. The system additionally maintains a link graph extracted from Markdown cross-references, supports multi-hop graph traversal for context expansion, performs K-means document clustering with TF-IDF keyword extraction, and infers metadata schemas from YAML frontmatter. All state is local to the filesystem. There is no server process, no external database, and no network dependency at query time. The implementation comprises approximately 12,000 lines of Rust across 18 completed subsystems, validated by 612 automated tests.
+Markdown VDB is a single-binary, zero-infrastructure vector database designed for semantic and lexical retrieval over collections of Markdown files. The system combines hierarchical navigable small world (HNSW) approximate nearest neighbor search with BM25 lexical ranking, fused via Reciprocal Rank Fusion (RRF). Documents are chunked along heading boundaries with token-count overflow guards, embedded through pluggable providers (OpenAI, Ollama, or custom endpoints), and stored in a single memory-mapped binary index file using zero-copy deserialization. The system additionally maintains a link graph extracted from Markdown cross-references, supports multi-hop graph traversal for context expansion, performs K-means document clustering with TF-IDF keyword extraction, and infers metadata schemas from YAML frontmatter. All state is local to the filesystem. There is no server process, no external database, and no network dependency at query time. The implementation comprises approximately 12,000 lines of Rust across 18 completed subsystems, validated by 612 automated tests.
 
 ---
 
@@ -77,7 +77,7 @@ Markdown VDB is designed for three primary user populations:
 Markdown VDB addresses the gaps identified in Section 1.1 with a retrieval system purpose-built for Markdown corpora. Its contributions are:
 
 1. **Heading-aware chunking** that preserves document structure and produces chunks aligned to semantic boundaries.
-2. **Hybrid search** combining dense (HNSW) and sparse (BM25) retrieval with configurable linear fusion.
+2. **Hybrid search** combining dense (HNSW) and sparse (BM25) retrieval with Reciprocal Rank Fusion (RRF).
 3. **Link graph extraction and multi-hop traversal** that leverages Markdown cross-references for context expansion and relevance boosting.
 4. **A single-file, memory-mapped binary index** that requires no server process and enables sub-millisecond cold-start reads.
 5. **Incremental ingestion** with content-hash deduplication that avoids redundant embedding API calls.
@@ -186,7 +186,6 @@ graph TB
     IDX --> STORE
 
     EMBED --> BATCH
-    BATCH --> EMBED
 
     CHUNK --> PARSE
     PARSE --> DISC
@@ -718,7 +717,7 @@ Graceful shutdown is supported via `tokio::sync::CancellationToken`. When a canc
 3. Saves the index to disk
 4. Exits with a success status code
 
-The watcher can be disabled entirely via `MDVDB_WATCH_ENABLED=false`.
+The watcher can be disabled entirely via `MDVDB_WATCH=false`.
 
 ---
 
@@ -783,21 +782,21 @@ flowchart LR
 
 ### 5.4 Hybrid Fusion
 
-When `SearchMode::Hybrid` is selected (the default), semantic and lexical results are combined via weighted linear interpolation:
+When `SearchMode::Hybrid` is selected (the default), semantic and lexical results are combined via Reciprocal Rank Fusion (RRF):
 
 ```
-final_score = alpha * semantic_score + (1 - alpha) * lexical_score
+RRF_score(d) = Σ 1/(K + rank_i(d))  for each result list i
 ```
 
-where `alpha` defaults to 0.7 (`MDVDB_SEARCH_SEMANTIC_WEIGHT`). Documents appearing in only one result set receive a score of 0.0 for the missing signal.
+where K defaults to 60.0 (`MDVDB_SEARCH_RRF_K`). Each result list (semantic and lexical) contributes `1/(K + rank)` for every document it contains, where rank is 1-indexed. Documents appearing in both lists accumulate scores from each. Documents appearing in only one list receive a contribution from that list alone.
 
-This linear fusion strategy was adopted over Reciprocal Rank Fusion (RRF) based on empirical observation that linear interpolation with a semantic-heavy weight (0.7) produces better recall and mean reciprocal rank on typical Markdown corpora, where semantic similarity captures topic relevance and lexical matching handles exact terminology.
+After fusion, RRF scores are normalized to [0, 1] by dividing by the theoretical maximum score. The maximum occurs when a document is ranked #1 in all lists: `max_score = num_lists / (K + 1)`. For the two-list case with K=60: `max_score = 2/61 ≈ 0.0328`. After normalization:
 
-**Design history**: The initial implementation (Phase 14) used RRF with constant K=60:
-```
-RRF_score(d) = sum(1 / (K + rank_i(d))) for each result list i
-```
-This was replaced in Phase 25 with weighted linear fusion after testing showed that RRF's rank-based combination discards useful score magnitude information. A document that is a strong semantic match (cosine 0.95) but a weak lexical match (BM25 rank 50) receives the same RRF contribution from the lexical list as a document that is a moderate lexical match (BM25 rank 50). Linear fusion preserves the score magnitudes, allowing the semantic signal to dominate when appropriate.
+- A document ranked #1 in both lists receives a normalized score of 1.0
+- A document ranked #1 in only one list receives approximately 0.5
+- Ranking order is preserved since normalization is monotonic
+
+RRF was chosen because it is rank-based rather than score-based, making it robust to differences in score distributions between dense (cosine similarity) and sparse (BM25) retrievers. It does not require calibration of relative weights between the two signals.
 
 **Over-fetching**: To compensate for results that may be eliminated by metadata filters or minimum-score thresholds, the system retrieves more candidates than the requested limit:
 - Hybrid mode: `limit * 5` candidates from each list
@@ -808,7 +807,7 @@ This ensures sufficient candidates remain after filtering to satisfy the request
 flowchart TB
     Q[Query] --> SEM[Semantic Search<br/>HNSW + Cosine]
     Q --> LEX[Lexical Search<br/>BM25 + Saturation Norm]
-    SEM --> FUSE["Linear Fusion<br/>0.7 * semantic + 0.3 * lexical"]
+    SEM --> FUSE["RRF Fusion<br/>Σ 1/(K + rank), K=60"]
     LEX --> FUSE
     FUSE --> FILTER[Metadata Filter + Path Filter]
     FILTER --> DECAY{Time Decay?}
@@ -1427,9 +1426,8 @@ All configuration keys use dotenv syntax and the `MDVDB_` prefix. Values shown a
 | `MDVDB_SEARCH_DEFAULT_LIMIT` | `10` | Default result count |
 | `MDVDB_SEARCH_MIN_SCORE` | `0.0` | Minimum score threshold [0.0, 1.0] |
 | `MDVDB_SEARCH_MODE` | `hybrid` | Default mode: `hybrid`, `semantic`, `lexical` |
-| `MDVDB_SEARCH_SEMANTIC_WEIGHT` | `0.7` | Semantic weight in linear fusion |
-| `MDVDB_SEARCH_RRF_K` | `60.0` | RRF constant (unused in linear fusion) |
-| `MDVDB_SEARCH_BM25_NORM_K` | `1.5` | BM25 saturation normalization constant |
+| `MDVDB_SEARCH_RRF_K` | `60.0` | RRF constant K for hybrid rank fusion |
+| `MDVDB_BM25_NORM_K` | `1.5` | BM25 saturation normalization constant |
 
 ### Time Decay
 
@@ -1456,20 +1454,20 @@ All configuration keys use dotenv syntax and the `MDVDB_` prefix. Values shown a
 |-----|---------|-------------|
 | `MDVDB_CLUSTERING_ENABLED` | `true` | Enable document clustering |
 | `MDVDB_CLUSTERING_REBALANCE_THRESHOLD` | `50` | Documents before re-clustering |
-| `MDVDB_CLUSTERING_GRANULARITY` | `1.0` | K multiplier [0.25, 4.0] |
+| `MDVDB_CLUSTER_GRANULARITY` | `1.0` | K multiplier [0.25, 4.0] |
 
 ### Vector Storage
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `MDVDB_VECTOR_QUANTIZATION` | `f16` | Vector precision: `f16` or `f32` |
-| `MDVDB_VECTOR_COMPRESSION` | `true` | Enable zstd compression for metadata |
+| `MDVDB_INDEX_COMPRESSION` | `true` | Enable zstd compression for metadata |
 
 ### File Watching
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `MDVDB_WATCH_ENABLED` | `true` | Enable filesystem watcher |
+| `MDVDB_WATCH` | `true` | Enable filesystem watcher |
 | `MDVDB_WATCH_DEBOUNCE_MS` | `300` | Debounce interval in milliseconds |
 
 ### Paths and Discovery
