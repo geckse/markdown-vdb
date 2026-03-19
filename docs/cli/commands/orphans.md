@@ -142,3 +142,4 @@ The orphan check runs against the link graph built during ingestion. Only files 
 
 - [Link Graph](../concepts/link-graph.md) -- How mdvdb extracts links, builds the graph, and detects orphans
 - [JSON Output Reference](../json-output.md) -- Complete JSON schema reference for all commands
+- [Configuration](../configuration.md) -- All environment variables and config options

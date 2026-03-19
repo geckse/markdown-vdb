@@ -169,16 +169,14 @@ Exclude takes precedence over include. For detailed explanations, see [Time Deca
 
 ## Global Options
 
-These options are available on all `mdvdb` commands:
+These options apply to all commands. See [Commands Index](./index.md) for details.
 
 | Flag | Short | Description |
 |------|-------|-------------|
-| `--verbose` | `-v` | Increase log verbosity (`-v` info, `-vv` debug, `-vvv` trace) |
+| `--verbose` | `-v` | Increase log verbosity (-v info, -vv debug, -vvv trace) |
 | `--root` | | Project root directory (defaults to current directory) |
 | `--no-color` | | Disable colored output |
 | `--json` | | Output results as JSON |
-
-See the [CLI index](../index.md) for global option details.
 
 ## Examples
 

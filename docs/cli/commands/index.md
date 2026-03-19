@@ -33,7 +33,7 @@ This page lists all available `mdvdb` commands. Click a command name for its ful
 
 ### Core Workflow
 
-These commands form the primary usage loop:
+These commands form the primary usage loop. See [Search Modes](../concepts/search-modes.md) for how search works, [Embedding Providers](../concepts/embedding-providers.md) for provider setup, and [Chunking](../concepts/chunking.md) for how files are split.
 
 | Command | Purpose |
 |---------|---------|
@@ -43,6 +43,8 @@ These commands form the primary usage loop:
 
 ### Setup & Configuration
 
+See [Configuration](../configuration.md) for the full environment variable and config file reference.
+
 | Command | Purpose |
 |---------|---------|
 | [`init`](./init.md) | Create a `.markdownvdb` config file (project or global) |
@@ -50,6 +52,8 @@ These commands form the primary usage loop:
 | [`doctor`](./doctor.md) | Diagnose issues with config, embedding provider, and index |
 
 ### Data Inspection
+
+See [Clustering](../concepts/clustering.md) for how clusters are computed and [Index Storage](../concepts/index-storage.md) for how data is stored.
 
 | Command | Purpose |
 |---------|---------|
@@ -60,6 +64,8 @@ These commands form the primary usage loop:
 
 ### Link Graph
 
+See [Link Graph](../concepts/link-graph.md) for how links are extracted and the graph is built.
+
 | Command | Purpose |
 |---------|---------|
 | [`links`](./links.md) | Show outgoing links from a file (with multi-hop traversal) |
@@ -69,6 +75,8 @@ These commands form the primary usage loop:
 | [`graph`](./graph.md) | Export full graph data for visualization tools |
 
 ### Automation
+
+See [Ignore Files](../concepts/ignore-files.md) for how the watcher determines which files to monitor.
 
 | Command | Purpose |
 |---------|---------|
@@ -100,3 +108,7 @@ Every command accepts these global flags. See [Global Options](../index.md#globa
 - [Quick Start](../quickstart.md) - Get started with mdvdb in 5 minutes
 - [Configuration](../configuration.md) - Environment variables and config file reference
 - [JSON Output Reference](../json-output.md) - JSON schemas for `--json` output
+- [Search Modes](../concepts/search-modes.md) - Hybrid, semantic, lexical, and edge search
+- [Embedding Providers](../concepts/embedding-providers.md) - OpenAI, Ollama, and custom providers
+- [Link Graph](../concepts/link-graph.md) - Link extraction, backlinks, and graph traversal
+- [Time Decay](../concepts/time-decay.md) - Time-based scoring for search results
