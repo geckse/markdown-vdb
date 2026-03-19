@@ -70,6 +70,8 @@ pub struct Config {
     pub chunk_overlap_tokens: usize,
     pub clustering_enabled: bool,
     pub clustering_rebalance_threshold: usize,
+    /// Cluster granularity multiplier. Higher = more clusters. Default: 1.0, range [0.25, 4.0].
+    pub clustering_granularity: f64,
     pub search_default_limit: usize,
     pub search_min_score: f64,
     pub search_default_mode: SearchMode,
@@ -179,6 +181,9 @@ impl Config {
         let clustering_rebalance_threshold =
             parse_env::<usize>("MDVDB_CLUSTERING_REBALANCE_THRESHOLD", 50)?;
 
+        let clustering_granularity =
+            parse_env::<f64>("MDVDB_CLUSTER_GRANULARITY", 1.0)?;
+
         let search_default_limit = parse_env::<usize>("MDVDB_SEARCH_DEFAULT_LIMIT", 10)?;
 
         let search_min_score = parse_env::<f64>("MDVDB_SEARCH_MIN_SCORE", 0.0)?;
@@ -235,6 +240,7 @@ impl Config {
             chunk_overlap_tokens,
             clustering_enabled,
             clustering_rebalance_threshold,
+            clustering_granularity,
             search_default_limit,
             search_min_score,
             search_default_mode,
@@ -318,6 +324,12 @@ impl Config {
             return Err(Error::Config(
                 "edge_cluster_rebalance must be > 0".into(),
             ));
+        }
+        if !(0.25..=4.0).contains(&self.clustering_granularity) {
+            return Err(Error::Config(format!(
+                "clustering_granularity ({}) must be in [0.25, 4.0]",
+                self.clustering_granularity
+            )));
         }
         Ok(())
     }
@@ -442,6 +454,7 @@ mod tests {
             "MDVDB_CHUNK_OVERLAP_TOKENS",
             "MDVDB_CLUSTERING_ENABLED",
             "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
+            "MDVDB_CLUSTER_GRANULARITY",
             "MDVDB_SEARCH_DEFAULT_LIMIT",
             "MDVDB_SEARCH_MIN_SCORE",
             "MDVDB_SEARCH_MODE",
@@ -503,6 +516,7 @@ mod tests {
         assert_eq!(config.chunk_overlap_tokens, 50);
         assert!(config.clustering_enabled);
         assert_eq!(config.clustering_rebalance_threshold, 50);
+        assert!((config.clustering_granularity - 1.0).abs() < f64::EPSILON);
         assert_eq!(config.search_default_limit, 10);
         assert_eq!(config.search_min_score, 0.0);
         assert_eq!(config.search_default_mode, SearchMode::Hybrid);
@@ -688,6 +702,7 @@ mod tests {
             "MDVDB_WATCH", "MDVDB_WATCH_DEBOUNCE_MS",
             "MDVDB_CHUNK_MAX_TOKENS", "MDVDB_CHUNK_OVERLAP_TOKENS",
             "MDVDB_CLUSTERING_ENABLED", "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
+            "MDVDB_CLUSTER_GRANULARITY",
             "MDVDB_SEARCH_DEFAULT_LIMIT", "MDVDB_SEARCH_MIN_SCORE",
             "MDVDB_SEARCH_MODE", "MDVDB_SEARCH_RRF_K", "MDVDB_BM25_NORM_K",
             "MDVDB_SEARCH_DECAY", "MDVDB_SEARCH_DECAY_HALF_LIFE",

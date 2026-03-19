@@ -23,6 +23,7 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_CHUNK_OVERLAP_TOKENS",
     "MDVDB_CLUSTERING_ENABLED",
     "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
+    "MDVDB_CLUSTER_GRANULARITY",
     "MDVDB_SEARCH_DEFAULT_LIMIT",
     "MDVDB_SEARCH_MIN_SCORE",
     "MDVDB_SEARCH_MODE",
@@ -71,6 +72,7 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.chunk_overlap_tokens, 50);
     assert!(config.clustering_enabled);
     assert_eq!(config.clustering_rebalance_threshold, 50);
+    assert!((config.clustering_granularity - 1.0).abs() < f64::EPSILON, "default granularity should be 1.0");
     assert_eq!(config.search_default_limit, 10);
     assert_eq!(config.search_min_score, 0.0);
     assert_eq!(config.search_default_mode, mdvdb::SearchMode::Hybrid);
@@ -901,6 +903,78 @@ fn config_expand_limit_rejects_eleven() {
         "error should mention search_expand_limit: {}",
         err_msg
     );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn granularity_from_env() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_CLUSTER_GRANULARITY", "2.5");
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert!((config.clustering_granularity - 2.5).abs() < f64::EPSILON);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn granularity_too_low_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_CLUSTER_GRANULARITY", "0.1");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "granularity of 0.1 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("clustering_granularity"),
+        "error should mention clustering_granularity: {}",
+        err_msg
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn granularity_too_high_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    std::env::set_var("MDVDB_CLUSTER_GRANULARITY", "5.0");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err(), "granularity of 5.0 should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("clustering_granularity"),
+        "error should mention clustering_granularity: {}",
+        err_msg
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn granularity_in_dotenv() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join(".markdownvdb"),
+        "MDVDB_CLUSTER_GRANULARITY=0.5\n",
+    )
+    .unwrap();
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert!((config.clustering_granularity - 0.5).abs() < f64::EPSILON);
 
     clear_env();
 }

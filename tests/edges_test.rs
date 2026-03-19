@@ -29,6 +29,7 @@ fn mock_config() -> Config {
         chunk_overlap_tokens: 50,
         clustering_enabled: false,
         clustering_rebalance_threshold: 50,
+        clustering_granularity: 1.0,
         search_default_limit: 10,
         search_min_score: 0.0,
         search_default_mode: SearchMode::Hybrid,

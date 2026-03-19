@@ -138,7 +138,7 @@ impl Clusterer {
         }
 
         let dim = vecs[0].len();
-        let k = compute_k(n);
+        let k = compute_k(n, self.config.clustering_granularity);
 
         // Build ndarray matrix (f64 for linfa)
         let mut data = Array2::<f64>::zeros((n, dim));
@@ -480,7 +480,7 @@ impl Clusterer {
         }
 
         let dim = vecs[0].len();
-        let k = compute_edge_k(n);
+        let k = compute_edge_k(n, self.config.clustering_granularity);
 
         // Build ndarray matrix (f64 for linfa)
         let mut data = Array2::<f64>::zeros((n, dim));
@@ -716,15 +716,17 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Compute the optimal number of clusters (k) for a given document count.
 ///
-/// Uses the heuristic: `clamp(sqrt(n / 2), 2, 50)`.
-pub(crate) fn compute_k(n: usize) -> usize {
-    let k = (n as f64 / 2.0).sqrt() as usize;
+/// Uses the heuristic: `clamp(sqrt(n * granularity / 2), 2, 50)`.
+/// `granularity` is a multiplier (default 1.0): higher = more clusters.
+pub(crate) fn compute_k(n: usize, granularity: f64) -> usize {
+    let k = (n as f64 * granularity / 2.0).sqrt() as usize;
     k.clamp(2, 50)
 }
 
 /// Compute the optimal number of clusters for edges, clamped to [2, 20].
-pub(crate) fn compute_edge_k(n: usize) -> usize {
-    let k = (n as f64 / 2.0).sqrt() as usize;
+/// `granularity` is a multiplier (default 1.0): higher = more clusters.
+pub(crate) fn compute_edge_k(n: usize, granularity: f64) -> usize {
+    let k = (n as f64 * granularity / 2.0).sqrt() as usize;
     k.clamp(2, 20)
 }
 
@@ -779,26 +781,38 @@ mod tests {
 
     #[test]
     fn compute_k_small() {
-        // n=4 -> sqrt(2) ≈ 1.4 -> clamped to 2
-        assert_eq!(compute_k(4), 2);
+        // n=4 -> sqrt(4*1/2) = sqrt(2) ≈ 1.4 -> clamped to 2
+        assert_eq!(compute_k(4, 1.0), 2);
     }
 
     #[test]
     fn compute_k_medium() {
-        // n=200 -> sqrt(100) = 10
-        assert_eq!(compute_k(200), 10);
+        // n=200 -> sqrt(200*1/2) = sqrt(100) = 10
+        assert_eq!(compute_k(200, 1.0), 10);
     }
 
     #[test]
     fn compute_k_large() {
         // n=10000 -> sqrt(5000) ≈ 70 -> clamped to 50
-        assert_eq!(compute_k(10000), 50);
+        assert_eq!(compute_k(10000, 1.0), 50);
     }
 
     #[test]
     fn compute_k_minimum() {
-        assert_eq!(compute_k(0), 2);
-        assert_eq!(compute_k(1), 2);
+        assert_eq!(compute_k(0, 1.0), 2);
+        assert_eq!(compute_k(1, 1.0), 2);
+    }
+
+    #[test]
+    fn compute_k_high_granularity() {
+        // n=200, g=4.0 -> sqrt(200*4/2) = sqrt(400) = 20
+        assert_eq!(compute_k(200, 4.0), 20);
+    }
+
+    #[test]
+    fn compute_k_low_granularity() {
+        // n=200, g=0.25 -> sqrt(200*0.25/2) = sqrt(25) = 5
+        assert_eq!(compute_k(200, 0.25), 5);
     }
 
     #[test]
@@ -1099,11 +1113,19 @@ mod tests {
     #[test]
     fn compute_edge_k_clamped_to_20() {
         // n=10000 -> sqrt(5000) ≈ 70 -> clamped to 20
-        assert_eq!(compute_edge_k(10000), 20);
+        assert_eq!(compute_edge_k(10000, 1.0), 20);
         // n=4 -> sqrt(2) ≈ 1 -> clamped to 2
-        assert_eq!(compute_edge_k(4), 2);
+        assert_eq!(compute_edge_k(4, 1.0), 2);
         // n=200 -> sqrt(100) = 10
-        assert_eq!(compute_edge_k(200), 10);
+        assert_eq!(compute_edge_k(200, 1.0), 10);
+    }
+
+    #[test]
+    fn compute_edge_k_with_granularity() {
+        // n=200, g=4.0 -> sqrt(400) = 20 (hits cap)
+        assert_eq!(compute_edge_k(200, 4.0), 20);
+        // n=200, g=0.25 -> sqrt(25) = 5
+        assert_eq!(compute_edge_k(200, 0.25), 5);
     }
 
     #[test]

@@ -242,3 +242,30 @@ fn clusterer_respects_enabled_flag() {
     let clusterer = Clusterer::new(&config);
     assert!(clusterer.is_enabled());
 }
+
+#[test]
+fn high_granularity_produces_more_clusters() {
+    let mut config = test_config();
+    config.clustering_granularity = 4.0;
+    let clusterer_fine = Clusterer::new(&config);
+
+    config.clustering_granularity = 0.25;
+    let clusterer_coarse = Clusterer::new(&config);
+
+    let vectors = make_vectors(50, 8);
+    let documents = make_documents(50);
+
+    let fine_state = clusterer_fine
+        .cluster_all(&vectors, &documents)
+        .unwrap();
+    let coarse_state = clusterer_coarse
+        .cluster_all(&vectors, &documents)
+        .unwrap();
+
+    assert!(
+        fine_state.clusters.len() >= coarse_state.clusters.len(),
+        "higher granularity should produce >= clusters: fine={} coarse={}",
+        fine_state.clusters.len(),
+        coarse_state.clusters.len()
+    );
+}
