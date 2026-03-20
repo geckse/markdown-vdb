@@ -1,0 +1,71 @@
+---
+import SynthwaveGrid from "./SynthwaveGrid.astro";
+import FloatingGraph3D from "./FloatingGraph3D.svelte";
+import DownloadButton from "./DownloadButton.astro";
+---
+
+<section class="relative min-h-[100svh] flex items-center overflow-hidden">
+  <!-- Backdrop: synthwave grid -->
+  <div class="absolute inset-0 z-0">
+    <SynthwaveGrid />
+  </div>
+
+  <!-- Backdrop: floating graph (desktop only) -->
+  <div class="absolute inset-0 z-10 pointer-events-none opacity-50 hidden md:block">
+    <FloatingGraph3D client:load />
+  </div>
+
+  <!-- Atmospheric glow orbs -->
+  <div
+    class="absolute top-1/4 left-1/4 w-[600px] h-[600px] rounded-full opacity-15 blur-[120px]"
+    style="background: radial-gradient(circle, var(--color-primary) 0%, transparent 70%);"
+    aria-hidden="true"
+  ></div>
+  <div
+    class="absolute bottom-1/3 right-1/4 w-[500px] h-[500px] rounded-full opacity-10 blur-[100px]"
+    style="background: radial-gradient(circle, #a855f7 0%, transparent 70%);"
+    aria-hidden="true"
+  ></div>
+  <div
+    class="absolute top-1/2 right-1/3 w-[400px] h-[400px] rounded-full opacity-10 blur-[80px]"
+    style="background: radial-gradient(circle, #06b6d4 0%, transparent 70%);"
+    aria-hidden="true"
+  ></div>
+
+  <!-- Content -->
+  <div class="relative z-20 w-full max-w-4xl mx-auto px-6 text-center">
+    <!-- Open source badge -->
+    <span
+      class="fade-up inline-flex items-center gap-2 font-mono text-xs uppercase tracking-wider border border-primary/30 rounded-full px-3 py-1 text-primary/80 mb-6"
+      style="--delay: 0s;"
+    >
+      <span class="w-2 h-2 rounded-full bg-green-400 inline-block"></span>
+      Open Source
+    </span>
+
+    <!-- Heading -->
+    <h1 class="fade-up hero-heading mb-6" style="--delay: 0.1s;">
+      SEE THE SHAPE OF YOUR KNOWLEDGE
+    </h1>
+
+    <!-- Subtitle -->
+    <p
+      class="fade-up text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto mb-10"
+      style="--delay: 0.2s;"
+    >
+      Tesseract is a desktop knowledge base that turns your Markdown files into
+      an interactive, searchable knowledge graph. Your files, your machine, your
+      data.
+    </p>
+
+    <!-- Download buttons -->
+    <div
+      class="fade-up flex flex-col sm:flex-row flex-wrap justify-center gap-4"
+      style="--delay: 0.3s;"
+    >
+      <DownloadButton platform="macos" variant="primary" />
+      <DownloadButton platform="windows" variant="secondary" />
+      <DownloadButton platform="linux" variant="secondary" />
+    </div>
+  </div>
+</section>
