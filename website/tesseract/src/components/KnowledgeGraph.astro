@@ -1,0 +1,103 @@
+---
+import ForceGraph3D from "./ForceGraph3D.svelte";
+
+const nodes = [
+  { id: "center", label: "My Knowledge Base", group: "project", isCenter: true },
+  { id: "research", label: "Research Notes", group: "research" },
+  { id: "ideas", label: "Project Ideas", group: "project" },
+  { id: "books", label: "Book Notes", group: "reference" },
+  { id: "meetings", label: "Meeting Notes", group: "writing" },
+  { id: "journal", label: "Daily Journal", group: "writing" },
+  { id: "reading", label: "Reading List", group: "reference" },
+  { id: "drafts", label: "Writing Drafts", group: "writing" },
+  { id: "reference", label: "Reference Material", group: "reference" },
+  { id: "recipes", label: "Recipes", group: "reference" },
+  { id: "travel", label: "Travel Plans", group: "project" },
+];
+
+const edges = [
+  { source: "center", target: "research", type: "bidirectional" },
+  { source: "center", target: "ideas", type: "bidirectional" },
+  { source: "center", target: "books", type: "bidirectional" },
+  { source: "center", target: "journal", type: "outbound" },
+  { source: "research", target: "books", type: "outbound" },
+  { source: "research", target: "reference", type: "outbound" },
+  { source: "ideas", target: "drafts", type: "outbound" },
+  { source: "books", target: "reading", type: "inbound" },
+  { source: "meetings", target: "ideas", type: "outbound" },
+  { source: "journal", target: "meetings", type: "inbound" },
+  { source: "drafts", target: "research", type: "inbound" },
+  { source: "recipes", target: "reference", type: "bidirectional" },
+  { source: "travel", target: "ideas", type: "outbound" },
+  { source: "reading", target: "books", type: "outbound" },
+];
+
+const cards = [
+  {
+    title: "Cluster Discovery",
+    description: "Related notes auto-group into meaningful clusters, revealing hidden connections across your knowledge base.",
+  },
+  {
+    title: "Link Direction",
+    description: "Outgoing and incoming links carry meaning — see how ideas flow between your notes.",
+  },
+  {
+    title: "Multi-Hop Traversal",
+    description: "Follow chains of connections across degrees of separation to uncover distant relationships.",
+  },
+];
+---
+
+<section class="section-container" style="padding-top: var(--section-padding); padding-bottom: var(--section-padding);">
+  <!-- Heading group -->
+  <div class="text-center max-w-3xl mx-auto mb-12">
+    <span class="fade-up mono-label mb-4 block" style="--delay: 0s;">
+      Knowledge Graph
+    </span>
+    <h2 class="fade-up text-4xl md:text-5xl font-bold tracking-tight mb-4" style="--delay: 0s;">
+      Your ideas, connected
+    </h2>
+    <p class="fade-up text-lg text-muted-foreground" style="--delay: 0s;">
+      Visualize how your notes link together. Discover clusters, trace connections, and navigate your knowledge in 3D.
+    </p>
+  </div>
+
+  <!-- ForceGraph3D -->
+  <div class="fade-up mb-6" style="--delay: 0.1s;">
+    <ForceGraph3D client:visible nodes={nodes} edges={edges} height={320} />
+  </div>
+
+  <!-- Edge legend -->
+  <div class="fade-up flex flex-wrap justify-center gap-6 mb-12 text-sm text-muted-foreground" style="--delay: 0.1s;">
+    <span class="flex items-center gap-2">
+      <span class="w-2.5 h-2.5 rounded-full" style="background: #00E5FF;"></span>
+      Outbound links
+    </span>
+    <span class="flex items-center gap-2">
+      <span class="w-2.5 h-2.5 rounded-full" style="background: #FF6B6B;"></span>
+      Inbound links
+    </span>
+    <span class="flex items-center gap-2">
+      <span class="w-2.5 h-2.5 rounded-full" style="background: #51CF66;"></span>
+      Bidirectional
+    </span>
+  </div>
+
+  <!-- Callout cards -->
+  <div class="grid md:grid-cols-3 gap-6">
+    {cards.map((card, i) => (
+      <div
+        class="fade-up group bg-card border border-border rounded-lg p-6 transition-colors hover:border-primary/40 relative overflow-hidden"
+        style={`--delay: ${(i * 0.08).toFixed(2)}s;`}
+      >
+        <div
+          class="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none"
+          style="background: radial-gradient(circle at 50% 50%, var(--color-primary, #06b6d4) 0%, transparent 70%); opacity: 0.05;"
+          aria-hidden="true"
+        ></div>
+        <h3 class="relative text-lg font-semibold mb-2">{card.title}</h3>
+        <p class="relative text-sm text-muted-foreground">{card.description}</p>
+      </div>
+    ))}
+  </div>
+</section>

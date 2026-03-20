@@ -1,0 +1,362 @@
+---
+interface Props {
+  title?: string;
+  width?: string;
+  aspectRatio?: string;
+  label?: string;
+  variant?: 'graph' | 'editor' | 'search' | 'properties' | 'default';
+}
+
+const {
+  title = 'Tesseract',
+  width = '100%',
+  aspectRatio = '16/10',
+  label,
+  variant = 'default',
+} = Astro.props;
+---
+
+<div class="app-frame" style={`width: ${width};`}>
+  <!-- Title bar -->
+  <div class="title-bar">
+    <div class="traffic-lights">
+      <span class="dot dot-red"></span>
+      <span class="dot dot-yellow"></span>
+      <span class="dot dot-green"></span>
+    </div>
+    <span class="title-text">{title}</span>
+    <div class="traffic-lights-spacer"></div>
+  </div>
+
+  <!-- Content area -->
+  <div class="content-area" style={`aspect-ratio: ${aspectRatio};`}>
+    {variant === 'graph' && (
+      <div class="placeholder placeholder-graph">
+        <svg class="graph-svg" viewBox="0 0 400 250" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <line x1="80" y1="60" x2="200" y2="120" stroke="currentColor" stroke-opacity="0.3" />
+          <line x1="200" y1="120" x2="320" y2="80" stroke="currentColor" stroke-opacity="0.3" />
+          <line x1="200" y1="120" x2="160" y2="200" stroke="currentColor" stroke-opacity="0.3" />
+          <line x1="320" y1="80" x2="340" y2="180" stroke="currentColor" stroke-opacity="0.3" />
+          <line x1="160" y1="200" x2="280" y2="210" stroke="currentColor" stroke-opacity="0.3" />
+          <line x1="80" y1="60" x2="60" y2="160" stroke="currentColor" stroke-opacity="0.3" />
+          <line x1="60" y1="160" x2="160" y2="200" stroke="currentColor" stroke-opacity="0.3" />
+          <circle cx="80" cy="60" r="10" fill="currentColor" fill-opacity="0.4" />
+          <circle cx="200" cy="120" r="14" fill="currentColor" fill-opacity="0.5" />
+          <circle cx="320" cy="80" r="8" fill="currentColor" fill-opacity="0.35" />
+          <circle cx="160" cy="200" r="11" fill="currentColor" fill-opacity="0.4" />
+          <circle cx="340" cy="180" r="7" fill="currentColor" fill-opacity="0.3" />
+          <circle cx="280" cy="210" r="9" fill="currentColor" fill-opacity="0.35" />
+          <circle cx="60" cy="160" r="8" fill="currentColor" fill-opacity="0.3" />
+        </svg>
+      </div>
+    )}
+
+    {variant === 'editor' && (
+      <div class="placeholder placeholder-editor">
+        <div class="editor-sidebar">
+          <div class="sidebar-item sidebar-item-active"></div>
+          <div class="sidebar-item"></div>
+          <div class="sidebar-item"></div>
+          <div class="sidebar-item"></div>
+          <div class="sidebar-item"></div>
+        </div>
+        <div class="editor-main">
+          <div class="editor-line line-heading"></div>
+          <div class="editor-line line-full"></div>
+          <div class="editor-line line-full"></div>
+          <div class="editor-line line-medium"></div>
+          <div class="editor-line line-gap"></div>
+          <div class="editor-line line-full"></div>
+          <div class="editor-line line-short"></div>
+          <div class="editor-line line-full"></div>
+          <div class="editor-line line-medium"></div>
+        </div>
+      </div>
+    )}
+
+    {variant === 'search' && (
+      <div class="placeholder placeholder-search">
+        <div class="search-bar"></div>
+        <div class="search-results">
+          <div class="result-row">
+            <div class="result-icon"></div>
+            <div class="result-lines">
+              <div class="result-title"></div>
+              <div class="result-snippet"></div>
+            </div>
+          </div>
+          <div class="result-row">
+            <div class="result-icon"></div>
+            <div class="result-lines">
+              <div class="result-title"></div>
+              <div class="result-snippet"></div>
+            </div>
+          </div>
+          <div class="result-row">
+            <div class="result-icon"></div>
+            <div class="result-lines">
+              <div class="result-title"></div>
+              <div class="result-snippet"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {variant === 'properties' && (
+      <div class="placeholder placeholder-properties">
+        <div class="prop-row">
+          <div class="prop-key"></div>
+          <div class="prop-value prop-value-long"></div>
+        </div>
+        <div class="prop-row">
+          <div class="prop-key"></div>
+          <div class="prop-value prop-value-medium"></div>
+        </div>
+        <div class="prop-row">
+          <div class="prop-key"></div>
+          <div class="prop-value prop-value-short"></div>
+        </div>
+        <div class="prop-row">
+          <div class="prop-key"></div>
+          <div class="prop-value prop-value-medium"></div>
+        </div>
+        <div class="prop-row">
+          <div class="prop-key"></div>
+          <div class="prop-value prop-value-long"></div>
+        </div>
+      </div>
+    )}
+
+    {variant === 'default' && (
+      <div class="placeholder placeholder-default">
+        {label && <span class="default-label">{label}</span>}
+      </div>
+    )}
+  </div>
+</div>
+
+<style>
+  .app-frame {
+    border-radius: 0.5rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    background: var(--card, rgba(255, 255, 255, 0.05));
+    overflow: hidden;
+  }
+
+  .title-bar {
+    height: 2.25rem;
+    display: flex;
+    align-items: center;
+    padding-inline: 0.75rem;
+    border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  }
+
+  .traffic-lights {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+  }
+
+  .traffic-lights-spacer {
+    width: 52px;
+    flex-shrink: 0;
+  }
+
+  .dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+
+  .dot-red { background: #FF5F57; }
+  .dot-yellow { background: #FEBC2E; }
+  .dot-green { background: #28C840; }
+
+  .title-text {
+    flex: 1;
+    text-align: center;
+    font-size: 0.8125rem;
+    color: var(--muted-foreground, rgba(255, 255, 255, 0.5));
+    user-select: none;
+  }
+
+  .content-area {
+    background: rgba(0, 0, 0, 0.15);
+    position: relative;
+  }
+
+  .placeholder {
+    width: 100%;
+    height: 100%;
+    position: absolute;
+    inset: 0;
+  }
+
+  /* Graph variant */
+  .graph-svg {
+    width: 100%;
+    height: 100%;
+    color: var(--border, rgba(255, 255, 255, 0.3));
+  }
+
+  /* Editor variant */
+  .placeholder-editor {
+    display: flex;
+  }
+
+  .editor-sidebar {
+    width: 20%;
+    border-right: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    padding: 1rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .sidebar-item {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--border, rgba(255, 255, 255, 0.1));
+    opacity: 0.4;
+    width: 80%;
+  }
+
+  .sidebar-item-active {
+    opacity: 0.6;
+    width: 90%;
+  }
+
+  .editor-main {
+    flex: 1;
+    padding: 1.25rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.625rem;
+  }
+
+  .editor-line {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border, rgba(255, 255, 255, 0.1));
+    opacity: 0.35;
+  }
+
+  .line-heading {
+    height: 10px;
+    width: 40%;
+    opacity: 0.5;
+    margin-bottom: 0.25rem;
+  }
+
+  .line-full { width: 100%; }
+  .line-medium { width: 70%; }
+  .line-short { width: 45%; }
+  .line-gap { height: 0; margin: 0.25rem 0; }
+
+  /* Search variant */
+  .placeholder-search {
+    padding: 1.25rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .search-bar {
+    height: 2rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+    background: rgba(255, 255, 255, 0.03);
+    opacity: 0.5;
+  }
+
+  .search-results {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .result-row {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+  }
+
+  .result-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    background: var(--border, rgba(255, 255, 255, 0.1));
+    opacity: 0.4;
+    flex-shrink: 0;
+  }
+
+  .result-lines {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+  }
+
+  .result-title {
+    height: 8px;
+    width: 60%;
+    border-radius: 4px;
+    background: var(--border, rgba(255, 255, 255, 0.1));
+    opacity: 0.5;
+  }
+
+  .result-snippet {
+    height: 6px;
+    width: 90%;
+    border-radius: 3px;
+    background: var(--border, rgba(255, 255, 255, 0.1));
+    opacity: 0.3;
+  }
+
+  /* Properties variant */
+  .placeholder-properties {
+    padding: 1.25rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  .prop-row {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+  }
+
+  .prop-key {
+    width: 25%;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--border, rgba(255, 255, 255, 0.1));
+    opacity: 0.5;
+  }
+
+  .prop-value {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--border, rgba(255, 255, 255, 0.1));
+    opacity: 0.35;
+  }
+
+  .prop-value-long { width: 60%; }
+  .prop-value-medium { width: 40%; }
+  .prop-value-short { width: 25%; }
+
+  /* Default variant */
+  .placeholder-default {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .default-label {
+    font-size: 0.875rem;
+    color: var(--muted-foreground, rgba(255, 255, 255, 0.5));
+    opacity: 0.5;
+  }
+</style>
