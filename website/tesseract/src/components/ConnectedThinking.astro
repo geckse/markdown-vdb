@@ -1,0 +1,37 @@
+---
+import AppFrame from "./AppFrame.astro";
+---
+
+<section class="section-container" style="padding-top: var(--section-padding); padding-bottom: var(--section-padding);">
+  <div class="grid md:grid-cols-2 gap-12 lg:gap-16 items-center">
+    <!-- Text column -->
+    <div>
+      <span class="fade-up mono-label mb-4 block" style="--delay: 0s;">
+        Connected Thinking
+      </span>
+      <h2 class="fade-up text-3xl md:text-4xl font-bold tracking-tight mb-4" style="--delay: 0.05s;">
+        Think in connections, not folders
+      </h2>
+      <p class="fade-up text-muted-foreground mb-8" style="--delay: 0.1s;">
+        Link any note to any other with wikilinks, instantly see what references what with backlinks, and find orphaned notes before they're forgotten. Your knowledge becomes a web, not a filing cabinet.
+      </p>
+
+      <!-- Feature cards -->
+      <div class="fade-up grid grid-cols-1 sm:grid-cols-2 gap-4" style="--delay: 0.15s;">
+        <div class="bg-card border border-border rounded-lg p-4">
+          <h3 class="text-sm font-semibold mb-1">Wikilinks</h3>
+          <p class="text-xs text-muted-foreground">Type [[page]] to connect any note — no folders, no drag-and-drop.</p>
+        </div>
+        <div class="bg-card border border-border rounded-lg p-4">
+          <h3 class="text-sm font-semibold mb-1">Backlinks</h3>
+          <p class="text-xs text-muted-foreground">See every note that references this one, automatically updated.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- AppFrame column -->
+    <div class="fade-up" style="--delay: 0.2s;">
+      <AppFrame variant="properties" title="Connections" />
+    </div>
+  </div>
+</section>
