@@ -1,0 +1,207 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── Font Faces ─── */
+
+@font-face {
+  font-family: 'Space Grotesk';
+  src: url('/fonts/SpaceGrotesk-Variable.woff2') format('woff2');
+  font-weight: 300 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/JetBrainsMono-Variable.woff2') format('woff2');
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ─── Design Tokens ─── */
+
+@layer base {
+  :root {
+    /* Core palette (HSL without wrapper — Tailwind adds hsl()) */
+    --color-primary: 187 100% 50%;
+    --color-primary-dark: 187 100% 40%;
+    --color-bg: 240 4% 6%;
+    --color-surface: 240 4% 9%;
+    --color-border: 240 5% 16%;
+    --color-text: 240 5% 90%;
+    --color-text-dim: 240 4% 47%;
+
+    /* Edge colors */
+    --color-edge: 187 80% 35%;
+    --color-edge-dim: 240 5% 20%;
+
+    /* Tailwind / shadcn mappings */
+    --background: 240 4% 6%;
+    --foreground: 240 5% 90%;
+    --card: 240 4% 9%;
+    --card-foreground: 240 5% 90%;
+    --primary: 187 100% 50%;
+    --primary-foreground: 240 4% 6%;
+    --secondary: 240 4% 12%;
+    --secondary-foreground: 240 5% 90%;
+    --muted: 240 4% 12%;
+    --muted-foreground: 240 4% 47%;
+    --accent: 187 100% 50%;
+    --accent-foreground: 240 4% 6%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 5% 16%;
+    --input: 240 5% 16%;
+    --ring: 187 100% 50%;
+    --radius: 0.5rem;
+
+    /* Neon glow */
+    --neon-glow: 0 0 10px hsl(187 100% 50% / 0.6),
+      0 0 30px hsl(187 100% 50% / 0.3),
+      0 0 60px hsl(187 100% 50% / 0.15);
+    --neon-glow-strong: 0 0 10px hsl(187 100% 50% / 0.8),
+      0 0 40px hsl(187 100% 50% / 0.5),
+      0 0 80px hsl(187 100% 50% / 0.25);
+
+    /* Motion */
+    --brand-bezier: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* Layout */
+    --content-width: 1200px;
+    --section-padding: 8rem;
+  }
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: hsl(var(--color-bg));
+    color: hsl(var(--color-text));
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+  }
+}
+
+/* ─── Component Classes ─── */
+
+@layer components {
+  .hero-heading {
+    @apply text-5xl md:text-7xl lg:text-8xl font-bold tracking-tighter uppercase;
+    font-family: 'Space Grotesk', sans-serif;
+    -webkit-text-stroke: 1px hsl(var(--primary));
+    color: transparent;
+  }
+
+  .hero-heading-fill {
+    @apply text-5xl md:text-7xl lg:text-8xl font-bold tracking-tighter uppercase;
+    font-family: 'Space Grotesk', sans-serif;
+    color: hsl(var(--color-text));
+  }
+
+  .neon-text {
+    text-shadow: 0 0 10px hsl(187 100% 50% / 0.5),
+      0 0 30px hsl(187 100% 50% / 0.2);
+  }
+
+  .mono-label {
+    @apply text-[10px] uppercase tracking-[0.12em];
+    font-family: 'JetBrains Mono', monospace;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .terminal-window {
+    @apply rounded-lg border overflow-hidden;
+    background: hsl(var(--color-surface));
+    border-color: hsl(var(--color-border));
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .neon-divider {
+    @apply w-full h-px border-0;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      hsl(187 100% 50% / 0.6) 50%,
+      transparent
+    );
+    box-shadow: 0 0 8px hsl(187 100% 50% / 0.3);
+  }
+
+  .section-container {
+    @apply mx-auto px-4 md:px-6;
+    max-width: var(--content-width);
+  }
+}
+
+/* ─── Scroll-Reveal Animations ─── */
+
+.fade-up {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.6s var(--brand-bezier), transform 0.6s var(--brand-bezier);
+  transition-delay: var(--delay, 0s);
+}
+
+.fade-up.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ─── Selection ─── */
+
+::selection {
+  background: hsl(187 100% 50% / 0.3);
+  color: hsl(var(--color-text));
+}
+
+/* ─── Scrollbar ─── */
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: hsl(var(--color-bg));
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--color-border));
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--color-text-dim));
+}
+
+/* ─── Focus ─── */
+
+:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+
+/* ─── Reduced Motion ─── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .fade-up {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
