@@ -4,3 +4,6 @@
 [submodule "benchmark"]
 	path = benchmark
 	url = https://github.com/geckse/markdown-vdb-benchmark.git
+[submodule "web-component"]
+	path = web-component
+	url = https://github.com/geckse/mdvdb-tesseract-web-component.git
