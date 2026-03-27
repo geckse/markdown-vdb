@@ -128,6 +128,18 @@ macOS and Windows builds are code-signed when the following secrets are configur
 
 Without these secrets, builds are produced unsigned (functional but may trigger OS warnings).
 
+### macOS notarization
+
+macOS builds are notarized via an `afterSign` hook (`app/scripts/notarize.js`) when the following secrets are configured:
+
+| Secret | Purpose |
+|--------|---------|
+| `APPLE_ID` | Apple Developer account email |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password (generate at appleid.apple.com) |
+| `APPLE_TEAM_ID` | Apple Developer Team ID (found in developer portal) |
+
+Without these secrets, notarization is skipped. Unsigned/unnotarized macOS builds will trigger Gatekeeper warnings on macOS Sequoia+.
+
 ---
 
 ## Releasing both at once
