@@ -12,12 +12,12 @@ Chunking determines how documents are split into pieces for [embedding](vector-e
 
 ## Strategy Comparison
 
-| Strategy | Pros | Cons | Best For |
-|---|---|---|---|
-| Fixed-size (token count) | Simple, predictable | Splits mid-sentence, loses structure | Unstructured text |
-| Heading-based | Preserves document structure | Uneven sizes, headings vary widely | Technical docs, wikis |
-| Semantic (paragraph) | Natural boundaries | Still misses hierarchical context | Prose, articles |
-| Recursive (hybrid) | Balanced size + structure | More complex to implement | General purpose |
+| Strategy                 | Pros                         | Cons                                 | Best For              |
+| ------------------------ | ---------------------------- | ------------------------------------ | --------------------- |
+| Fixed-size (token count) | Simple, predictable          | Splits mid-sentence, loses structure | Unstructured text     |
+| Heading-based            | Preserves document structure | Uneven sizes, headings vary widely   | Technical docs, wikis |
+| Semantic (paragraph)     | Natural boundaries           | Still misses hierarchical context    | Prose, articles       |
+| Recursive (hybrid)       | Balanced size + structure    | More complex to implement            | General purpose       |
 
 ## Our Approach: Heading-Based + Size Guard
 

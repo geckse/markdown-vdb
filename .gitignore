@@ -27,3 +27,5 @@ logs/security/
 
 # Marketing Repos
 website/*
+/test-vault/.obsidian
+/test-vault/test

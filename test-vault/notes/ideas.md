@@ -1,9 +1,15 @@
 ---
-title: "Feature Ideas & Brainstorming"
-tags: [ideas, roadmap, brainstorming, ideas, new ideas]
+title: Feature Ideas & Brainstorming
+tags:
+  - ideas
+  - roadmap
+  - brainstorming
+  - ideas
+  - new ideas
 category: notes
-author: "Alex Park"
+author: Alex Park
 status: draft
+sessions: -1
 ---
 
 # Feature Ideas & Brainstorming

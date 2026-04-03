@@ -4,7 +4,6 @@ tags: [onboarding, getting-started, internal]
 category: notes
 author: "Alex Park"
 ---
-
 # Developer Onboarding Guide
 
 Welcome to the team. This guide gets you from zero to productive.
@@ -90,3 +89,4 @@ Look for issues labeled `good-first-issue` in the issue tracker. These are scope
 - Request changes for bugs, security issues, or missing tests
 - Use comments (not request changes) for style preferences or suggestions
 
+&nbsp;

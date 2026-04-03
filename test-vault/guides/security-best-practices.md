@@ -5,7 +5,6 @@ category: guides
 author: "Priya Sharma"
 status: published
 ---
-
 # Security Best Practices
 
 Mandatory security practices for all services and contributors.
@@ -23,12 +22,14 @@ Mandatory security practices for all services and contributors.
 
 The platform uses role-based access control (RBAC) with four roles:
 
-| Role | Read | Write | Admin | Billing |
-|---|---|---|---|---|
-| Viewer | yes | no | no | no |
-| Editor | yes | yes | no | no |
-| Admin | yes | yes | yes | no |
-| Owner | yes | yes | yes | yes |
+
+| Role   | Read | Write | Admin | Billing |
+| ------ | ---- | ----- | ----- | ------- |
+| Viewer | yes  | no    | no    | no      |
+| Editor | yes  | yes   | no    | no      |
+| Admin  | yes  | yes   | yes   | no      |
+| Owner  | yes  | yes   | yes   | yes     |
+
 
 Roles are scoped to workspaces. A user can be an Admin in one workspace and a Viewer in another.
 
@@ -87,3 +88,4 @@ If you suspect a security incident:
 - Data retention: user data deleted within 30 days of account closure
 - Annual penetration test by a third-party firm
 
+&nbsp;
