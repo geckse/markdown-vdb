@@ -84,6 +84,22 @@ impl Index {
             }
         }
 
+        // Safety: ensure next_key exceeds any key in the loaded HNSW.
+        // After save() compaction, keys are assigned sequentially 0..total-1.
+        // If metadata (chunks + semantic_edges) doesn't account for all entries
+        // (e.g., orphaned edge vectors), next_key could be too low, causing
+        // "duplicate key" errors on subsequent adds. Use hnsw.size() as a
+        // lower bound since the max key is at most total-1 >= size-1.
+        let hnsw_size = hnsw.size() as u64;
+        if next_key < hnsw_size {
+            debug!(
+                computed = next_key,
+                hnsw_size,
+                "next_key adjusted to match HNSW size"
+            );
+            next_key = hnsw_size;
+        }
+
         Ok(Self {
             path: path.to_path_buf(),
             state: RwLock::new(IndexState {
@@ -690,6 +706,44 @@ impl Index {
         // Compact HNSW keys: create a new index with sequential keys 0..N
         // matching alphabetically sorted chunk IDs, then edge IDs.
         let dims = state.metadata.embedding_config.dimensions;
+
+        // Clean up orphaned edge entries from id_to_key.
+        // Edges can become orphaned when links are removed from a file:
+        // upsert_edges() only removes edges in the NEW list, but
+        // update_link_graph() replaces semantic_edges entirely, leaving
+        // stale edge entries in id_to_key that aren't tracked in metadata.
+        // On reload, open_with_options() reconstructs id_to_key from
+        // metadata.chunks + semantic_edges, so orphaned edges cause
+        // next_key to be too low → duplicate key errors.
+        {
+            let tracked_edges: std::collections::HashSet<String> = state
+                .metadata
+                .link_graph
+                .as_ref()
+                .and_then(|lg| lg.semantic_edges.as_ref())
+                .map(|se| se.keys().cloned().collect())
+                .unwrap_or_default();
+
+            let orphaned: Vec<String> = state
+                .id_to_key
+                .keys()
+                .filter(|id| {
+                    !state.metadata.chunks.contains_key(*id) && !tracked_edges.contains(*id)
+                })
+                .cloned()
+                .collect();
+
+            for id in &orphaned {
+                if let Some(key) = state.id_to_key.remove(id) {
+                    let _ = state.hnsw.remove(key);
+                }
+            }
+
+            if !orphaned.is_empty() {
+                debug!(count = orphaned.len(), "removed orphaned edge vectors");
+            }
+        }
+
         let mut sorted_chunk_ids: Vec<&String> = state.metadata.chunks.keys().collect();
         sorted_chunk_ids.sort();
 
@@ -1309,5 +1363,102 @@ mod tests {
 
         let state = index.state.read();
         assert_eq!(state.metadata.embedding_config.model, "test-model");
+    }
+
+    /// Regression test: orphaned edge vectors in HNSW cause "Duplicate keys"
+    /// error after save/reload because next_key is computed from metadata
+    /// (chunks + semantic_edges) which doesn't include orphaned edges.
+    #[test]
+    fn orphaned_edges_do_not_cause_duplicate_key_on_reload() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let config = test_config();
+        let index = Index::create(&path, &config).unwrap();
+
+        // Add a chunk so the index isn't empty.
+        let file = crate::parser::MarkdownFile {
+            path: std::path::PathBuf::from("test.md"),
+            content_hash: "abc".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            body: "hello".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk = crate::chunker::Chunk {
+            id: "test.md#0".to_string(),
+            source_path: std::path::PathBuf::from("test.md"),
+            content: "hello".to_string(),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            is_sub_split: false,
+            start_line: 0,
+            end_line: 1,
+        };
+        index.upsert(&file, &[chunk], &[vec![1.0f32; 128]]).unwrap();
+
+        // Add edge vectors (simulating edge embedding during ingest).
+        let edges = vec![
+            ("edge:test.md->a.md@1".to_string(), vec![0.5f32; 128]),
+            ("edge:test.md->b.md@2".to_string(), vec![0.3f32; 128]),
+        ];
+        index.upsert_edges(&edges).unwrap();
+
+        // Update link graph with semantic_edges that include ONLY one of the
+        // two edges (simulating a link being removed from the file).
+        let mut semantic_edges = HashMap::new();
+        semantic_edges.insert(
+            "edge:test.md->a.md@1".to_string(),
+            crate::links::SemanticEdge {
+                edge_id: "edge:test.md->a.md@1".to_string(),
+                source: "test.md".to_string(),
+                target: "a.md".to_string(),
+                context_text: "link to a".to_string(),
+                line_number: 1,
+                strength: None,
+                relationship_type: None,
+                cluster_id: None,
+            },
+        );
+        // Note: edge:test.md->b.md@2 is intentionally missing from semantic_edges
+        // (it was removed from the file). This is the "orphan".
+        let graph = crate::links::LinkGraph {
+            forward: HashMap::new(),
+            last_updated: 0,
+            semantic_edges: Some(semantic_edges),
+            edge_cluster_state: None,
+        };
+        index.update_link_graph(Some(graph));
+
+        // Save and reload. Before the fix, the orphaned edge would cause
+        // next_key to be too low on reload, leading to duplicate key errors.
+        index.save().unwrap();
+        let reloaded = Index::open(&path).unwrap();
+
+        // Upsert a new file — this should NOT fail with "duplicate key".
+        let file2 = crate::parser::MarkdownFile {
+            path: std::path::PathBuf::from("other.md"),
+            content_hash: "def".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            body: "world".to_string(),
+            modified_at: 0,
+            file_size: 5,
+            links: vec![],
+        };
+        let chunk2 = crate::chunker::Chunk {
+            id: "other.md#0".to_string(),
+            source_path: std::path::PathBuf::from("other.md"),
+            content: "world".to_string(),
+            heading_hierarchy: vec![],
+            chunk_index: 0,
+            is_sub_split: false,
+            start_line: 0,
+            end_line: 1,
+        };
+        reloaded
+            .upsert(&file2, &[chunk2], &[vec![0.8f32; 128]])
+            .expect("upsert should not fail with duplicate key error");
     }
 }
