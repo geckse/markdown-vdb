@@ -19,9 +19,6 @@ logs/security/
 .env
 .markdownvdb.index
 
-/app/node_modules
-/app/dist
-/app/out
 /node_modules
 /.auto-claude
 
