@@ -26,3 +26,4 @@ logs/security/
 website/*
 /test-vault/.obsidian
 /test-vault/test
+app.zip
