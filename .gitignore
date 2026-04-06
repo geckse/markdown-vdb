@@ -24,6 +24,10 @@ logs/security/
 
 # Marketing Repos
 website/*
+website/tesseract
+website/tesseract/*
+
+# stuff
 /test-vault/.obsidian
 /test-vault/test
 app.zip
