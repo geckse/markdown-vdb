@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::SystemTime;
 
 use crate::chunker::Chunk;
-use crate::clustering::ClusterState;
+use crate::clustering::{ClusterState, CustomClusterState};
 use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
 use crate::schema::{Schema, ScopedSchema};
@@ -82,6 +82,8 @@ pub struct IndexMetadata {
     pub file_mtimes: Option<HashMap<String, u64>>,
     /// Path-scoped schemas from directory-level inference, if available.
     pub scoped_schemas: Option<Vec<ScopedSchema>>,
+    /// User-defined custom cluster state, if available.
+    pub custom_cluster_state: Option<CustomClusterState>,
 }
 
 /// Status snapshot returned by `Index::status()`.

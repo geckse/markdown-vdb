@@ -49,6 +49,7 @@ fn mock_config() -> Config {
             edge_embeddings: true,
             edge_boost_weight: 0.15,
             edge_cluster_rebalance: 50,
+            custom_cluster_defs: Vec::new(),
     }
 }
 
@@ -1010,4 +1011,119 @@ async fn test_search_with_expansion() {
             "graph_context should be an array"
         );
     }
+}
+
+#[tokio::test]
+async fn custom_clusters_full_pipeline() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    // Create config dir and markdown files
+    std::fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    std::fs::write(root.join("ai.md"), "# AI\nMachine learning and neural networks").unwrap();
+    std::fs::write(root.join("web.md"), "# Web\nHTML CSS and JavaScript frontend").unwrap();
+    std::fs::write(root.join("ops.md"), "# Ops\nDocker and Kubernetes deployments").unwrap();
+
+    let mut config = mock_config();
+    config.custom_cluster_defs = vec![
+        mdvdb::CustomClusterDef {
+            name: "AI".to_string(),
+            seeds: vec!["machine learning".to_string(), "neural networks".to_string()],
+        },
+        mdvdb::CustomClusterDef {
+            name: "Web".to_string(),
+            seeds: vec!["html".to_string(), "css".to_string(), "javascript".to_string()],
+        },
+    ];
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), config).unwrap();
+    vdb.ingest(mdvdb::IngestOptions::default()).await.unwrap();
+
+    // Custom clusters should be populated
+    let custom = vdb.custom_clusters().unwrap();
+    assert_eq!(custom.len(), 2);
+    assert_eq!(custom[0].name, "AI");
+    assert_eq!(custom[1].name, "Web");
+
+    // All 3 documents should be assigned
+    let total_docs: usize = custom.iter().map(|c| c.document_count).sum();
+    assert_eq!(total_docs, 3);
+
+    // Graph data should include custom cluster info
+    let graph = vdb.graph_data(None).unwrap();
+    assert_eq!(graph.custom_clusters.len(), 2);
+    for node in &graph.nodes {
+        assert!(node.custom_cluster_id.is_some(), "every node should have a custom_cluster_id");
+    }
+}
+
+#[tokio::test]
+async fn custom_clusters_cleared_when_defs_removed() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    std::fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    std::fs::write(root.join("doc.md"), "# Hello\nSome content here").unwrap();
+
+    // First ingest with custom clusters defined
+    let mut config = mock_config();
+    config.custom_cluster_defs = vec![mdvdb::CustomClusterDef {
+        name: "Test".to_string(),
+        seeds: vec!["hello".to_string()],
+    }];
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), config).unwrap();
+    vdb.ingest(mdvdb::IngestOptions::default()).await.unwrap();
+    assert_eq!(vdb.custom_clusters().unwrap().len(), 1);
+    drop(vdb);
+
+    // Second ingest with empty defs — should clear
+    let mut config2 = mock_config();
+    config2.custom_cluster_defs = Vec::new();
+
+    let vdb2 = MarkdownVdb::open_with_config(root.to_path_buf(), config2).unwrap();
+    vdb2.ingest(mdvdb::IngestOptions::default()).await.unwrap();
+    assert!(vdb2.custom_clusters().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn custom_clusters_incremental_ingest() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    std::fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    std::fs::write(root.join("doc1.md"), "# First\nContent one").unwrap();
+
+    let mut config = mock_config();
+    config.custom_cluster_defs = vec![
+        mdvdb::CustomClusterDef {
+            name: "A".to_string(),
+            seeds: vec!["first".to_string()],
+        },
+        mdvdb::CustomClusterDef {
+            name: "B".to_string(),
+            seeds: vec!["second".to_string()],
+        },
+    ];
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), config.clone()).unwrap();
+    vdb.ingest(mdvdb::IngestOptions::default()).await.unwrap();
+
+    // Should have 1 doc assigned
+    let custom = vdb.custom_clusters().unwrap();
+    let total: usize = custom.iter().map(|c| c.document_count).sum();
+    assert_eq!(total, 1);
+
+    // Add a new file and do incremental ingest
+    std::fs::write(root.join("doc2.md"), "# Second\nContent two").unwrap();
+    let opts = mdvdb::IngestOptions {
+        file: Some(PathBuf::from("doc2.md")),
+        ..Default::default()
+    };
+    vdb.ingest(opts).await.unwrap();
+
+    // Now should have 2 docs assigned
+    let custom = vdb.custom_clusters().unwrap();
+    let total: usize = custom.iter().map(|c| c.document_count).sum();
+    assert_eq!(total, 2);
 }

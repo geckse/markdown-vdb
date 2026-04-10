@@ -253,6 +253,7 @@ mod tests {
             link_graph: None,
             file_mtimes: Some(HashMap::new()),
             scoped_schemas: None,
+            custom_cluster_state: None,
         }
     }
 

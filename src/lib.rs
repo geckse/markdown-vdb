@@ -23,7 +23,8 @@ pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField, ScopedSchema};
 pub use search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
-pub use clustering::{ClusterInfo, ClusterState};
+pub use clustering::{ClusterInfo, ClusterState, CustomClusterDef, CustomClusterInfo, CustomClusterState};
+pub use config::{encode_custom_clusters as config_encode_custom_clusters, parse_custom_clusters_value as config_parse_custom_clusters, update_config_value as config_update_value};
 pub use links::{
     EdgeClusterInfo, EdgeClusterState, LinkEntry, LinkGraph, LinkQueryResult, LinkState,
     NeighborhoodNode, NeighborhoodResult, OrphanFile, ResolvedLink, SemanticEdge,
@@ -257,6 +258,19 @@ pub struct ClusterSummary {
     pub keywords: Vec<String>,
 }
 
+/// Summary of a user-defined custom cluster.
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomClusterSummary {
+    /// Cluster identifier.
+    pub id: usize,
+    /// User-provided cluster name.
+    pub name: String,
+    /// Seed phrases used to define this cluster.
+    pub seed_phrases: Vec<String>,
+    /// Number of documents assigned to this cluster.
+    pub document_count: usize,
+}
+
 /// Graph detail level: document (file) or chunk.
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize, clap::ValueEnum)]
 pub enum GraphLevel {
@@ -280,6 +294,8 @@ pub struct GraphNode {
     pub chunk_index: Option<usize>,
     /// Cluster assignment, if any.
     pub cluster_id: Option<usize>,
+    /// Custom cluster assignment, if any (separate layer from auto-clusters).
+    pub custom_cluster_id: Option<usize>,
     /// Optional size metric for visualization (e.g. content length for chunks).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<f64>,
@@ -335,6 +351,9 @@ pub struct GraphData {
     /// Edge clusters (semantic relationship groupings), if available.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub edge_clusters: Vec<GraphCluster>,
+    /// User-defined custom clusters, if available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_clusters: Vec<GraphCluster>,
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -1219,6 +1238,54 @@ impl MarkdownVdb {
             }
         }
 
+        // Custom clustering (separate layer from K-means).
+        if !self.config.custom_cluster_defs.is_empty() {
+            let doc_vectors = self.index.get_document_vectors();
+            if !doc_vectors.is_empty() {
+                if let Some(ref single_file) = options.file {
+                    // Single-file ingest: assign to nearest custom cluster using existing centroids.
+                    if let Some(mut state) = self.index.get_custom_clusters() {
+                        let path_str = single_file.to_string_lossy().to_string();
+                        if let Some(vec) = doc_vectors.get(&path_str) {
+                            let clusterer = clustering::Clusterer::new(&self.config);
+                            clusterer.assign_single_to_custom(&mut state, &path_str, vec);
+                            self.index.update_custom_clusters(Some(state));
+                            self.index.save()?;
+                        }
+                    }
+                    // If no existing custom cluster state, skip — next full ingest will create it.
+                } else {
+                    // Full ingest: embed seeds and assign all documents.
+                    let provider = self.ensure_provider()?;
+                    match clustering::embed_seed_centroids(
+                        &self.config.custom_cluster_defs,
+                        provider.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok(centroids) => {
+                            let clusterer = clustering::Clusterer::new(&self.config);
+                            let state = clusterer.assign_all_to_custom(
+                                &self.config.custom_cluster_defs,
+                                &centroids,
+                                &doc_vectors,
+                            );
+                            self.index.update_custom_clusters(Some(state));
+                            self.index.save()?;
+                            info!("custom clustering complete");
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "custom clustering failed (non-fatal)");
+                        }
+                    }
+                }
+            }
+        } else if self.index.get_custom_clusters().is_some() {
+            // Definitions removed from config — clear the state.
+            self.index.update_custom_clusters(None);
+            self.index.save()?;
+        }
+
         // Persist global and scoped schemas.
         // For single-file ingest, skip schema recomputation.
         if options.file.is_none() {
@@ -1608,6 +1675,23 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
         }
     }
 
+    /// Return summaries of user-defined custom clusters.
+    pub fn custom_clusters(&self) -> Result<Vec<CustomClusterSummary>> {
+        match self.index.get_custom_clusters() {
+            Some(state) => Ok(state
+                .clusters
+                .iter()
+                .map(|c| CustomClusterSummary {
+                    id: c.id,
+                    name: c.name.clone(),
+                    seed_phrases: c.seed_phrases.clone(),
+                    document_count: c.members.len(),
+                })
+                .collect()),
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Return graph data combining indexed files, link edges, and cluster membership.
     pub fn graph_data(&self, path_filter: Option<&str>) -> Result<GraphData> {
         // 1. Get all indexed file paths
@@ -1639,6 +1723,24 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             }
         }
 
+        // 2b. Build path → custom_cluster_id map
+        let custom_cluster_state = self.index.get_custom_clusters();
+        let mut path_to_custom_cluster: HashMap<String, usize> = HashMap::new();
+        let mut custom_clusters = Vec::new();
+        if let Some(ref state) = custom_cluster_state {
+            for cluster in &state.clusters {
+                for member in &cluster.members {
+                    path_to_custom_cluster.insert(member.clone(), cluster.id);
+                }
+                custom_clusters.push(GraphCluster {
+                    id: cluster.id,
+                    label: cluster.name.clone(),
+                    keywords: cluster.seed_phrases.clone(),
+                    member_count: cluster.members.len(),
+                });
+            }
+        }
+
         // 3. Build nodes
         let nodes: Vec<GraphNode> = indexed_paths
             .iter()
@@ -1648,6 +1750,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 label: None,
                 chunk_index: None,
                 cluster_id: path_to_cluster.get(path).copied(),
+                custom_cluster_id: path_to_custom_cluster.get(path).copied(),
                 size: None,
             })
             .collect();
@@ -1698,6 +1801,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             clusters,
             level: "document".to_string(),
             edge_clusters,
+            custom_clusters,
         })
     }
 
@@ -1722,6 +1826,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                 clusters: Vec::new(),
                 level: "chunk".to_string(),
                 edge_clusters: Vec::new(),
+                custom_clusters: Vec::new(),
             });
         }
 
@@ -1738,6 +1843,24 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                     id: cluster.id,
                     label: cluster.label.clone(),
                     keywords: cluster.keywords.clone(),
+                    member_count: cluster.members.len(),
+                });
+            }
+        }
+
+        // Build path → custom_cluster_id map
+        let custom_cluster_state = self.index.get_custom_clusters();
+        let mut path_to_custom_cluster: HashMap<String, usize> = HashMap::new();
+        let mut custom_clusters = Vec::new();
+        if let Some(ref state) = custom_cluster_state {
+            for cluster in &state.clusters {
+                for member in &cluster.members {
+                    path_to_custom_cluster.insert(member.clone(), cluster.id);
+                }
+                custom_clusters.push(GraphCluster {
+                    id: cluster.id,
+                    label: cluster.name.clone(),
+                    keywords: cluster.seed_phrases.clone(),
                     member_count: cluster.members.len(),
                 });
             }
@@ -1760,6 +1883,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
                     label,
                     chunk_index: Some(cv.chunk_index),
                     cluster_id: path_to_cluster.get(&cv.source_path).copied(),
+                    custom_cluster_id: path_to_custom_cluster.get(&cv.source_path).copied(),
                     size: content_len,
                 }
             })
@@ -1823,6 +1947,7 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
             clusters,
             level: "chunk".to_string(),
             edge_clusters: Vec::new(),
+            custom_clusters,
         })
     }
 

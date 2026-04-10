@@ -11,7 +11,7 @@ use crate::chunker::Chunk;
 use crate::error::{Error, Result};
 use crate::index::storage::{self, WriteOptions};
 use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
-use crate::clustering::ClusterState;
+use crate::clustering::{ClusterState, CustomClusterState};
 use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
@@ -141,6 +141,7 @@ impl Index {
             link_graph: None,
             file_mtimes: Some(HashMap::new()),
             scoped_schemas: None,
+            custom_cluster_state: None,
         };
 
         let scalar_kind = storage::scalar_kind_for(&write_options.quantization);
@@ -582,6 +583,19 @@ impl Index {
     pub fn update_clusters(&self, cluster_state: Option<ClusterState>) {
         let mut state = self.state.write();
         state.metadata.cluster_state = cluster_state;
+        state.dirty = true;
+    }
+
+    /// Get the current custom cluster state, if any.
+    pub fn get_custom_clusters(&self) -> Option<CustomClusterState> {
+        let state = self.state.read();
+        state.metadata.custom_cluster_state.clone()
+    }
+
+    /// Update (or clear) the custom cluster state.
+    pub fn update_custom_clusters(&self, custom_cluster_state: Option<CustomClusterState>) {
+        let mut state = self.state.write();
+        state.metadata.custom_cluster_state = custom_cluster_state;
         state.dirty = true;
     }
 

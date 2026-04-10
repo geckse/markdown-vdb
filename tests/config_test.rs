@@ -39,6 +39,7 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_SEARCH_BOOST_HOPS",
     "MDVDB_SEARCH_EXPAND_GRAPH",
     "MDVDB_SEARCH_EXPAND_LIMIT",
+    "MDVDB_CUSTOM_CLUSTERS",
 ];
 
 /// Clear all MDVDB-related env vars to ensure test isolation.
@@ -977,4 +978,124 @@ fn granularity_in_dotenv() {
     assert!((config.clustering_granularity - 0.5).abs() < f64::EPSILON);
 
     clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// Custom Clusters Config Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn custom_clusters_parsed_from_env() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    std::env::set_var(
+        "MDVDB_CUSTOM_CLUSTERS",
+        "AI Research:machine learning,neural networks|Web Dev:html,css,react",
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let config = Config::load(tmp.path()).unwrap();
+
+    assert_eq!(config.custom_cluster_defs.len(), 2);
+    assert_eq!(config.custom_cluster_defs[0].name, "AI Research");
+    assert_eq!(
+        config.custom_cluster_defs[0].seeds,
+        vec!["machine learning", "neural networks"]
+    );
+    assert_eq!(config.custom_cluster_defs[1].name, "Web Dev");
+    assert_eq!(
+        config.custom_cluster_defs[1].seeds,
+        vec!["html", "css", "react"]
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn custom_clusters_empty_when_unset() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+
+    let tmp = TempDir::new().unwrap();
+    let config = Config::load(tmp.path()).unwrap();
+
+    assert!(config.custom_cluster_defs.is_empty());
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn custom_clusters_malformed_entries_skipped() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    // Missing colon, empty name, empty seeds
+    std::env::set_var(
+        "MDVDB_CUSTOM_CLUSTERS",
+        "no_colon_here|:empty_name|Valid:seed1,seed2|EmptySeeds:",
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let config = Config::load(tmp.path()).unwrap();
+
+    // Only "Valid" should parse
+    assert_eq!(config.custom_cluster_defs.len(), 1);
+    assert_eq!(config.custom_cluster_defs[0].name, "Valid");
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn custom_clusters_duplicate_names_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    std::env::set_var("MDVDB_CUSTOM_CLUSTERS", "Dup:a,b|Dup:c,d");
+
+    let tmp = TempDir::new().unwrap();
+    let result = Config::load(tmp.path());
+
+    assert!(result.is_err());
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(err_msg.contains("duplicate custom cluster name"));
+
+    clear_env();
+}
+
+#[test]
+fn parse_and_encode_custom_clusters_roundtrip() {
+    let input = "AI Research:machine learning,neural networks|Web Dev:html,css,react";
+    let defs = mdvdb::config_parse_custom_clusters(input);
+    assert_eq!(defs.len(), 2);
+
+    let encoded = mdvdb::config_encode_custom_clusters(&defs);
+    assert_eq!(encoded, input);
+}
+
+#[test]
+fn update_config_value_creates_and_modifies() {
+    let tmp = TempDir::new().unwrap();
+    let config_path = tmp.path().join(".markdownvdb").join(".config");
+
+    // Creates file and directory
+    mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", "A:x,y").unwrap();
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("MDVDB_CUSTOM_CLUSTERS=A:x,y"));
+
+    // Modifies existing key
+    mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", "A:x,y|B:z").unwrap();
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("MDVDB_CUSTOM_CLUSTERS=A:x,y|B:z"));
+    // Should not have duplicates
+    assert_eq!(
+        content.matches("MDVDB_CUSTOM_CLUSTERS").count(),
+        1
+    );
+
+    // Removes key when value is empty
+    mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", "").unwrap();
+    let content = fs::read_to_string(&config_path).unwrap();
+    assert!(!content.contains("MDVDB_CUSTOM_CLUSTERS"));
 }

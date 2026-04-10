@@ -1858,3 +1858,218 @@ fn test_links_depth_json() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Custom Cluster CLI Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_clusters_add_and_list() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+    )
+    .unwrap();
+
+    // Add a cluster
+    let output = mdvdb_bin()
+        .args(["clusters", "add", "AI Research", "--seeds", "machine learning,neural networks", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(output.status.success(), "clusters add failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // List should show it
+    let output = mdvdb_bin()
+        .args(["clusters", "list", "--json", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(output.status.success());
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "AI Research");
+    assert_eq!(arr[0]["seeds"][0], "machine learning");
+    assert_eq!(arr[0]["seeds"][1], "neural networks");
+}
+
+#[test]
+fn test_clusters_add_rejects_invalid_name() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\n",
+    )
+    .unwrap();
+
+    // Name with colon
+    let output = mdvdb_bin()
+        .args(["clusters", "add", "Bad:Name", "--seeds", "x,y", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(":") || stderr.contains("cannot contain"));
+
+    // Name with pipe
+    let output = mdvdb_bin()
+        .args(["clusters", "add", "Bad|Name", "--seeds", "x,y", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_clusters_add_rejects_invalid_seeds() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\n",
+    )
+    .unwrap();
+
+    // Seed with pipe
+    let output = mdvdb_bin()
+        .args(["clusters", "add", "Test", "--seeds", "good,bad|seed", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_clusters_remove() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_CUSTOM_CLUSTERS=A:x,y|B:z\n",
+    )
+    .unwrap();
+
+    // Remove cluster A
+    let output = mdvdb_bin()
+        .args(["clusters", "remove", "A", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(output.status.success(), "remove failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // List should only show B
+    let output = mdvdb_bin()
+        .args(["clusters", "list", "--json", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(output.status.success());
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "B");
+}
+
+#[test]
+fn test_clusters_remove_nonexistent() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .args(["clusters", "remove", "Nonexistent", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not found"));
+}
+
+#[test]
+fn test_clusters_custom_json_after_ingest() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\nMDVDB_CUSTOM_CLUSTERS=\"AI:machine learning,neural nets|Web:html,css\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("ai.md"), "# AI\nMachine learning content").unwrap();
+    fs::write(root.join("web.md"), "# Web\nHTML and CSS content").unwrap();
+
+    // Ingest
+    let output = mdvdb_bin()
+        .args(["ingest", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(output.status.success(), "ingest failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Custom clusters JSON
+    let output = mdvdb_bin()
+        .args(["clusters", "--custom", "--json", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(output.status.success(), "clusters --custom failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["name"], "AI");
+    assert_eq!(arr[1]["name"], "Web");
+
+    // Every cluster should have a document count
+    let total_docs: usize = arr.iter().map(|c| c["document_count"].as_u64().unwrap() as usize).sum();
+    assert_eq!(total_docs, 2);
+}
+
+#[test]
+fn test_clusters_list_no_index_needed() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    // Config with clusters defined but NO index
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join(".config"),
+        "MDVDB_CUSTOM_CLUSTERS=Test:seed1,seed2\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .args(["clusters", "list", "--json", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(output.status.success());
+
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "Test");
+}

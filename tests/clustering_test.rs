@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use mdvdb::clustering::{ClusterInfo, ClusterState, Clusterer};
+use mdvdb::clustering::{ClusterInfo, ClusterState, Clusterer, CustomClusterDef, CustomClusterState};
 use mdvdb::config::Config;
 
 // ---------------------------------------------------------------------------
@@ -268,4 +268,135 @@ fn high_granularity_produces_more_clusters() {
         fine_state.clusters.len(),
         coarse_state.clusters.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Custom Cluster Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn assign_all_to_custom_assigns_every_document() {
+    let clusterer = Clusterer::new(&test_config());
+
+    let defs = vec![
+        CustomClusterDef {
+            name: "Cluster A".to_string(),
+            seeds: vec!["alpha".to_string()],
+        },
+        CustomClusterDef {
+            name: "Cluster B".to_string(),
+            seeds: vec!["beta".to_string()],
+        },
+    ];
+
+    // Centroid A points in x direction, centroid B in y direction
+    let centroids = vec![
+        vec![1.0, 0.0, 0.0, 0.0],
+        vec![0.0, 1.0, 0.0, 0.0],
+    ];
+
+    // Documents: some closer to A, some closer to B
+    let mut doc_vectors = HashMap::new();
+    doc_vectors.insert("close_to_a.md".to_string(), vec![0.9, 0.1, 0.0, 0.0]);
+    doc_vectors.insert("also_a.md".to_string(), vec![0.8, 0.2, 0.0, 0.0]);
+    doc_vectors.insert("close_to_b.md".to_string(), vec![0.1, 0.9, 0.0, 0.0]);
+
+    let state = clusterer.assign_all_to_custom(&defs, &centroids, &doc_vectors);
+
+    // All documents assigned
+    let total: usize = state.clusters.iter().map(|c| c.members.len()).sum();
+    assert_eq!(total, 3);
+
+    // Check assignment correctness
+    assert!(state.clusters[0].members.contains(&"close_to_a.md".to_string()));
+    assert!(state.clusters[0].members.contains(&"also_a.md".to_string()));
+    assert!(state.clusters[1].members.contains(&"close_to_b.md".to_string()));
+
+    // Verify metadata
+    assert_eq!(state.clusters[0].name, "Cluster A");
+    assert_eq!(state.clusters[1].name, "Cluster B");
+    assert_eq!(state.clusters[0].id, 0);
+    assert_eq!(state.clusters[1].id, 1);
+}
+
+#[test]
+fn assign_single_to_custom_moves_document() {
+    let clusterer = Clusterer::new(&test_config());
+
+    let mut state = CustomClusterState {
+        clusters: vec![
+            mdvdb::clustering::CustomClusterInfo {
+                id: 0,
+                name: "A".to_string(),
+                seed_phrases: vec!["alpha".to_string()],
+                centroid: vec![1.0, 0.0, 0.0, 0.0],
+                members: vec!["doc.md".to_string()],
+            },
+            mdvdb::clustering::CustomClusterInfo {
+                id: 1,
+                name: "B".to_string(),
+                seed_phrases: vec!["beta".to_string()],
+                centroid: vec![0.0, 1.0, 0.0, 0.0],
+                members: vec![],
+            },
+        ],
+    };
+
+    // Re-assign doc.md — now closer to B
+    let new_vector = vec![0.1, 0.9, 0.0, 0.0];
+    clusterer.assign_single_to_custom(&mut state, "doc.md", &new_vector);
+
+    // Should have moved from A to B
+    assert!(!state.clusters[0].members.contains(&"doc.md".to_string()));
+    assert!(state.clusters[1].members.contains(&"doc.md".to_string()));
+}
+
+#[test]
+fn assign_single_to_custom_centroid_stable() {
+    let clusterer = Clusterer::new(&test_config());
+
+    let original_centroid = vec![1.0, 0.0, 0.0, 0.0];
+    let mut state = CustomClusterState {
+        clusters: vec![mdvdb::clustering::CustomClusterInfo {
+            id: 0,
+            name: "A".to_string(),
+            seed_phrases: vec!["alpha".to_string()],
+            centroid: original_centroid.clone(),
+            members: vec![],
+        }],
+    };
+
+    // Assign a document — centroid should NOT change
+    clusterer.assign_single_to_custom(&mut state, "doc.md", &[0.5, 0.5, 0.0, 0.0]);
+
+    assert_eq!(state.clusters[0].centroid, original_centroid);
+}
+
+#[test]
+fn custom_cluster_no_duplicate_members() {
+    let clusterer = Clusterer::new(&test_config());
+
+    let defs = vec![
+        CustomClusterDef {
+            name: "Only".to_string(),
+            seeds: vec!["only".to_string()],
+        },
+    ];
+    let centroids = vec![vec![1.0, 0.0]];
+
+    let mut doc_vectors = HashMap::new();
+    for i in 0..10 {
+        doc_vectors.insert(format!("doc{i}.md"), vec![1.0, 0.0]);
+    }
+
+    let state = clusterer.assign_all_to_custom(&defs, &centroids, &doc_vectors);
+
+    let total: usize = state.clusters.iter().map(|c| c.members.len()).sum();
+    assert_eq!(total, 10);
+
+    // No duplicates
+    let mut all: Vec<&str> = state.clusters[0].members.iter().map(|s| s.as_str()).collect();
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 10);
 }

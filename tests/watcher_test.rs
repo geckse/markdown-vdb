@@ -52,6 +52,7 @@ fn test_config(source_dir: &str) -> Config {
             edge_embeddings: true,
             edge_boost_weight: 0.15,
             edge_cluster_rebalance: 50,
+            custom_cluster_defs: Vec::new(),
     }
 }
 

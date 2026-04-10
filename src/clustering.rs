@@ -55,6 +55,39 @@ pub struct ClusterState {
     pub docs_at_last_rebalance: usize,
 }
 
+/// User-defined custom cluster definition (config-layer only, not persisted in index).
+#[derive(Debug, Clone, Serialize)]
+pub struct CustomClusterDef {
+    /// User-provided cluster name.
+    pub name: String,
+    /// Seed words/phrases used to compute the centroid.
+    pub seeds: Vec<String>,
+}
+
+/// Information about a single user-defined custom cluster, stored in the index.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[rkyv(derive(Debug))]
+pub struct CustomClusterInfo {
+    /// Numeric cluster identifier (0-based).
+    pub id: usize,
+    /// User-provided cluster name.
+    pub name: String,
+    /// The seed phrases used to compute this cluster's centroid.
+    pub seed_phrases: Vec<String>,
+    /// Centroid vector (average of embedded seed phrases, normalized).
+    pub centroid: Vec<f32>,
+    /// File paths (relative) assigned to this cluster.
+    pub members: Vec<String>,
+}
+
+/// Custom cluster state persisted in the index.
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[rkyv(derive(Debug))]
+pub struct CustomClusterState {
+    /// All custom clusters.
+    pub clusters: Vec<CustomClusterInfo>,
+}
+
 /// Performs clustering operations on document embeddings.
 pub struct Clusterer {
     config: Config,
@@ -688,6 +721,142 @@ impl Clusterer {
             cluster.label = self.generate_label(&cluster.keywords);
         }
     }
+
+    /// Assign all documents to their nearest custom cluster centroid.
+    ///
+    /// `defs` provides cluster names and seed phrases. `centroids` are the
+    /// pre-computed centroid vectors (one per def, in the same order).
+    /// `doc_vectors` maps document path to its embedding vector.
+    pub fn assign_all_to_custom(
+        &self,
+        defs: &[CustomClusterDef],
+        centroids: &[Vec<f32>],
+        doc_vectors: &HashMap<String, Vec<f32>>,
+    ) -> CustomClusterState {
+        let mut clusters: Vec<CustomClusterInfo> = defs
+            .iter()
+            .enumerate()
+            .map(|(i, def)| CustomClusterInfo {
+                id: i,
+                name: def.name.clone(),
+                seed_phrases: def.seeds.clone(),
+                centroid: centroids[i].clone(),
+                members: Vec::new(),
+            })
+            .collect();
+
+        // Assign each document to the nearest centroid.
+        for (path, vec) in doc_vectors {
+            let best_idx = find_nearest_centroid(vec, centroids);
+            clusters[best_idx].members.push(path.clone());
+        }
+
+        // Sort members within each cluster for determinism.
+        for cluster in &mut clusters {
+            cluster.members.sort();
+        }
+
+        info!(
+            "assign_all_to_custom: assigned {} documents to {} custom clusters",
+            doc_vectors.len(),
+            clusters.len()
+        );
+
+        CustomClusterState { clusters }
+    }
+
+    /// Assign a single document to the nearest existing custom cluster.
+    ///
+    /// Removes the document from any current membership first, then assigns
+    /// to the nearest centroid. The centroid is NOT updated (anchored to seeds).
+    pub fn assign_single_to_custom(
+        &self,
+        state: &mut CustomClusterState,
+        doc_path: &str,
+        vector: &[f32],
+    ) {
+        // Remove from any existing cluster.
+        for cluster in &mut state.clusters {
+            cluster.members.retain(|m| m != doc_path);
+        }
+
+        // Find nearest centroid.
+        let centroids: Vec<&Vec<f32>> = state.clusters.iter().map(|c| &c.centroid).collect();
+        if centroids.is_empty() {
+            return;
+        }
+
+        let centroid_vecs: Vec<Vec<f32>> = centroids.iter().map(|c| (*c).clone()).collect();
+        let best_idx = find_nearest_centroid(vector, &centroid_vecs);
+        state.clusters[best_idx].members.push(doc_path.to_string());
+
+        debug!(
+            "assign_single_to_custom: assigned {doc_path} to custom cluster '{}'",
+            state.clusters[best_idx].name
+        );
+    }
+}
+
+/// Embed seed phrases and compute normalized centroid vectors for custom clusters.
+///
+/// For each cluster definition, embeds all seed phrases and averages the resulting
+/// vectors, then normalizes to unit length. Returns one centroid per definition.
+pub async fn embed_seed_centroids(
+    defs: &[CustomClusterDef],
+    provider: &dyn crate::embedding::provider::EmbeddingProvider,
+) -> crate::Result<Vec<Vec<f32>>> {
+    let mut centroids = Vec::with_capacity(defs.len());
+
+    for def in defs {
+        let seeds: Vec<String> = def.seeds.clone();
+        let embeddings = provider.embed_batch(&seeds).await?;
+
+        if embeddings.is_empty() {
+            return Err(crate::Error::Clustering(format!(
+                "no embeddings returned for custom cluster '{}' seeds",
+                def.name
+            )));
+        }
+
+        let dims = embeddings[0].len();
+        let mut centroid = vec![0.0f32; dims];
+        let n = embeddings.len() as f32;
+
+        for emb in &embeddings {
+            for (i, v) in emb.iter().enumerate() {
+                centroid[i] += v;
+            }
+        }
+        for v in &mut centroid {
+            *v /= n;
+        }
+
+        // Normalize to unit vector.
+        let norm: f32 = centroid.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for v in &mut centroid {
+                *v /= norm;
+            }
+        }
+
+        centroids.push(centroid);
+    }
+
+    Ok(centroids)
+}
+
+/// Find the index of the nearest centroid to a given vector by cosine similarity.
+fn find_nearest_centroid(vector: &[f32], centroids: &[Vec<f32>]) -> usize {
+    let mut best_idx = 0;
+    let mut best_sim = f32::NEG_INFINITY;
+    for (i, centroid) in centroids.iter().enumerate() {
+        let sim = cosine_similarity(vector, centroid);
+        if sim > best_sim {
+            best_sim = sim;
+            best_idx = i;
+        }
+    }
+    best_idx
 }
 
 /// Compute cosine similarity between two vectors.

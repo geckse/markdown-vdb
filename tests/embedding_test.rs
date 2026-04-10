@@ -50,6 +50,7 @@ fn base_config() -> Config {
             edge_embeddings: true,
             edge_boost_weight: 0.15,
             edge_cluster_rebalance: 50,
+            custom_cluster_defs: Vec::new(),
     }
 }
 

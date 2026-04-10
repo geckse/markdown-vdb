@@ -268,7 +268,34 @@ struct SchemaArgs {
 }
 
 #[derive(Parser)]
-struct ClustersArgs {}
+struct ClustersArgs {
+    /// Show custom clusters instead of auto clusters
+    #[arg(long)]
+    custom: bool,
+
+    /// Manage custom cluster definitions
+    #[command(subcommand)]
+    action: Option<ClusterAction>,
+}
+
+#[derive(Subcommand)]
+enum ClusterAction {
+    /// Add a custom cluster definition
+    Add {
+        /// Cluster name
+        name: String,
+        /// Comma-separated seed words/phrases
+        #[arg(long)]
+        seeds: String,
+    },
+    /// Remove a custom cluster definition
+    Remove {
+        /// Cluster name to remove
+        name: String,
+    },
+    /// List custom cluster definitions from config
+    List,
+}
 
 #[derive(Parser)]
 struct TreeArgs {
@@ -699,15 +726,149 @@ async fn run() -> anyhow::Result<()> {
                 }
             }
         }
-        Some(Commands::Clusters(_args)) => {
-            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let clusters = vdb.clusters()?;
+        Some(Commands::Clusters(args)) => {
+            match args.action {
+                Some(ClusterAction::Add { name, seeds }) => {
+                    // Validate name and seeds.
+                    if name.contains(':') || name.contains('|') {
+                        anyhow::bail!("cluster name cannot contain ':' or '|'");
+                    }
+                    let seed_list: Vec<String> = seeds
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if seed_list.is_empty() {
+                        anyhow::bail!("--seeds must contain at least one seed phrase");
+                    }
+                    for seed in &seed_list {
+                        if seed.contains('|') {
+                            anyhow::bail!("seed phrases cannot contain '|'");
+                        }
+                    }
 
-            if json {
-                serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
-                writeln!(std::io::stdout())?;
-            } else {
-                format::print_clusters(&clusters);
+                    // Read existing defs, add new one, write back.
+                    let config_path = cwd.join(".markdownvdb").join(".config");
+                    let existing_val = std::fs::read_to_string(&config_path)
+                        .unwrap_or_default()
+                        .lines()
+                        .find(|l| l.starts_with("MDVDB_CUSTOM_CLUSTERS="))
+                        .map(|l| {
+                            let v = l.trim_start_matches("MDVDB_CUSTOM_CLUSTERS=");
+                            v.trim_matches('"').to_string()
+                        })
+                        .unwrap_or_default();
+
+                    let mut defs = mdvdb::config_parse_custom_clusters(&existing_val);
+
+                    // Check for duplicate name.
+                    if defs.iter().any(|d| d.name == name) {
+                        anyhow::bail!("custom cluster '{}' already exists", name);
+                    }
+
+                    defs.push(mdvdb::CustomClusterDef {
+                        name: name.clone(),
+                        seeds: seed_list,
+                    });
+
+                    let encoded = mdvdb::config_encode_custom_clusters(&defs);
+                    mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", &encoded)?;
+
+                    if !json {
+                        eprintln!("Added custom cluster '{name}'. Run `mdvdb ingest` to compute assignments.");
+                    }
+                }
+                Some(ClusterAction::Remove { name }) => {
+                    let config_path = cwd.join(".markdownvdb").join(".config");
+                    let existing_val = std::fs::read_to_string(&config_path)
+                        .unwrap_or_default()
+                        .lines()
+                        .find(|l| l.starts_with("MDVDB_CUSTOM_CLUSTERS="))
+                        .map(|l| {
+                            let v = l.trim_start_matches("MDVDB_CUSTOM_CLUSTERS=");
+                            v.trim_matches('"').to_string()
+                        })
+                        .unwrap_or_default();
+
+                    let mut defs = mdvdb::config_parse_custom_clusters(&existing_val);
+                    let before_len = defs.len();
+                    defs.retain(|d| d.name != name);
+
+                    if defs.len() == before_len {
+                        anyhow::bail!("custom cluster '{}' not found", name);
+                    }
+
+                    if defs.is_empty() {
+                        mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", "")?;
+                    } else {
+                        let encoded = mdvdb::config_encode_custom_clusters(&defs);
+                        mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", &encoded)?;
+                    }
+
+                    if !json {
+                        eprintln!("Removed custom cluster '{name}'. Run `mdvdb ingest` to update assignments.");
+                    }
+                }
+                Some(ClusterAction::List) => {
+                    let config_path = cwd.join(".markdownvdb").join(".config");
+                    let existing_val = std::fs::read_to_string(&config_path)
+                        .unwrap_or_default()
+                        .lines()
+                        .find(|l| l.starts_with("MDVDB_CUSTOM_CLUSTERS="))
+                        .map(|l| {
+                            let v = l.trim_start_matches("MDVDB_CUSTOM_CLUSTERS=");
+                            v.trim_matches('"').to_string()
+                        })
+                        .unwrap_or_default();
+
+                    let defs = mdvdb::config_parse_custom_clusters(&existing_val);
+
+                    if json {
+                        serde_json::to_writer_pretty(std::io::stdout(), &defs)?;
+                        writeln!(std::io::stdout())?;
+                    } else if defs.is_empty() {
+                        println!("No custom cluster definitions.");
+                    } else {
+                        println!("Custom cluster definitions:");
+                        for (i, def) in defs.iter().enumerate() {
+                            println!("  {}. {}", i + 1, def.name);
+                            println!("     Seeds: {}", def.seeds.join(", "));
+                        }
+                    }
+                }
+                None => {
+                    if args.custom {
+                        let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+                        let custom = vdb.custom_clusters()?;
+
+                        if json {
+                            serde_json::to_writer_pretty(std::io::stdout(), &custom)?;
+                            writeln!(std::io::stdout())?;
+                        } else if custom.is_empty() {
+                            println!("No custom clusters. Define clusters in .markdownvdb/.config and run ingest.");
+                        } else {
+                            let total_docs: usize = custom.iter().map(|c| c.document_count).sum();
+                            println!(
+                                "Custom clusters ({} clusters, {} documents):",
+                                custom.len(),
+                                total_docs
+                            );
+                            for c in &custom {
+                                println!("  {}. {} ({} docs)", c.id + 1, c.name, c.document_count);
+                            }
+                        }
+                    } else {
+                        let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+                        let clusters = vdb.clusters()?;
+
+                        if json {
+                            serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
+                            writeln!(std::io::stdout())?;
+                        } else {
+                            format::print_clusters(&clusters);
+                        }
+                    }
+                }
             }
         }
         Some(Commands::Tree(args)) => {

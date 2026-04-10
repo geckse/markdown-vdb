@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use serde::Serialize;
 
+use crate::clustering::CustomClusterDef;
 use crate::error::Error;
 use crate::search::SearchMode;
 
@@ -105,6 +106,8 @@ pub struct Config {
     pub edge_boost_weight: f64,
     /// Threshold for rebalancing edge clusters. Default: 50, must be > 0.
     pub edge_cluster_rebalance: usize,
+    /// User-defined custom cluster definitions (name + seed phrases).
+    pub custom_cluster_defs: Vec<CustomClusterDef>,
 }
 
 impl Config {
@@ -224,6 +227,8 @@ impl Config {
 
         let edge_cluster_rebalance = parse_env::<usize>("MDVDB_EDGE_CLUSTER_REBALANCE", 50)?;
 
+        let custom_cluster_defs = parse_custom_clusters("MDVDB_CUSTOM_CLUSTERS");
+
         let config = Self {
             embedding_provider,
             embedding_model,
@@ -259,6 +264,7 @@ impl Config {
             edge_embeddings,
             edge_boost_weight,
             edge_cluster_rebalance,
+            custom_cluster_defs,
         };
 
         config.validate()?;
@@ -331,6 +337,16 @@ impl Config {
                 self.clustering_granularity
             )));
         }
+        // Check for duplicate custom cluster names.
+        let mut seen_names = std::collections::HashSet::new();
+        for def in &self.custom_cluster_defs {
+            if !seen_names.insert(&def.name) {
+                return Err(Error::Config(format!(
+                    "duplicate custom cluster name: '{}'",
+                    def.name
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -384,6 +400,146 @@ fn parse_comma_list_string(key: &str, default: Vec<String>) -> Vec<String> {
         Ok(val) if !val.trim().is_empty() => val.split(',').map(|s| s.trim().to_string()).collect(),
         _ => default,
     }
+}
+
+/// Parse `MDVDB_CUSTOM_CLUSTERS` env var into custom cluster definitions.
+///
+/// Format: `Name1:seed1,seed2|Name2:seed3,seed4`
+/// - Pipe `|` separates clusters
+/// - Colon `:` separates name from seeds
+/// - Comma `,` separates seeds within a cluster
+fn parse_custom_clusters(key: &str) -> Vec<CustomClusterDef> {
+    match std::env::var(key) {
+        Ok(val) if !val.trim().is_empty() => val
+            .split('|')
+            .filter_map(|entry| {
+                let (name, seeds_str) = entry.split_once(':')?;
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                let seeds: Vec<String> = seeds_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if seeds.is_empty() {
+                    return None;
+                }
+                Some(CustomClusterDef { name, seeds })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Update a single key=value line in a config file, preserving other lines.
+///
+/// If `value` is empty, the line is removed. If the key doesn't exist, it's appended.
+/// Creates the file and parent directories if they don't exist.
+pub fn update_config_value(config_path: &Path, key: &str, value: &str) -> Result<(), Error> {
+    use std::fs;
+    use std::io::Write;
+
+    // Ensure parent directory exists.
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| {
+            Error::Config(format!(
+                "failed to create config directory '{}': {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    // Read existing content (or start fresh).
+    let content = fs::read_to_string(config_path).unwrap_or_default();
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+    // Quote value if it contains spaces or special characters for dotenvy compatibility.
+    let needs_quoting = value.contains(' ') || value.contains('#');
+    let formatted_value = if needs_quoting && !value.is_empty() {
+        format!("{key}=\"{value}\"")
+    } else {
+        format!("{key}={value}")
+    };
+
+    let prefix = format!("{key}=");
+    let quoted_prefix = format!("{key}=\"");
+    let mut found = false;
+
+    for line in &mut lines {
+        if line.starts_with(&prefix) || line.starts_with(&quoted_prefix) || line.starts_with(&format!("{key} =")) {
+            if value.is_empty() {
+                // Mark for removal by clearing.
+                *line = String::new();
+                found = true;
+            } else {
+                *line = formatted_value.clone();
+                found = true;
+            }
+            break;
+        }
+    }
+
+    if value.is_empty() {
+        // Remove empty lines that were cleared.
+        lines.retain(|l| !l.is_empty() || !found);
+        // If we didn't find the key, nothing to do.
+    } else if !found {
+        lines.push(formatted_value);
+    }
+
+    let mut file = fs::File::create(config_path).map_err(|e| {
+        Error::Config(format!(
+            "failed to write config file '{}': {e}",
+            config_path.display()
+        ))
+    })?;
+    for line in &lines {
+        writeln!(file, "{line}").map_err(|e| {
+            Error::Config(format!("failed to write config: {e}"))
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Parse a raw custom clusters string value into definitions.
+///
+/// This is the public counterpart to `parse_custom_clusters()` for use outside
+/// the config loading path (e.g., the CLI `clusters add/remove` commands).
+pub fn parse_custom_clusters_value(val: &str) -> Vec<CustomClusterDef> {
+    if val.trim().is_empty() {
+        return Vec::new();
+    }
+    val.split('|')
+        .filter_map(|entry| {
+            let (name, seeds_str) = entry.split_once(':')?;
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let seeds: Vec<String> = seeds_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if seeds.is_empty() {
+                return None;
+            }
+            Some(CustomClusterDef { name, seeds })
+        })
+        .collect()
+}
+
+/// Encode custom cluster definitions back to the dotenv format.
+///
+/// Format: `Name1:seed1,seed2|Name2:seed3,seed4`
+pub fn encode_custom_clusters(defs: &[CustomClusterDef]) -> String {
+    defs.iter()
+        .map(|d| format!("{}:{}", d.name, d.seeds.join(",")))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 #[cfg(test)]

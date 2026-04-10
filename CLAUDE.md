@@ -101,7 +101,7 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Embeddings:** Trait-based pluggable providers. Batch-first (up to 4 concurrent). Skip unchanged files via SHA-256 hash.
 - **Ignore files:** `.gitignore` respected automatically. `.mdvdbignore` (same syntax) for index-only exclusions. 15 built-in dir ignores always applied. `MDVDB_IGNORE_PATTERNS` env var for additional patterns.
 - **Chunking:** Primary split by headings, secondary token-count size guard. Deterministic `"path#index"` IDs.
-- **Clustering:** Document-level vectors (averaged chunk vectors per file). K-means with cross-cluster TF-IDF keyword extraction.
+- **Clustering:** Document-level vectors (averaged chunk vectors per file). K-means with cross-cluster TF-IDF keyword extraction. User-defined custom clusters via `MDVDB_CUSTOM_CLUSTERS` env var (separate layer from auto-clusters).
 - **CLI output:** stdout for data (JSON with `--json`, human-readable otherwise), stderr for errors/logs. Search JSON uses wrapped format: `{"results": [...], "query": "...", "total_results": N}`. When `--expand` is used, includes `"graph_context": [...]` with linked-file chunks.
 
 ## Key Conventions
@@ -143,6 +143,7 @@ vdb.preview(reindex, file) // Dry-run: what would ingest do
 vdb.status()            // Index stats (doc/chunk/vector counts)
 vdb.schema()            // Inferred metadata schema
 vdb.clusters()          // Document clusters with labels
+vdb.custom_clusters()   // User-defined custom clusters with assignments
 vdb.file_tree()         // File tree with sync status
 vdb.get_document(path)  // Single document info + frontmatter + modified_at
 vdb.links(path)         // Outgoing + incoming links for a file
@@ -153,7 +154,7 @@ vdb.watch(cancel)       // File watcher with CancellationToken
 vdb.config()            // Access current config
 ```
 
-Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `SearchResponse`, `GraphContextItem`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`, `NeighborhoodNode`, `NeighborhoodResult`.
+Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `SearchResponse`, `GraphContextItem`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `CustomClusterDef`, `CustomClusterInfo`, `CustomClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`, `NeighborhoodNode`, `NeighborhoodResult`.
 
 ## Development Workflow
 
