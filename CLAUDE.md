@@ -26,10 +26,10 @@ All 18 implementation phases plus graph-enhanced search are complete and passing
 │      Heading-split + token size guard (tiktoken-rs)     │
 ├─────────────────────────────────────────────────────────┤
 │              Markdown Parsing & Discovery                │
-│    pulldown-cmark + serde_yaml + ignore + sha2          │
+│    pulldown-cmark + serde_yml + ignore + sha2           │
 ├─────────────────────────────────────────────────────────┤
 │               Foundation & Configuration                │
-│         dotenvy + thiserror + anyhow + tracing          │
+│      serde_yml + dotenvy + thiserror + anyhow + tracing │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -39,7 +39,7 @@ All 18 implementation phases plus graph-enhanced search are complete and passing
 src/
 ├── main.rs              # CLI entry point (clap + anyhow)
 ├── lib.rs               # Public library API (MarkdownVdb)
-├── config.rs            # Config loading: shell env → project → .env → user → defaults
+├── config.rs            # Config loading: shell env MDVDB_* → project YAML → .env secrets → user YAML → defaults
 ├── format.rs            # Human-readable output formatting (colors, bars, timestamps)
 ├── error.rs             # Error enum (thiserror)
 ├── logging.rs           # Tracing subscriber setup
@@ -91,8 +91,8 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 
 ## Core Design Decisions
 
-- **Config:** Dotenv-style files, NOT TOML/YAML. Resolution: shell env > `.markdownvdb/.config` > `.markdownvdb` (legacy) > `.env` > `~/.mdvdb/config` (user) > defaults
-- **Index directory:** `.markdownvdb/` contains `index` (binary: `[64B header][rkyv metadata][usearch HNSW]`) + `fts/` (Tantivy BM25 segments). Configured via `MDVDB_INDEX_DIR`.
+- **Config:** YAML config files with deep merge strategy. Resolution: shell env `MDVDB_*` > `.markdownvdb/config.yaml` (project) > `.env` (secrets only) > `~/.mdvdb/config.yaml` (user) > defaults. Legacy dotenv configs are auto-migrated on first load. The YAML config is organized into 7 domains: `embedding` (provider, model, dimensions, batch size), `search` (default limit, mode, weights, decay settings), `chunking` (max tokens, overlap), `clustering` (min/max clusters, custom cluster definitions), `watch` (debounce interval), `index` (directory path), and `sources` (ignore patterns). Multiple YAML files are deep-merged recursively (maps merged key-by-key, scalars overwritten by higher-priority source).
+- **Index directory:** `.markdownvdb/` contains `config.yaml` + `index` (binary: `[64B header][rkyv metadata][usearch HNSW]`) + `fts/` (Tantivy BM25 segments). Configured via `MDVDB_INDEX_DIR` or `index.dir` in YAML.
 - **Paths:** ALL file paths in the index are relative to project root. Never absolute.
 - **Errors:** `thiserror` for typed library errors, `anyhow` only at CLI boundary in `main.rs`
 - **Concurrency:** `parking_lot::RwLock` (not std). Read lock for queries, write lock only during upsert.
@@ -101,14 +101,14 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Embeddings:** Trait-based pluggable providers. Batch-first (up to 4 concurrent). Skip unchanged files via SHA-256 hash.
 - **Ignore files:** `.gitignore` respected automatically. `.mdvdbignore` (same syntax) for index-only exclusions. 15 built-in dir ignores always applied. `MDVDB_IGNORE_PATTERNS` env var for additional patterns.
 - **Chunking:** Primary split by headings, secondary token-count size guard. Deterministic `"path#index"` IDs.
-- **Clustering:** Document-level vectors (averaged chunk vectors per file). K-means with cross-cluster TF-IDF keyword extraction. User-defined custom clusters via `MDVDB_CUSTOM_CLUSTERS` env var (separate layer from auto-clusters).
+- **Clustering:** Document-level vectors (averaged chunk vectors per file). K-means with cross-cluster TF-IDF keyword extraction. User-defined custom clusters via `clustering.custom` in YAML or `MDVDB_CUSTOM_CLUSTERS` env var (separate layer from auto-clusters).
 - **CLI output:** stdout for data (JSON with `--json`, human-readable otherwise), stderr for errors/logs. Search JSON uses wrapped format: `{"results": [...], "query": "...", "total_results": N}`. When `--expand` is used, includes `"graph_context": [...]` with linked-file chunks.
 
 ## Key Conventions
 
 - Return `Result<T, Error>` from all library functions — never `unwrap()` in library code
 - Pass `Config` as parameter — no global mutable state, no `lazy_static`
-- All env var reading happens in `Config::load()` — other modules receive typed config
+- All env var reading and YAML parsing happens in `Config::load()` — other modules receive typed config
 - Derive `serde::Serialize` on all API response types for JSON output
 - Derive `rkyv::Archive`/`Serialize`/`Deserialize` on all types stored in the index
 - Use `tracing::info!`/`debug!`/`error!` for logging, never `println!` in library code
@@ -174,7 +174,7 @@ cargo run -- search "query" --json  # Test search
 | CLI | `clap` | Derive-based subcommands, completions |
 | CLI output | `colored` + `indicatif` | Colored terminal output, progress spinners |
 | Markdown | `pulldown-cmark` | Streaming heading-aware parsing + link extraction |
-| Frontmatter | `serde_yaml` | Dynamic YAML → JSON metadata |
+| Frontmatter | `serde_yml` | Dynamic YAML → JSON metadata |
 | Tokenizer | `tiktoken-rs` | Accurate token counting for chunks |
 | Embeddings | `reqwest` | HTTP client for OpenAI/Ollama APIs |
 | Vectors | `usearch` | Sub-ms HNSW nearest neighbor search |
@@ -187,7 +187,7 @@ cargo run -- search "query" --json  # Test search
 | Async streams | `futures` | Concurrent batch embedding (buffer_unordered) |
 | File scanning | `ignore` | Gitignore-native directory traversal |
 | Hashing | `sha2` | Content change detection (SHA-256) |
-| Config | `dotenvy` | Dotenv-style `.markdownvdb` config |
+| Config | `serde_yml` + `dotenvy` | YAML `.markdownvdb/config.yaml` config + `.env` secrets |
 | Errors | `thiserror` / `anyhow` | Typed lib errors, ergonomic CLI errors |
 | Serialization | `serde` + `serde_json` | JSON output, request/response bodies |
 | Logging | `tracing` + `tracing-subscriber` | Structured, async-aware, spans |
