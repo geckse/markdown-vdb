@@ -24,7 +24,7 @@ pub use schema::{FieldType, Schema, SchemaField, ScopedSchema};
 pub use search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState, CustomClusterDef, CustomClusterInfo, CustomClusterState};
-pub use config::{encode_custom_clusters as config_encode_custom_clusters, parse_custom_clusters_value as config_parse_custom_clusters, update_config_value as config_update_value};
+pub use config::{encode_custom_clusters as config_encode_custom_clusters, parse_custom_clusters_value as config_parse_custom_clusters, update_config_value as config_update_value, write_yaml_config as config_write_yaml, update_yaml_config_value as config_update_yaml_value};
 pub use links::{
     EdgeClusterInfo, EdgeClusterState, LinkEntry, LinkGraph, LinkQueryResult, LinkState,
     NeighborhoodNode, NeighborhoodResult, OrphanFile, ResolvedLink, SemanticEdge,
@@ -1571,14 +1571,14 @@ impl MarkdownVdb {
         })
     }
 
-    /// Initialize a new markdown-vdb project by creating `.markdownvdb/.config`
+    /// Initialize a new markdown-vdb project by creating `.markdownvdb/config.yaml`
     /// with default/example values.
     ///
     /// Returns `Error::ConfigAlreadyExists` if the config already exists.
     pub fn init(root: &Path) -> Result<()> {
         let dir_path = root.join(".markdownvdb");
-        let config_path = dir_path.join(".config");
         let yaml_config_path = dir_path.join("config.yaml");
+        let dotenv_config_path = dir_path.join(".config");
 
         // Check for YAML, dotenv, and legacy config locations.
         if yaml_config_path.exists() {
@@ -1586,9 +1586,9 @@ impl MarkdownVdb {
                 path: yaml_config_path,
             });
         }
-        if config_path.exists() {
+        if dotenv_config_path.exists() {
             return Err(Error::ConfigAlreadyExists {
-                path: config_path,
+                path: dotenv_config_path,
             });
         }
         let legacy_path = root.join(".markdownvdb");
@@ -1607,36 +1607,50 @@ impl MarkdownVdb {
 # markdown-vdb configuration
 # See https://github.com/example/markdown-vdb for documentation
 
-# Embedding provider: openai, ollama, or custom
-MDVDB_EMBEDDING_PROVIDER=openai
-MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-MDVDB_EMBEDDING_DIMENSIONS=1536
-MDVDB_EMBEDDING_BATCH_SIZE=100
-
-# Source directories (comma-separated)
-MDVDB_SOURCE_DIRS=.
-
-# Chunking
-MDVDB_CHUNK_MAX_TOKENS=512
-MDVDB_CHUNK_OVERLAP_TOKENS=50
+# Embedding provider configuration
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dimensions: 1536
+  batch_size: 100
 
 # Search defaults
-MDVDB_SEARCH_DEFAULT_LIMIT=10
-MDVDB_SEARCH_MIN_SCORE=0.0
-MDVDB_SEARCH_MODE=hybrid
-MDVDB_SEARCH_RRF_K=60.0
+search:
+  limit: 10
+  min_score: 0.0
+  mode: hybrid
+  rrf_k: 60.0
+  # decay:
+  #   enabled: false
+  #   half_life: 30
+  #   anchor: modified
 
-# File watching
-MDVDB_WATCH=true
-MDVDB_WATCH_DEBOUNCE_MS=300
+# Chunking
+chunking:
+  max_tokens: 512
+  overlap_tokens: 50
 
 # Clustering
-MDVDB_CLUSTERING_ENABLED=true
-MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
+clustering:
+  enabled: true
+  rebalance_threshold: 50
+  # custom:
+  #   - name: my-cluster
+  #     seeds: [\"seed1.md\", \"seed2.md\"]
+
+# File watching
+watch:
+  enabled: true
+  debounce_ms: 300
+
+# Source directories
+sources:
+  dirs:
+    - .
 ";
 
-        std::fs::write(&config_path, default_config)?;
-        info!(path = %config_path.display(), "created default config file");
+        std::fs::write(&yaml_config_path, default_config)?;
+        info!(path = %yaml_config_path.display(), "created default config file");
         Ok(())
     }
 
@@ -2120,18 +2134,14 @@ MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
 
         let template = "\
 # mdvdb user-level configuration
-# Values here apply to all projects unless overridden by project .markdownvdb
-
-# API credentials
-# OPENAI_API_KEY=sk-...
+# Values here apply to all projects unless overridden by project config.yaml
+# API credentials (OPENAI_API_KEY, OLLAMA_HOST) belong in .env, not here.
 
 # Default embedding provider
-# MDVDB_EMBEDDING_PROVIDER=openai
-# MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-# MDVDB_EMBEDDING_DIMENSIONS=1536
-
-# Ollama host (if using Ollama)
-# OLLAMA_HOST=http://localhost:11434
+# embedding:
+#   provider: openai
+#   model: text-embedding-3-small
+#   dimensions: 1536
 ";
 
         std::fs::write(config_path, template)?;

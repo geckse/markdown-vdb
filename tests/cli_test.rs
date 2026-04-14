@@ -94,8 +94,8 @@ fn test_init_creates_config_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        dir.path().join(".markdownvdb").join(".config").exists(),
-        ".markdownvdb/.config should be created"
+        dir.path().join(".markdownvdb").join("config.yaml").exists(),
+        ".markdownvdb/config.yaml should be created"
     );
 }
 
