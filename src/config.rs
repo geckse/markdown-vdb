@@ -740,6 +740,179 @@ pub fn encode_custom_clusters(defs: &[CustomClusterDef]) -> String {
         .join("|")
 }
 
+// ---------------------------------------------------------------------------
+// YAML pipeline functions
+// ---------------------------------------------------------------------------
+
+/// Recursively merge two YAML values. Mappings merge recursively; scalars and
+/// sequences from `overlay` replace `base`.
+pub fn merge_yaml_values(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde_yaml::Value {
+    match (base, overlay) {
+        (serde_yaml::Value::Mapping(mut base_map), serde_yaml::Value::Mapping(overlay_map)) => {
+            for (key, overlay_val) in overlay_map {
+                let merged = if let Some(base_val) = base_map.remove(&key) {
+                    merge_yaml_values(base_val, overlay_val)
+                } else {
+                    overlay_val
+                };
+                base_map.insert(key, merged);
+            }
+            serde_yaml::Value::Mapping(base_map)
+        }
+        (_, overlay) => overlay,
+    }
+}
+
+/// Apply environment variable overrides to a `YamlConfig`.
+/// Each MDVDB_* env var overrides the corresponding field when set.
+pub fn apply_env_overrides(yaml: &mut YamlConfig) {
+    // Helper closures to reduce repetition
+    fn env_str(key: &str) -> Option<String> {
+        std::env::var(key).ok().filter(|v| !v.is_empty())
+    }
+    fn env_usize(key: &str) -> Option<usize> {
+        env_str(key).and_then(|v| v.parse().ok())
+    }
+    fn env_f64(key: &str) -> Option<f64> {
+        env_str(key).and_then(|v| v.parse().ok())
+    }
+    fn env_u64(key: &str) -> Option<u64> {
+        env_str(key).and_then(|v| v.parse().ok())
+    }
+    fn env_bool(key: &str) -> Option<bool> {
+        env_str(key).and_then(|v| match v.to_lowercase().as_str() {
+            "true" | "1" | "yes" => Some(true),
+            "false" | "0" | "no" => Some(false),
+            _ => None,
+        })
+    }
+    fn env_comma_list(key: &str) -> Option<Vec<String>> {
+        env_str(key).map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
+    }
+
+    // Embedding
+    if let Some(v) = env_str("MDVDB_EMBEDDING_PROVIDER") { yaml.embedding.provider = v; }
+    if let Some(v) = env_str("MDVDB_EMBEDDING_MODEL") { yaml.embedding.model = v; }
+    if let Some(v) = env_usize("MDVDB_EMBEDDING_DIMENSIONS") { yaml.embedding.dimensions = v; }
+    if let Some(v) = env_usize("MDVDB_EMBEDDING_BATCH_SIZE") { yaml.embedding.batch_size = v; }
+    if let Some(v) = env_str("MDVDB_EMBEDDING_ENDPOINT") { yaml.embedding.endpoint = Some(v); }
+
+    // Search
+    if let Some(v) = env_usize("MDVDB_SEARCH_DEFAULT_LIMIT") { yaml.search.limit = v; }
+    if let Some(v) = env_f64("MDVDB_SEARCH_MIN_SCORE") { yaml.search.min_score = v; }
+    if let Some(v) = env_str("MDVDB_SEARCH_MODE") { yaml.search.mode = v; }
+    if let Some(v) = env_f64("MDVDB_SEARCH_RRF_K") { yaml.search.rrf_k = v; }
+    if let Some(v) = env_f64("MDVDB_BM25_NORM_K") { yaml.search.bm25_norm_k = v; }
+    if let Some(v) = env_bool("MDVDB_SEARCH_BOOST_LINKS") { yaml.search.boost_links = v; }
+    if let Some(v) = env_usize("MDVDB_SEARCH_BOOST_HOPS") { yaml.search.boost_hops = v; }
+    if let Some(v) = env_usize("MDVDB_SEARCH_EXPAND_GRAPH") { yaml.search.expand_graph = v; }
+    if let Some(v) = env_usize("MDVDB_SEARCH_EXPAND_LIMIT") { yaml.search.expand_limit = v; }
+
+    // Decay
+    if let Some(v) = env_bool("MDVDB_SEARCH_DECAY") { yaml.search.decay.enabled = v; }
+    if let Some(v) = env_f64("MDVDB_SEARCH_DECAY_HALF_LIFE") { yaml.search.decay.half_life = v; }
+    if let Some(v) = env_comma_list("MDVDB_SEARCH_DECAY_EXCLUDE") { yaml.search.decay.exclude = v; }
+    if let Some(v) = env_comma_list("MDVDB_SEARCH_DECAY_INCLUDE") { yaml.search.decay.include = v; }
+
+    // Chunking
+    if let Some(v) = env_usize("MDVDB_CHUNK_MAX_TOKENS") { yaml.chunking.max_tokens = v; }
+    if let Some(v) = env_usize("MDVDB_CHUNK_OVERLAP_TOKENS") { yaml.chunking.overlap_tokens = v; }
+
+    // Clustering
+    if let Some(v) = env_bool("MDVDB_CLUSTERING_ENABLED") { yaml.clustering.enabled = v; }
+    if let Some(v) = env_usize("MDVDB_CLUSTERING_REBALANCE_THRESHOLD") { yaml.clustering.rebalance_threshold = v; }
+    if let Some(v) = env_f64("MDVDB_CLUSTER_GRANULARITY") { yaml.clustering.granularity = v; }
+    if let Some(v) = env_str("MDVDB_CUSTOM_CLUSTERS") {
+        yaml.clustering.custom = parse_custom_clusters_value(&v)
+            .into_iter()
+            .map(|d| YamlCustomCluster { name: d.name, seeds: d.seeds })
+            .collect();
+    }
+
+    // Watch
+    if let Some(v) = env_bool("MDVDB_WATCH") { yaml.watch.enabled = v; }
+    if let Some(v) = env_u64("MDVDB_WATCH_DEBOUNCE_MS") { yaml.watch.debounce_ms = v; }
+
+    // Index
+    if let Some(v) = env_str("MDVDB_VECTOR_QUANTIZATION") { yaml.index.quantization = v; }
+    if let Some(v) = env_bool("MDVDB_INDEX_COMPRESSION") { yaml.index.compression = v; }
+    if let Some(v) = env_bool("MDVDB_EDGE_EMBEDDINGS") { yaml.index.edge_embeddings = v; }
+    if let Some(v) = env_f64("MDVDB_EDGE_BOOST_WEIGHT") { yaml.index.edge_boost_weight = v; }
+    if let Some(v) = env_usize("MDVDB_EDGE_CLUSTER_REBALANCE") { yaml.index.edge_cluster_rebalance = v; }
+
+    // Sources
+    if let Some(v) = env_comma_list("MDVDB_SOURCE_DIRS") { yaml.sources.dirs = v; }
+    if let Some(v) = env_comma_list("MDVDB_IGNORE_PATTERNS") { yaml.sources.ignore = v; }
+}
+
+impl Config {
+    /// Convert a `YamlConfig` into the runtime `Config`.
+    ///
+    /// Parses string enums, reads secrets from the environment, converts types,
+    /// and validates the result.
+    pub fn from_yaml(yaml: YamlConfig, _project_root: &Path) -> Result<Self, Error> {
+        let embedding_provider = yaml.embedding.provider.parse::<EmbeddingProviderType>()?;
+        let search_default_mode = yaml.search.mode.parse::<SearchMode>()?;
+        let vector_quantization = yaml.index.quantization.parse::<VectorQuantization>()?;
+
+        let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+        let ollama_host = std::env::var("OLLAMA_HOST")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+
+        let source_dirs = yaml.sources.dirs.iter().map(PathBuf::from).collect();
+        let custom_cluster_defs = yaml
+            .clustering
+            .custom
+            .into_iter()
+            .map(|c| CustomClusterDef {
+                name: c.name,
+                seeds: c.seeds,
+            })
+            .collect();
+
+        let config = Self {
+            embedding_provider,
+            embedding_model: yaml.embedding.model,
+            embedding_dimensions: yaml.embedding.dimensions,
+            embedding_batch_size: yaml.embedding.batch_size,
+            openai_api_key,
+            ollama_host,
+            embedding_endpoint: yaml.embedding.endpoint,
+            source_dirs,
+            ignore_patterns: yaml.sources.ignore,
+            watch_enabled: yaml.watch.enabled,
+            watch_debounce_ms: yaml.watch.debounce_ms,
+            chunk_max_tokens: yaml.chunking.max_tokens,
+            chunk_overlap_tokens: yaml.chunking.overlap_tokens,
+            clustering_enabled: yaml.clustering.enabled,
+            clustering_rebalance_threshold: yaml.clustering.rebalance_threshold,
+            clustering_granularity: yaml.clustering.granularity,
+            search_default_limit: yaml.search.limit,
+            search_min_score: yaml.search.min_score,
+            search_default_mode,
+            search_rrf_k: yaml.search.rrf_k,
+            bm25_norm_k: yaml.search.bm25_norm_k,
+            search_decay_enabled: yaml.search.decay.enabled,
+            search_decay_half_life: yaml.search.decay.half_life,
+            search_decay_exclude: yaml.search.decay.exclude,
+            search_decay_include: yaml.search.decay.include,
+            search_boost_links: yaml.search.boost_links,
+            search_boost_hops: yaml.search.boost_hops,
+            search_expand_graph: yaml.search.expand_graph,
+            search_expand_limit: yaml.search.expand_limit,
+            vector_quantization,
+            index_compression: yaml.index.compression,
+            edge_embeddings: yaml.index.edge_embeddings,
+            edge_boost_weight: yaml.index.edge_boost_weight,
+            edge_cluster_rebalance: yaml.index.edge_cluster_rebalance,
+            custom_cluster_defs,
+        };
+
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1210,5 +1383,109 @@ search:
 
         assert_eq!(deserialized.name, "TestCluster");
         assert_eq!(deserialized.seeds, vec!["seed1", "seed2", "seed3"]);
+    }
+
+    // --- merge_yaml_values tests ---
+
+    #[test]
+    fn merge_yaml_values_basic() {
+        let base: serde_yaml::Value = serde_yaml::from_str("a: 1\nb: 2").unwrap();
+        let overlay: serde_yaml::Value = serde_yaml::from_str("b: 99").unwrap();
+        let merged = merge_yaml_values(base, overlay);
+        let map = merged.as_mapping().unwrap();
+        assert_eq!(map[&serde_yaml::Value::String("a".into())], serde_yaml::Value::Number(1.into()));
+        assert_eq!(map[&serde_yaml::Value::String("b".into())], serde_yaml::Value::Number(99.into()));
+    }
+
+    #[test]
+    fn merge_yaml_values_nested() {
+        let base: serde_yaml::Value = serde_yaml::from_str("top:\n  a: 1\n  b: 2\nother: 3").unwrap();
+        let overlay: serde_yaml::Value = serde_yaml::from_str("top:\n  b: 99").unwrap();
+        let merged = merge_yaml_values(base, overlay);
+        let top = merged["top"].as_mapping().unwrap();
+        assert_eq!(top[&serde_yaml::Value::String("a".into())], serde_yaml::Value::Number(1.into()));
+        assert_eq!(top[&serde_yaml::Value::String("b".into())], serde_yaml::Value::Number(99.into()));
+        assert_eq!(merged["other"], serde_yaml::Value::Number(3.into()));
+    }
+
+    #[test]
+    fn merge_yaml_values_sequence_replace() {
+        let base: serde_yaml::Value = serde_yaml::from_str("items:\n  - a\n  - b").unwrap();
+        let overlay: serde_yaml::Value = serde_yaml::from_str("items:\n  - x").unwrap();
+        let merged = merge_yaml_values(base, overlay);
+        let items = merged["items"].as_sequence().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], serde_yaml::Value::String("x".into()));
+    }
+
+    // --- apply_env_overrides tests ---
+
+    #[test]
+    fn apply_env_overrides_all_fields() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Save and set env vars
+        let vars = [
+            ("MDVDB_EMBEDDING_PROVIDER", "ollama"),
+            ("MDVDB_SEARCH_DEFAULT_LIMIT", "25"),
+            ("MDVDB_CHUNK_MAX_TOKENS", "1024"),
+            ("MDVDB_CLUSTERING_ENABLED", "false"),
+            ("MDVDB_WATCH_DEBOUNCE_MS", "500"),
+            ("MDVDB_SOURCE_DIRS", "src,docs"),
+        ];
+        let saved: Vec<(&str, Option<String>)> = vars.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
+        for (k, v) in &vars { std::env::set_var(k, v); }
+
+        let mut yaml = YamlConfig::default();
+        apply_env_overrides(&mut yaml);
+
+        // Restore
+        for (k, v) in &saved {
+            match v { Some(val) => std::env::set_var(k, val), None => std::env::remove_var(k) }
+        }
+
+        assert_eq!(yaml.embedding.provider, "ollama");
+        assert_eq!(yaml.search.limit, 25);
+        assert_eq!(yaml.chunking.max_tokens, 1024);
+        assert!(!yaml.clustering.enabled);
+        assert_eq!(yaml.watch.debounce_ms, 500);
+        assert_eq!(yaml.sources.dirs, vec!["src", "docs"]);
+    }
+
+    // --- from_yaml tests ---
+
+    #[test]
+    fn from_yaml_conversion() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Ensure no interfering env vars for secrets
+        let saved_key = std::env::var("OPENAI_API_KEY").ok();
+        let saved_host = std::env::var("OLLAMA_HOST").ok();
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::set_var("OLLAMA_HOST", "http://myhost:11434");
+
+        let mut yaml = YamlConfig::default();
+        yaml.embedding.provider = "ollama".to_string();
+        yaml.search.mode = "semantic".to_string();
+        yaml.index.quantization = "f32".to_string();
+        yaml.sources.dirs = vec!["src".to_string(), "docs".to_string()];
+        yaml.clustering.custom = vec![YamlCustomCluster {
+            name: "Test".to_string(),
+            seeds: vec!["s1".to_string(), "s2".to_string()],
+        }];
+
+        let config = Config::from_yaml(yaml, Path::new("/tmp")).unwrap();
+
+        // Restore
+        match saved_key { Some(v) => std::env::set_var("OPENAI_API_KEY", v), None => std::env::remove_var("OPENAI_API_KEY") }
+        match saved_host { Some(v) => std::env::set_var("OLLAMA_HOST", v), None => std::env::remove_var("OLLAMA_HOST") }
+
+        assert_eq!(config.embedding_provider, EmbeddingProviderType::Ollama);
+        assert_eq!(config.search_default_mode, SearchMode::Semantic);
+        assert_eq!(config.vector_quantization, VectorQuantization::F32);
+        assert_eq!(config.source_dirs, vec![PathBuf::from("src"), PathBuf::from("docs")]);
+        assert_eq!(config.ollama_host, "http://myhost:11434");
+        assert_eq!(config.custom_cluster_defs.len(), 1);
+        assert_eq!(config.custom_cluster_defs[0].name, "Test");
     }
 }
