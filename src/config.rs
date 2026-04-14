@@ -1,11 +1,209 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::clustering::CustomClusterDef;
 use crate::error::Error;
 use crate::search::SearchMode;
+
+// ---------------------------------------------------------------------------
+// YAML configuration types (intermediate deserialization target)
+// ---------------------------------------------------------------------------
+
+/// Top-level YAML configuration structure.
+/// Deserialized from `.markdownvdb/config.yaml` or `~/.mdvdb/config.yaml`.
+/// Converted to the runtime `Config` via `Config::from_yaml()`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct YamlConfig {
+    pub embedding: YamlEmbedding,
+    pub search: YamlSearch,
+    pub chunking: YamlChunking,
+    pub clustering: YamlClustering,
+    pub watch: YamlWatch,
+    pub index: YamlIndex,
+    pub sources: YamlSources,
+}
+
+/// Embedding provider settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlEmbedding {
+    pub provider: String,
+    pub model: String,
+    pub dimensions: usize,
+    pub batch_size: usize,
+    pub endpoint: Option<String>,
+}
+
+impl Default for YamlEmbedding {
+    fn default() -> Self {
+        Self {
+            provider: "openai".to_string(),
+            model: "text-embedding-3-small".to_string(),
+            dimensions: 1536,
+            batch_size: 100,
+            endpoint: None,
+        }
+    }
+}
+
+/// Search engine settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlSearch {
+    pub limit: usize,
+    pub min_score: f64,
+    pub mode: String,
+    pub rrf_k: f64,
+    pub bm25_norm_k: f64,
+    pub boost_links: bool,
+    pub boost_hops: usize,
+    pub expand_graph: usize,
+    pub expand_limit: usize,
+    pub decay: YamlDecay,
+}
+
+impl Default for YamlSearch {
+    fn default() -> Self {
+        Self {
+            limit: 10,
+            min_score: 0.0,
+            mode: "hybrid".to_string(),
+            rrf_k: 60.0,
+            bm25_norm_k: 1.5,
+            boost_links: false,
+            boost_hops: 1,
+            expand_graph: 0,
+            expand_limit: 3,
+            decay: YamlDecay::default(),
+        }
+    }
+}
+
+/// Time decay settings for search scoring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlDecay {
+    pub enabled: bool,
+    pub half_life: f64,
+    pub exclude: Vec<String>,
+    pub include: Vec<String>,
+}
+
+impl Default for YamlDecay {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            half_life: 90.0,
+            exclude: Vec::new(),
+            include: Vec::new(),
+        }
+    }
+}
+
+/// Chunking engine settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlChunking {
+    pub max_tokens: usize,
+    pub overlap_tokens: usize,
+}
+
+impl Default for YamlChunking {
+    fn default() -> Self {
+        Self {
+            max_tokens: 512,
+            overlap_tokens: 50,
+        }
+    }
+}
+
+/// Clustering settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlClustering {
+    pub enabled: bool,
+    pub rebalance_threshold: usize,
+    pub granularity: f64,
+    pub custom: Vec<YamlCustomCluster>,
+}
+
+impl Default for YamlClustering {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rebalance_threshold: 50,
+            granularity: 1.0,
+            custom: Vec::new(),
+        }
+    }
+}
+
+/// A single custom cluster definition in YAML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YamlCustomCluster {
+    pub name: String,
+    pub seeds: Vec<String>,
+}
+
+/// File watcher settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlWatch {
+    pub enabled: bool,
+    pub debounce_ms: u64,
+}
+
+impl Default for YamlWatch {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debounce_ms: 300,
+        }
+    }
+}
+
+/// Index storage settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlIndex {
+    pub quantization: String,
+    pub compression: bool,
+    pub edge_embeddings: bool,
+    pub edge_boost_weight: f64,
+    pub edge_cluster_rebalance: usize,
+}
+
+impl Default for YamlIndex {
+    fn default() -> Self {
+        Self {
+            quantization: "f16".to_string(),
+            compression: true,
+            edge_embeddings: true,
+            edge_boost_weight: 0.15,
+            edge_cluster_rebalance: 50,
+        }
+    }
+}
+
+/// Source directory settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlSources {
+    pub dirs: Vec<String>,
+    pub ignore: Vec<String>,
+}
+
+impl Default for YamlSources {
+    fn default() -> Self {
+        Self {
+            dirs: vec![".".to_string()],
+            ignore: Vec::new(),
+        }
+    }
+}
 
 /// Supported embedding provider backends.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -917,5 +1115,100 @@ mod tests {
         std::env::remove_var("MDVDB_EDGE_CLUSTER_REBALANCE");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("edge_cluster_rebalance"));
+    }
+
+    #[test]
+    fn yaml_config_defaults() {
+        let cfg = YamlConfig::default();
+
+        // Embedding defaults
+        assert_eq!(cfg.embedding.provider, "openai");
+        assert_eq!(cfg.embedding.model, "text-embedding-3-small");
+        assert_eq!(cfg.embedding.dimensions, 1536);
+        assert_eq!(cfg.embedding.batch_size, 100);
+        assert!(cfg.embedding.endpoint.is_none());
+
+        // Search defaults
+        assert_eq!(cfg.search.limit, 10);
+        assert_eq!(cfg.search.min_score, 0.0);
+        assert_eq!(cfg.search.mode, "hybrid");
+        assert_eq!(cfg.search.rrf_k, 60.0);
+        assert_eq!(cfg.search.bm25_norm_k, 1.5);
+        assert!(!cfg.search.boost_links);
+        assert_eq!(cfg.search.boost_hops, 1);
+        assert_eq!(cfg.search.expand_graph, 0);
+        assert_eq!(cfg.search.expand_limit, 3);
+
+        // Decay defaults
+        assert!(!cfg.search.decay.enabled);
+        assert_eq!(cfg.search.decay.half_life, 90.0);
+        assert!(cfg.search.decay.exclude.is_empty());
+        assert!(cfg.search.decay.include.is_empty());
+
+        // Chunking defaults
+        assert_eq!(cfg.chunking.max_tokens, 512);
+        assert_eq!(cfg.chunking.overlap_tokens, 50);
+
+        // Clustering defaults
+        assert!(cfg.clustering.enabled);
+        assert_eq!(cfg.clustering.rebalance_threshold, 50);
+        assert!((cfg.clustering.granularity - 1.0).abs() < f64::EPSILON);
+        assert!(cfg.clustering.custom.is_empty());
+
+        // Watch defaults
+        assert!(cfg.watch.enabled);
+        assert_eq!(cfg.watch.debounce_ms, 300);
+
+        // Index defaults
+        assert_eq!(cfg.index.quantization, "f16");
+        assert!(cfg.index.compression);
+        assert!(cfg.index.edge_embeddings);
+        assert_eq!(cfg.index.edge_boost_weight, 0.15);
+        assert_eq!(cfg.index.edge_cluster_rebalance, 50);
+
+        // Sources defaults
+        assert_eq!(cfg.sources.dirs, vec![".".to_string()]);
+        assert!(cfg.sources.ignore.is_empty());
+    }
+
+    #[test]
+    fn yaml_config_partial_deserialize() {
+        let yaml = r#"
+embedding:
+  provider: ollama
+search:
+  limit: 25
+"#;
+        let cfg: YamlConfig = serde_yaml::from_str(yaml).unwrap();
+
+        // Specified fields
+        assert_eq!(cfg.embedding.provider, "ollama");
+        assert_eq!(cfg.search.limit, 25);
+
+        // Everything else should be defaults
+        assert_eq!(cfg.embedding.model, "text-embedding-3-small");
+        assert_eq!(cfg.embedding.dimensions, 1536);
+        assert_eq!(cfg.search.mode, "hybrid");
+        assert_eq!(cfg.search.rrf_k, 60.0);
+        assert!(!cfg.search.decay.enabled);
+        assert_eq!(cfg.chunking.max_tokens, 512);
+        assert!(cfg.clustering.enabled);
+        assert!(cfg.watch.enabled);
+        assert_eq!(cfg.index.quantization, "f16");
+        assert_eq!(cfg.sources.dirs, vec![".".to_string()]);
+    }
+
+    #[test]
+    fn yaml_custom_cluster_roundtrip() {
+        let cluster = YamlCustomCluster {
+            name: "TestCluster".to_string(),
+            seeds: vec!["seed1".to_string(), "seed2".to_string(), "seed3".to_string()],
+        };
+
+        let yaml_str = serde_yaml::to_string(&cluster).unwrap();
+        let deserialized: YamlCustomCluster = serde_yaml::from_str(&yaml_str).unwrap();
+
+        assert_eq!(deserialized.name, "TestCluster");
+        assert_eq!(deserialized.seeds, vec!["seed1", "seed2", "seed3"]);
     }
 }
