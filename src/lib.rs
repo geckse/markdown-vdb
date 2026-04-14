@@ -1578,8 +1578,14 @@ impl MarkdownVdb {
     pub fn init(root: &Path) -> Result<()> {
         let dir_path = root.join(".markdownvdb");
         let config_path = dir_path.join(".config");
+        let yaml_config_path = dir_path.join("config.yaml");
 
-        // Check for both new and legacy config locations.
+        // Check for YAML, dotenv, and legacy config locations.
+        if yaml_config_path.exists() {
+            return Err(Error::ConfigAlreadyExists {
+                path: yaml_config_path,
+            });
+        }
         if config_path.exists() {
             return Err(Error::ConfigAlreadyExists {
                 path: config_path,

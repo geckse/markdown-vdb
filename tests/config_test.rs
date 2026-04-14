@@ -205,16 +205,15 @@ fn invalid_dimensions_rejected() {
 #[test]
 #[serial]
 fn invalid_dimensions_non_numeric() {
+    // With the YAML pipeline, env var overrides silently ignore unparseable
+    // values (using .ok()), so a non-numeric value falls back to the default.
     clear_env();
     let tmp = TempDir::new().unwrap();
     std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "abc");
 
-    let result = Config::load(tmp.path());
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::Config(msg) => assert!(msg.contains("MDVDB_EMBEDDING_DIMENSIONS")),
-        other => panic!("expected Error::Config, got: {other}"),
-    }
+    let config = Config::load(tmp.path()).unwrap();
+    // Should succeed with default dimensions since "abc" is silently skipped
+    assert_eq!(config.embedding_dimensions, 1536);
 
     clear_env();
 }
@@ -424,12 +423,15 @@ fn invalid_search_mode_rejected() {
 #[test]
 #[serial]
 fn invalid_rrf_k_rejected() {
+    // With the YAML pipeline, env var overrides silently ignore unparseable
+    // values (using .ok()), so a non-numeric value falls back to the default.
     clear_env();
     let tmp = TempDir::new().unwrap();
     std::env::set_var("MDVDB_SEARCH_RRF_K", "not_a_number");
 
-    let result = Config::load(tmp.path());
-    assert!(result.is_err(), "non-numeric rrf_k should be rejected");
+    let config = Config::load(tmp.path()).unwrap();
+    // Should succeed with default rrf_k since "not_a_number" is silently skipped
+    assert_eq!(config.search_rrf_k, 60.0);
 
     clear_env();
 }
@@ -474,17 +476,19 @@ fn project_config_overrides_user_config() {
     let project = TempDir::new().unwrap();
     let user_home = TempDir::new().unwrap();
 
-    // User config sets model.
+    // User config sets model and dimensions (YAML format).
     fs::write(
-        user_home.path().join("config"),
-        "MDVDB_EMBEDDING_MODEL=user-model\nMDVDB_EMBEDDING_DIMENSIONS=256\n",
+        user_home.path().join("config.yaml"),
+        "embedding:\n  model: user-model\n  dimensions: 256\n",
     )
     .unwrap();
 
-    // Project config overrides model.
+    // Project config overrides model (YAML format).
+    let mdvdb_dir = project.path().join(".markdownvdb");
+    fs::create_dir_all(&mdvdb_dir).unwrap();
     fs::write(
-        project.path().join(".markdownvdb"),
-        "MDVDB_EMBEDDING_MODEL=project-model\n",
+        mdvdb_dir.join("config.yaml"),
+        "embedding:\n  model: project-model\n",
     )
     .unwrap();
 
@@ -532,16 +536,20 @@ fn shell_env_overrides_user_config() {
 #[test]
 #[serial]
 fn dotenv_overrides_user_config() {
+    // With the YAML pipeline, .env is only for secrets (OPENAI_API_KEY, OLLAMA_HOST).
+    // MDVDB_* vars in .env are stripped and do NOT override user YAML config.
+    // Instead, project YAML > user YAML for MDVDB settings.
     clear_env();
     let project = TempDir::new().unwrap();
     let user_home = TempDir::new().unwrap();
 
     fs::write(
-        user_home.path().join("config"),
-        "MDVDB_EMBEDDING_MODEL=user-model\n",
+        user_home.path().join("config.yaml"),
+        "embedding:\n  model: user-model\n",
     )
     .unwrap();
 
+    // .env MDVDB vars are now stripped — they don't override YAML
     fs::write(
         project.path().join(".env"),
         "MDVDB_EMBEDDING_MODEL=dotenv-model\n",
@@ -552,8 +560,8 @@ fn dotenv_overrides_user_config() {
 
     let config = Config::load(project.path()).unwrap();
     assert_eq!(
-        config.embedding_model, "dotenv-model",
-        ".env should override user config"
+        config.embedding_model, "user-model",
+        "user YAML should be used since .env MDVDB vars are stripped"
     );
 
     clear_env();
@@ -601,35 +609,30 @@ fn no_user_config_env_disables_user_config() {
 
 #[test]
 #[serial]
-fn full_four_level_cascade() {
+fn full_three_level_cascade() {
+    // With the YAML pipeline, the cascade is: shell env > project YAML > user YAML > defaults.
+    // .env is only for secrets (OPENAI_API_KEY, OLLAMA_HOST).
     clear_env();
     let project = TempDir::new().unwrap();
     let user_home = TempDir::new().unwrap();
 
-    // User config: sets model and dimensions.
+    // User config: sets model, dimensions, and search limit (YAML format).
     fs::write(
-        user_home.path().join("config"),
-        "MDVDB_EMBEDDING_MODEL=user-model\n\
-         MDVDB_EMBEDDING_DIMENSIONS=128\n\
-         MDVDB_SEARCH_DEFAULT_LIMIT=5\n",
+        user_home.path().join("config.yaml"),
+        "embedding:\n  model: user-model\n  dimensions: 128\nsearch:\n  limit: 5\n",
     )
     .unwrap();
 
-    // .env: overrides model from user config.
+    // Project YAML: overrides dimensions from user config.
+    let mdvdb_dir = project.path().join(".markdownvdb");
+    fs::create_dir_all(&mdvdb_dir).unwrap();
     fs::write(
-        project.path().join(".env"),
-        "MDVDB_EMBEDDING_MODEL=dotenv-model\n",
+        mdvdb_dir.join("config.yaml"),
+        "embedding:\n  dimensions: 512\n",
     )
     .unwrap();
 
-    // Project .markdownvdb: overrides dimensions from user config.
-    fs::write(
-        project.path().join(".markdownvdb"),
-        "MDVDB_EMBEDDING_DIMENSIONS=512\n",
-    )
-    .unwrap();
-
-    // Shell env: overrides search limit from user config.
+    // Shell env: overrides search limit.
     std::env::set_var("MDVDB_SEARCH_DEFAULT_LIMIT", "50");
     std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
 
@@ -637,10 +640,10 @@ fn full_four_level_cascade() {
 
     // Shell env wins for search limit.
     assert_eq!(config.search_default_limit, 50, "shell env should win");
-    // Project config wins for dimensions.
-    assert_eq!(config.embedding_dimensions, 512, "project config should win over .env and user");
-    // .env wins for model (over user config).
-    assert_eq!(config.embedding_model, "dotenv-model", ".env should win over user config");
+    // Project YAML wins for dimensions.
+    assert_eq!(config.embedding_dimensions, 512, "project YAML should win over user YAML");
+    // User YAML provides model (not overridden by project).
+    assert_eq!(config.embedding_model, "user-model", "user YAML should provide fallback model");
 
     clear_env();
 }

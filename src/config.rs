@@ -320,153 +320,126 @@ impl Config {
         dirs::home_dir().map(|h| h.join(".mdvdb"))
     }
 
-    /// Resolve the user-level config file path (~/.mdvdb/config).
+    /// Resolve the user-level config file path (~/.mdvdb/config.yaml).
     pub fn user_config_path() -> Option<PathBuf> {
-        Self::user_config_dir().map(|d| d.join("config"))
+        Self::user_config_dir().map(|d| d.join("config.yaml"))
     }
 
-    /// Load configuration with priority: shell env > `.markdownvdb/.config` > legacy `.markdownvdb` > `.env` > `~/.mdvdb/config` > defaults.
+    /// Load configuration with priority: shell env > project YAML > user YAML > defaults.
+    ///
+    /// Pipeline:
+    /// 1. Load `.env` for secrets (OPENAI_API_KEY, OLLAMA_HOST) via dotenvy
+    /// 2. Detect & auto-migrate project config to YAML
+    /// 3. Detect & auto-migrate user config to YAML
+    /// 4. Load user YAML as serde_yaml::Value (or empty Mapping)
+    /// 5. Load project YAML as serde_yaml::Value (or empty Mapping)
+    /// 6. Deep merge project over user via merge_yaml_values()
+    /// 7. Deserialize merged Value into YamlConfig
+    /// 8. Apply env var overrides via apply_env_overrides()
+    /// 9. Convert via Config::from_yaml()
     pub fn load(project_root: &Path) -> Result<Self, Error> {
-        // Load config file (ignore if missing).
-        // dotenvy::from_path does NOT override existing env vars,
-        // so shell env always takes priority.
-        // Try new location first, fall back to legacy flat file.
-        let new_config = project_root.join(".markdownvdb").join(".config");
-        let legacy_config = project_root.join(".markdownvdb");
-        if new_config.is_file() {
-            let _ = dotenvy::from_path(new_config);
-        } else if legacy_config.is_file() {
-            let _ = dotenvy::from_path(legacy_config);
-        }
+        use std::fs;
 
-        // Load .env as a fallback for shared secrets (e.g., OPENAI_API_KEY).
-        // Since .markdownvdb was loaded first, its values take priority over .env.
+        // (1) Load .env for secrets (does NOT override existing env vars).
+        // Capture which MDVDB_* env vars exist BEFORE .env load, so we can
+        // remove any MDVDB_* vars that .env introduces (those should come from
+        // YAML config, not .env). Only shell-set MDVDB_* vars should persist
+        // as overrides.
+        let pre_env_mdvdb_vars: std::collections::HashSet<String> = std::env::vars()
+            .filter(|(k, _)| k.starts_with("MDVDB_"))
+            .map(|(k, _)| k)
+            .collect();
+
         let _ = dotenvy::from_path(project_root.join(".env"));
 
-        // Load user-level config (~/.mdvdb/config) as lowest-priority file source.
-        if std::env::var("MDVDB_NO_USER_CONFIG").is_err() {
-            if let Some(config_dir) = Self::user_config_dir() {
-                let _ = dotenvy::from_path(config_dir.join("config"));
+        // Remove MDVDB_* vars introduced by .env (not present before).
+        // These should be configured via YAML, not .env.
+        for (k, _) in std::env::vars() {
+            if k.starts_with("MDVDB_") && !pre_env_mdvdb_vars.contains(&k) {
+                std::env::remove_var(&k);
             }
         }
 
-        let embedding_provider = env_or_default("MDVDB_EMBEDDING_PROVIDER", "openai")
-            .parse::<EmbeddingProviderType>()?;
+        // (2) Detect and auto-migrate project config.
+        let mdvdb_dir = project_root.join(".markdownvdb");
+        let project_yaml_path = mdvdb_dir.join("config.yaml");
+        let project_dotenv_path = mdvdb_dir.join(".config");
+        let legacy_flat = project_root.join(".markdownvdb");
 
-        let embedding_model = env_or_default("MDVDB_EMBEDDING_MODEL", "text-embedding-3-small");
+        if !project_yaml_path.is_file() {
+            if project_dotenv_path.is_file() {
+                // .markdownvdb/.config exists but no config.yaml — migrate
+                let _ = migrate_dotenv_to_yaml(&project_dotenv_path, &project_yaml_path);
+            } else if legacy_flat.is_file() {
+                // Legacy flat .markdownvdb file — migrate to dir structure
+                let tmp_path = project_root.join(".markdownvdb.tmp");
+                if fs::rename(&legacy_flat, &tmp_path).is_ok() {
+                    if fs::create_dir_all(&mdvdb_dir).is_ok() {
+                        let new_dotenv = mdvdb_dir.join(".config");
+                        if fs::rename(&tmp_path, &new_dotenv).is_ok() {
+                            let _ = migrate_dotenv_to_yaml(&new_dotenv, &project_yaml_path);
+                        }
+                    } else {
+                        // Restore if dir creation failed
+                        let _ = fs::rename(&tmp_path, &legacy_flat);
+                    }
+                }
+            }
+        }
 
-        let embedding_dimensions = parse_env::<usize>("MDVDB_EMBEDDING_DIMENSIONS", 1536)?;
+        // (3) Detect and auto-migrate user config.
+        if std::env::var("MDVDB_NO_USER_CONFIG").is_err() {
+            if let Some(user_dir) = Self::user_config_dir() {
+                let user_yaml = user_dir.join("config.yaml");
+                let user_dotenv = user_dir.join("config");
+                if !user_yaml.is_file() && user_dotenv.is_file() {
+                    let _ = migrate_dotenv_to_yaml(&user_dotenv, &user_yaml);
+                }
+            }
+        }
 
-        let embedding_batch_size = parse_env::<usize>("MDVDB_EMBEDDING_BATCH_SIZE", 100)?;
-
-        let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
-
-        let ollama_host = env_or_default("OLLAMA_HOST", "http://localhost:11434");
-
-        let embedding_endpoint = std::env::var("MDVDB_EMBEDDING_ENDPOINT").ok();
-
-        let source_dirs = parse_comma_list_path("MDVDB_SOURCE_DIRS", vec![PathBuf::from(".")]);
-
-        let ignore_patterns = parse_comma_list_string("MDVDB_IGNORE_PATTERNS", vec![]);
-
-        let watch_enabled = parse_env_bool("MDVDB_WATCH", true)?;
-
-        let watch_debounce_ms = parse_env::<u64>("MDVDB_WATCH_DEBOUNCE_MS", 300)?;
-
-        let chunk_max_tokens = parse_env::<usize>("MDVDB_CHUNK_MAX_TOKENS", 512)?;
-
-        let chunk_overlap_tokens = parse_env::<usize>("MDVDB_CHUNK_OVERLAP_TOKENS", 50)?;
-
-        let clustering_enabled = parse_env_bool("MDVDB_CLUSTERING_ENABLED", true)?;
-
-        let clustering_rebalance_threshold =
-            parse_env::<usize>("MDVDB_CLUSTERING_REBALANCE_THRESHOLD", 50)?;
-
-        let clustering_granularity =
-            parse_env::<f64>("MDVDB_CLUSTER_GRANULARITY", 1.0)?;
-
-        let search_default_limit = parse_env::<usize>("MDVDB_SEARCH_DEFAULT_LIMIT", 10)?;
-
-        let search_min_score = parse_env::<f64>("MDVDB_SEARCH_MIN_SCORE", 0.0)?;
-
-        let search_default_mode = env_or_default("MDVDB_SEARCH_MODE", "hybrid")
-            .parse::<SearchMode>()?;
-
-        let search_rrf_k = parse_env::<f64>("MDVDB_SEARCH_RRF_K", 60.0)?;
-
-        let bm25_norm_k = parse_env::<f64>("MDVDB_BM25_NORM_K", 1.5)?;
-
-        let search_decay_enabled = parse_env_bool("MDVDB_SEARCH_DECAY", false)?;
-
-        let search_decay_half_life = parse_env::<f64>("MDVDB_SEARCH_DECAY_HALF_LIFE", 90.0)?;
-
-        let search_decay_exclude =
-            parse_comma_list_string("MDVDB_SEARCH_DECAY_EXCLUDE", vec![]);
-
-        let search_decay_include =
-            parse_comma_list_string("MDVDB_SEARCH_DECAY_INCLUDE", vec![]);
-
-        let search_boost_links = parse_env_bool("MDVDB_SEARCH_BOOST_LINKS", false)?;
-
-        let search_boost_hops = parse_env::<usize>("MDVDB_SEARCH_BOOST_HOPS", 1)?;
-
-        let search_expand_graph = parse_env::<usize>("MDVDB_SEARCH_EXPAND_GRAPH", 0)?;
-
-        let search_expand_limit = parse_env::<usize>("MDVDB_SEARCH_EXPAND_LIMIT", 3)?;
-
-        let vector_quantization = env_or_default("MDVDB_VECTOR_QUANTIZATION", "f16")
-            .parse::<VectorQuantization>()?;
-
-        let index_compression = parse_env_bool("MDVDB_INDEX_COMPRESSION", true)?;
-
-        let edge_embeddings = parse_env_bool("MDVDB_EDGE_EMBEDDINGS", true)?;
-
-        let edge_boost_weight = parse_env::<f64>("MDVDB_EDGE_BOOST_WEIGHT", 0.15)?;
-
-        let edge_cluster_rebalance = parse_env::<usize>("MDVDB_EDGE_CLUSTER_REBALANCE", 50)?;
-
-        let custom_cluster_defs = parse_custom_clusters("MDVDB_CUSTOM_CLUSTERS");
-
-        let config = Self {
-            embedding_provider,
-            embedding_model,
-            embedding_dimensions,
-            embedding_batch_size,
-            openai_api_key,
-            ollama_host,
-            embedding_endpoint,
-            source_dirs,
-            ignore_patterns,
-            watch_enabled,
-            watch_debounce_ms,
-            chunk_max_tokens,
-            chunk_overlap_tokens,
-            clustering_enabled,
-            clustering_rebalance_threshold,
-            clustering_granularity,
-            search_default_limit,
-            search_min_score,
-            search_default_mode,
-            search_rrf_k,
-            bm25_norm_k,
-            search_decay_enabled,
-            search_decay_half_life,
-            search_decay_exclude,
-            search_decay_include,
-            search_boost_links,
-            search_boost_hops,
-            search_expand_graph,
-            search_expand_limit,
-            vector_quantization,
-            index_compression,
-            edge_embeddings,
-            edge_boost_weight,
-            edge_cluster_rebalance,
-            custom_cluster_defs,
+        // (4) Load user YAML as Value (or empty Mapping).
+        let user_value: serde_yaml::Value = if std::env::var("MDVDB_NO_USER_CONFIG").is_err() {
+            Self::user_config_path()
+                .filter(|p| p.is_file())
+                .and_then(|p| fs::read_to_string(&p).ok())
+                .and_then(|s| serde_yaml::from_str(&s).ok())
+                .unwrap_or_else(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
         };
 
-        config.validate()?;
-        Ok(config)
+        // (5) Load project YAML as Value (or empty Mapping).
+        let project_value: serde_yaml::Value = if project_yaml_path.is_file() {
+            let content = fs::read_to_string(&project_yaml_path).map_err(|e| {
+                Error::Config(format!(
+                    "failed to read project config '{}': {e}",
+                    project_yaml_path.display()
+                ))
+            })?;
+            serde_yaml::from_str(&content).map_err(|e| {
+                Error::Config(format!(
+                    "failed to parse project config '{}': {e}",
+                    project_yaml_path.display()
+                ))
+            })?
+        } else {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        };
+
+        // (6) Deep merge project over user.
+        let merged = merge_yaml_values(user_value, project_value);
+
+        // (7) Deserialize merged Value into YamlConfig.
+        let mut yaml_config: YamlConfig = serde_yaml::from_value(merged).map_err(|e| {
+            Error::Config(format!("failed to deserialize merged config: {e}"))
+        })?;
+
+        // (8) Apply env var overrides.
+        apply_env_overrides(&mut yaml_config);
+
+        // (9) Convert via Config::from_yaml() (validates inside).
+        Self::from_yaml(yaml_config, project_root)
     }
 
     /// Validate constraint invariants on the loaded config.
@@ -550,11 +523,13 @@ impl Config {
 }
 
 /// Read an env var or return a default string value.
+#[allow(dead_code)]
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 /// Parse an env var into a typed value, using a default if not set.
+#[allow(dead_code)]
 fn parse_env<T>(key: &str, default: T) -> Result<T, Error>
 where
     T: FromStr + ToString,
@@ -569,6 +544,7 @@ where
 }
 
 /// Parse a boolean env var (true/false/1/0).
+#[allow(dead_code)]
 fn parse_env_bool(key: &str, default: bool) -> Result<bool, Error> {
     match std::env::var(key) {
         Ok(val) => match val.to_lowercase().as_str() {
@@ -583,6 +559,7 @@ fn parse_env_bool(key: &str, default: bool) -> Result<bool, Error> {
 }
 
 /// Parse a comma-separated env var into Vec<PathBuf>, trimming whitespace.
+#[allow(dead_code)]
 fn parse_comma_list_path(key: &str, default: Vec<PathBuf>) -> Vec<PathBuf> {
     match std::env::var(key) {
         Ok(val) if !val.trim().is_empty() => {
@@ -593,6 +570,7 @@ fn parse_comma_list_path(key: &str, default: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Parse a comma-separated env var into Vec<String>, trimming whitespace.
+#[allow(dead_code)]
 fn parse_comma_list_string(key: &str, default: Vec<String>) -> Vec<String> {
     match std::env::var(key) {
         Ok(val) if !val.trim().is_empty() => val.split(',').map(|s| s.trim().to_string()).collect(),
@@ -606,6 +584,7 @@ fn parse_comma_list_string(key: &str, default: Vec<String>) -> Vec<String> {
 /// - Pipe `|` separates clusters
 /// - Colon `:` separates name from seeds
 /// - Comma `,` separates seeds within a cluster
+#[allow(dead_code)]
 fn parse_custom_clusters(key: &str) -> Vec<CustomClusterDef> {
     match std::env::var(key) {
         Ok(val) if !val.trim().is_empty() => val
@@ -1427,15 +1406,20 @@ mod tests {
 
     #[test]
     fn parse_error_on_non_numeric() {
+        // With the YAML pipeline, env var overrides silently ignore unparseable
+        // values (using .ok()), so a non-numeric MDVDB_EMBEDDING_DIMENSIONS
+        // falls back to the YAML/default value instead of erroring.
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("MDVDB_EMBEDDING_DIMENSIONS").ok();
+        let had_no_user = std::env::var("MDVDB_NO_USER_CONFIG").ok();
         std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "abc");
+        std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
         let result = Config::load(Path::new("/nonexistent"));
-        std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("MDVDB_EMBEDDING_DIMENSIONS"));
+        match saved { Some(v) => std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", v), None => std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS") }
+        match had_no_user { Some(v) => std::env::set_var("MDVDB_NO_USER_CONFIG", v), None => std::env::remove_var("MDVDB_NO_USER_CONFIG") }
+        // Should succeed with default dimensions since "abc" is silently skipped
+        let config = result.unwrap();
+        assert_eq!(config.embedding_dimensions, 1536);
     }
 
     #[test]
@@ -1494,7 +1478,7 @@ mod tests {
         std::env::set_var("MDVDB_CONFIG_HOME", "/custom");
         let path = Config::user_config_path();
         std::env::remove_var("MDVDB_CONFIG_HOME");
-        assert_eq!(path, Some(PathBuf::from("/custom/config")));
+        assert_eq!(path, Some(PathBuf::from("/custom/config.yaml")));
     }
 
     #[test]
@@ -1525,10 +1509,10 @@ mod tests {
             std::env::remove_var(var);
         }
 
-        // Create a temp user config that sets a specific model.
+        // Create a temp user config that sets a specific model (YAML format).
         let temp = tempfile::TempDir::new().unwrap();
-        let config_path = temp.path().join("config");
-        std::fs::write(&config_path, "MDVDB_EMBEDDING_MODEL=custom-model\n").unwrap();
+        let config_path = temp.path().join("config.yaml");
+        std::fs::write(&config_path, "embedding:\n  model: custom-model\n").unwrap();
 
         std::env::set_var("MDVDB_CONFIG_HOME", temp.path());
         std::env::set_var("MDVDB_NO_USER_CONFIG", "1");

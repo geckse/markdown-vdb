@@ -872,12 +872,13 @@ fn test_init_global_creates_user_config() {
         "init --global should succeed, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // init_global now writes to config.yaml (YAML pipeline)
     assert!(
-        dir.path().join("config").exists(),
-        "user config file should be created"
+        dir.path().join("config.yaml").exists(),
+        "user config file should be created at config.yaml"
     );
 
-    let content = fs::read_to_string(dir.path().join("config")).unwrap();
+    let content = fs::read_to_string(dir.path().join("config.yaml")).unwrap();
     assert!(
         content.contains("OPENAI_API_KEY"),
         "user config template should mention OPENAI_API_KEY"
@@ -1958,8 +1959,8 @@ fn test_clusters_remove() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_CUSTOM_CLUSTERS=A:x,y|B:z\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\nclustering:\n  custom:\n    - name: A\n      seeds: [x, y]\n    - name: B\n      seeds: [z]\n",
     )
     .unwrap();
 
@@ -2053,11 +2054,11 @@ fn test_clusters_list_no_index_needed() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    // Config with clusters defined but NO index
+    // Config with clusters defined but NO index (YAML format)
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_CUSTOM_CLUSTERS=Test:seed1,seed2\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "clustering:\n  custom:\n    - name: Test\n      seeds: [seed1, seed2]\n",
     )
     .unwrap();
 
