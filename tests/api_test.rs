@@ -58,11 +58,11 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    // Write .markdownvdb/.config (needed for Config::load to find project root)
+    // Write .markdownvdb/config.yaml (needed for Config::load to find project root)
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -91,7 +91,7 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
 fn test_open_with_mock_config() {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join(".markdownvdb")).unwrap();
-    fs::write(dir.path().join(".markdownvdb").join(".config"), "MDVDB_EMBEDDING_PROVIDER=mock\n").unwrap();
+    fs::write(dir.path().join(".markdownvdb").join("config.yaml"), "embedding:\n  provider: mock\n").unwrap();
 
     let vdb = MarkdownVdb::open_with_config(dir.path().to_path_buf(), mock_config());
     assert!(vdb.is_ok(), "should open with mock config: {:?}", vdb.err());
@@ -197,9 +197,10 @@ fn setup_project_with_links() -> (TempDir, MarkdownVdb) {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -267,8 +268,8 @@ fn setup_project_with_clustering() -> (TempDir, MarkdownVdb) {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -435,8 +436,8 @@ async fn test_file_tree_returns_structure() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -475,8 +476,8 @@ async fn test_search_with_path_prefix() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -841,7 +842,7 @@ async fn test_decay_config_enabled_via_config() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().to_path_buf();
         fs::create_dir_all(root.join(".markdownvdb")).unwrap();
-        fs::write(root.join(".markdownvdb").join(".config"), "").unwrap();
+        fs::write(root.join(".markdownvdb").join("config.yaml"), "").unwrap();
         fs::write(root.join("doc.md"), "# Doc\n\nContent.\n").unwrap();
         (dir, root)
     };
@@ -947,8 +948,8 @@ async fn test_search_with_expansion() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 

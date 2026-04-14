@@ -748,18 +748,8 @@ async fn run() -> anyhow::Result<()> {
                     }
 
                     // Read existing defs, add new one, write back.
-                    let config_path = cwd.join(".markdownvdb").join(".config");
-                    let existing_val = std::fs::read_to_string(&config_path)
-                        .unwrap_or_default()
-                        .lines()
-                        .find(|l| l.starts_with("MDVDB_CUSTOM_CLUSTERS="))
-                        .map(|l| {
-                            let v = l.trim_start_matches("MDVDB_CUSTOM_CLUSTERS=");
-                            v.trim_matches('"').to_string()
-                        })
-                        .unwrap_or_default();
-
-                    let mut defs = mdvdb::config_parse_custom_clusters(&existing_val);
+                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                    let mut defs = read_custom_clusters_from_yaml(&yaml_config_path);
 
                     // Check for duplicate name.
                     if defs.iter().any(|d| d.name == name) {
@@ -771,26 +761,15 @@ async fn run() -> anyhow::Result<()> {
                         seeds: seed_list,
                     });
 
-                    let encoded = mdvdb::config_encode_custom_clusters(&defs);
-                    mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", &encoded)?;
+                    write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
 
                     if !json {
                         eprintln!("Added custom cluster '{name}'. Run `mdvdb ingest` to compute assignments.");
                     }
                 }
                 Some(ClusterAction::Remove { name }) => {
-                    let config_path = cwd.join(".markdownvdb").join(".config");
-                    let existing_val = std::fs::read_to_string(&config_path)
-                        .unwrap_or_default()
-                        .lines()
-                        .find(|l| l.starts_with("MDVDB_CUSTOM_CLUSTERS="))
-                        .map(|l| {
-                            let v = l.trim_start_matches("MDVDB_CUSTOM_CLUSTERS=");
-                            v.trim_matches('"').to_string()
-                        })
-                        .unwrap_or_default();
-
-                    let mut defs = mdvdb::config_parse_custom_clusters(&existing_val);
+                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                    let mut defs = read_custom_clusters_from_yaml(&yaml_config_path);
                     let before_len = defs.len();
                     defs.retain(|d| d.name != name);
 
@@ -798,30 +777,15 @@ async fn run() -> anyhow::Result<()> {
                         anyhow::bail!("custom cluster '{}' not found", name);
                     }
 
-                    if defs.is_empty() {
-                        mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", "")?;
-                    } else {
-                        let encoded = mdvdb::config_encode_custom_clusters(&defs);
-                        mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", &encoded)?;
-                    }
+                    write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
 
                     if !json {
                         eprintln!("Removed custom cluster '{name}'. Run `mdvdb ingest` to update assignments.");
                     }
                 }
                 Some(ClusterAction::List) => {
-                    let config_path = cwd.join(".markdownvdb").join(".config");
-                    let existing_val = std::fs::read_to_string(&config_path)
-                        .unwrap_or_default()
-                        .lines()
-                        .find(|l| l.starts_with("MDVDB_CUSTOM_CLUSTERS="))
-                        .map(|l| {
-                            let v = l.trim_start_matches("MDVDB_CUSTOM_CLUSTERS=");
-                            v.trim_matches('"').to_string()
-                        })
-                        .unwrap_or_default();
-
-                    let defs = mdvdb::config_parse_custom_clusters(&existing_val);
+                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                    let defs = read_custom_clusters_from_yaml(&yaml_config_path);
 
                     if json {
                         serde_json::to_writer_pretty(std::io::stdout(), &defs)?;
@@ -845,7 +809,7 @@ async fn run() -> anyhow::Result<()> {
                             serde_json::to_writer_pretty(std::io::stdout(), &custom)?;
                             writeln!(std::io::stdout())?;
                         } else if custom.is_empty() {
-                            println!("No custom clusters. Define clusters in .markdownvdb/.config and run ingest.");
+                            println!("No custom clusters. Use `mdvdb clusters add` or define them in .markdownvdb/config.yaml and run ingest.");
                         } else {
                             let total_docs: usize = custom.iter().map(|c| c.document_count).sum();
                             println!(
@@ -1358,6 +1322,54 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
         eprintln!("{msg}");
     }
 
+    Ok(())
+}
+
+/// Read custom cluster definitions from a YAML config file.
+fn read_custom_clusters_from_yaml(yaml_path: &std::path::Path) -> Vec<mdvdb::CustomClusterDef> {
+    let content = std::fs::read_to_string(yaml_path).unwrap_or_default();
+    if content.is_empty() {
+        return Vec::new();
+    }
+    let cfg: mdvdb::config::YamlConfig = serde_yaml::from_str(&content).unwrap_or_default();
+    cfg.clustering
+        .custom
+        .into_iter()
+        .map(|c| mdvdb::CustomClusterDef {
+            name: c.name,
+            seeds: c.seeds,
+        })
+        .collect()
+}
+
+/// Write custom cluster definitions to a YAML config file, preserving other settings.
+fn write_custom_clusters_to_yaml(
+    yaml_path: &std::path::Path,
+    defs: &[mdvdb::CustomClusterDef],
+) -> anyhow::Result<()> {
+    let clusters: Vec<serde_yaml::Value> = defs
+        .iter()
+        .map(|d| {
+            let mut map = serde_yaml::Mapping::new();
+            map.insert(
+                serde_yaml::Value::String("name".into()),
+                serde_yaml::Value::String(d.name.clone()),
+            );
+            map.insert(
+                serde_yaml::Value::String("seeds".into()),
+                serde_yaml::Value::Sequence(
+                    d.seeds.iter().map(|s| serde_yaml::Value::String(s.clone())).collect(),
+                ),
+            );
+            serde_yaml::Value::Mapping(map)
+        })
+        .collect();
+
+    mdvdb::config::update_yaml_config_value(
+        yaml_path,
+        "clustering.custom",
+        serde_yaml::Value::Sequence(clusters),
+    )?;
     Ok(())
 }
 

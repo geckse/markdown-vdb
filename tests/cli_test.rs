@@ -23,8 +23,8 @@ fn setup_and_ingest() -> TempDir {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -94,8 +94,8 @@ fn test_init_creates_config_file() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        dir.path().join(".markdownvdb").join(".config").exists(),
-        ".markdownvdb/.config should be created"
+        dir.path().join(".markdownvdb").join("config.yaml").exists(),
+        ".markdownvdb/config.yaml should be created"
     );
 }
 
@@ -186,8 +186,8 @@ fn test_ingest_json_output() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
     fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
@@ -467,8 +467,8 @@ fn test_ingest_json_unchanged() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
     fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
@@ -498,9 +498,10 @@ fn setup_and_ingest_with_links() -> TempDir {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -872,12 +873,13 @@ fn test_init_global_creates_user_config() {
         "init --global should succeed, stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // init_global now writes to config.yaml (YAML pipeline)
     assert!(
-        dir.path().join("config").exists(),
-        "user config file should be created"
+        dir.path().join("config.yaml").exists(),
+        "user config file should be created at config.yaml"
     );
 
-    let content = fs::read_to_string(dir.path().join("config")).unwrap();
+    let content = fs::read_to_string(dir.path().join("config.yaml")).unwrap();
     assert!(
         content.contains("OPENAI_API_KEY"),
         "user config template should mention OPENAI_API_KEY"
@@ -913,8 +915,8 @@ fn test_config_json_output() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -943,8 +945,8 @@ fn test_config_human_output() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -1037,8 +1039,8 @@ fn setup_and_ingest_with_subdirs() -> TempDir {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -1205,8 +1207,8 @@ fn test_cli_ingest_preview() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
     fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
@@ -1243,8 +1245,8 @@ fn test_cli_ingest_preview_json() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
     fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
@@ -1711,8 +1713,8 @@ fn test_search_json_includes_graph_context() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -1870,8 +1872,8 @@ fn test_clusters_add_and_list() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -1906,8 +1908,8 @@ fn test_clusters_add_rejects_invalid_name() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n",
     )
     .unwrap();
 
@@ -1937,8 +1939,8 @@ fn test_clusters_add_rejects_invalid_seeds() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n",
     )
     .unwrap();
 
@@ -1958,8 +1960,8 @@ fn test_clusters_remove() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_CUSTOM_CLUSTERS=A:x,y|B:z\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\nclustering:\n  custom:\n    - name: A\n      seeds: [x, y]\n    - name: B\n      seeds: [z]\n",
     )
     .unwrap();
 
@@ -1992,8 +1994,8 @@ fn test_clusters_remove_nonexistent() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n",
     )
     .unwrap();
 
@@ -2014,8 +2016,8 @@ fn test_clusters_custom_json_after_ingest() {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\nMDVDB_CUSTOM_CLUSTERS=\"AI:machine learning,neural nets|Web:html,css\"\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\nclustering:\n  custom:\n    - name: AI\n      seeds: [machine learning, neural nets]\n    - name: Web\n      seeds: [html, css]\n",
     )
     .unwrap();
     fs::write(root.join("ai.md"), "# AI\nMachine learning content").unwrap();
@@ -2053,11 +2055,11 @@ fn test_clusters_list_no_index_needed() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
 
-    // Config with clusters defined but NO index
+    // Config with clusters defined but NO index (YAML format)
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_CUSTOM_CLUSTERS=Test:seed1,seed2\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "clustering:\n  custom:\n    - name: Test\n      seeds: [seed1, seed2]\n",
     )
     .unwrap();
 

@@ -54,9 +54,10 @@ fn mock_config() -> Config {
 
 fn setup_dir() -> TempDir {
     let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join(".markdownvdb")).unwrap();
     fs::write(
-        dir.path().join(".markdownvdb"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        dir.path().join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
     dir
@@ -490,8 +491,8 @@ fn cli_setup_and_ingest() -> TempDir {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\nMDVDB_EDGE_EMBEDDINGS=true\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\nindex:\n  edge_embeddings: true\n",
     )
     .unwrap();
 
