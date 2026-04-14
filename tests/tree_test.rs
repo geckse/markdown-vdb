@@ -58,8 +58,8 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
@@ -85,8 +85,8 @@ fn setup_nested_project() -> (TempDir, MarkdownVdb) {
 
     fs::create_dir_all(root.join(".markdownvdb")).unwrap();
     fs::write(
-        root.join(".markdownvdb").join(".config"),
-        "MDVDB_EMBEDDING_PROVIDER=mock\nMDVDB_EMBEDDING_DIMENSIONS=8\n",
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
     )
     .unwrap();
 
