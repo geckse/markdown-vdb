@@ -809,7 +809,7 @@ async fn run() -> anyhow::Result<()> {
                             serde_json::to_writer_pretty(std::io::stdout(), &custom)?;
                             writeln!(std::io::stdout())?;
                         } else if custom.is_empty() {
-                            println!("No custom clusters. Define clusters in .markdownvdb/.config and run ingest.");
+                            println!("No custom clusters. Use `mdvdb clusters add` or define them in .markdownvdb/config.yaml and run ingest.");
                         } else {
                             let total_docs: usize = custom.iter().map(|c| c.document_count).sum();
                             println!(
