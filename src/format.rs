@@ -5,7 +5,8 @@ use std::time::SystemTime;
 use mdvdb::search::{GraphContextItem, SearchResult};
 use mdvdb::schema::{FieldType, Schema};
 use mdvdb::links::{LinkQueryResult, LinkState, NeighborhoodResult, OrphanFile, ResolvedLink};
-use mdvdb::tree::FileTree;
+use mdvdb::tree::{FileState, FileTree};
+use mdvdb::CollectionResponse;
 use mdvdb::ClusterSummary;
 use mdvdb::IndexStatus;
 use mdvdb::DocumentInfo;
@@ -607,6 +608,90 @@ pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
     }
 }
 
+/// Print a collection (folder-as-table) view: a scope header, a column legend,
+/// then a compact `title · path · state` row table with a pagination footer.
+pub fn print_collection(resp: &CollectionResponse) {
+    // Scope header.
+    let scope_label = if resp.scope == "." {
+        "(whole vault)".to_string()
+    } else {
+        resp.scope.clone()
+    };
+    let recursive_note = if resp.recursive { " (recursive)" } else { "" };
+    println!(
+        "\n  {} {}{}",
+        "Collection:".bold(),
+        scope_label.cyan(),
+        recursive_note.dimmed()
+    );
+
+    // Column legend.
+    println!(
+        "\n  {} {} {}",
+        "●".cyan().bold(),
+        "Columns".bold(),
+        format!("({} columns)", resp.columns.len()).dimmed()
+    );
+    if resp.columns.is_empty() {
+        println!("    {}", "(none)".dimmed());
+    } else {
+        for col in &resp.columns {
+            let type_str = match &col.field_type {
+                FieldType::String => "string",
+                FieldType::Number => "number",
+                FieldType::Boolean => "boolean",
+                FieldType::List => "list",
+                FieldType::Date => "date",
+                FieldType::Mixed => "mixed",
+            };
+            let required_tag = if col.required {
+                format!(" {}", "[required]".yellow())
+            } else {
+                String::new()
+            };
+            // Schema columns are bold; ad-hoc (in_schema:false) columns are dimmed.
+            let name = if col.in_schema {
+                col.name.bold().to_string()
+            } else {
+                col.name.dimmed().to_string()
+            };
+            println!("    {} {}{}", name, format!("({type_str})").dimmed(), required_tag);
+        }
+    }
+
+    // Row table.
+    println!(
+        "\n  {} {} {}\n",
+        "●".cyan().bold(),
+        "Rows".bold(),
+        format!("({} total)", resp.total_rows).dimmed()
+    );
+    if resp.rows.is_empty() {
+        println!("    {}", "(none)".dimmed());
+    } else {
+        for row in &resp.rows {
+            let state_tag = match &row.state {
+                FileState::Indexed => "indexed".green(),
+                FileState::Modified => "modified".yellow(),
+                FileState::New => "new".blue(),
+                FileState::Deleted => "deleted".red(),
+            };
+            println!("  {}  {}  {}", row.title.bold(), row.path.dimmed(), state_tag);
+        }
+    }
+
+    // Pagination footer.
+    let shown = resp.rows.len();
+    let footer = if shown == 0 {
+        format!("Showing 0 of {} rows", resp.total_rows)
+    } else {
+        let start = resp.offset + 1;
+        let end = resp.offset + shown;
+        format!("Showing {}–{} of {} rows", start, end, resp.total_rows)
+    };
+    println!("\n  {}\n", footer.dimmed());
+}
+
 /// Print cluster summaries with distribution bars and keywords.
 pub fn print_clusters(clusters: &[ClusterSummary]) {
     if clusters.is_empty() {
@@ -1011,7 +1096,7 @@ pub fn print_edges(edges: &[mdvdb::links::SemanticEdge]) {
     // Show cluster breakdown
     if cluster_counts.len() > 1 {
         let mut sorted: Vec<_> = cluster_counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
         for (label, count) in &sorted {
             println!(
                 "    {} {} ({})",

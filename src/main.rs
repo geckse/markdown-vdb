@@ -10,8 +10,8 @@ use colored::Colorize;
 use serde_json::Value;
 
 use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink, SemanticEdge};
-use mdvdb::search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings};
-use mdvdb::{GraphLevel, IngestTimings, MarkdownVdb};
+use mdvdb::search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings, SortOrder};
+use mdvdb::{CollectionQuery, GraphLevel, IngestTimings, MarkdownVdb};
 
 /// Wrapped search output for JSON mode.
 #[derive(serde::Serialize)]
@@ -127,6 +127,10 @@ enum Commands {
 
     /// Get metadata for a specific file
     Get(GetArgs),
+
+    /// List a folder's documents as a table (rows = files, columns = frontmatter)
+    #[command(alias = "list")]
+    Collection(CollectionArgs),
 
     /// Watch for file changes and re-index automatically
     Watch(WatchArgs),
@@ -308,6 +312,37 @@ struct TreeArgs {
 struct GetArgs {
     /// Path to the markdown file
     file_path: PathBuf,
+}
+
+#[derive(Parser)]
+struct CollectionArgs {
+    /// Folder path prefix (relative). Defaults to the whole vault.
+    #[arg(default_value = ".")]
+    path: String,
+
+    /// Include files in all nested subfolders (default: direct children only)
+    #[arg(short, long)]
+    recursive: bool,
+
+    /// Frontmatter field to sort rows by (default: sort by path)
+    #[arg(long, value_name = "FIELD")]
+    sort: Option<String>,
+
+    /// Sort direction
+    #[arg(long, value_name = "ORDER", default_value = "asc")]
+    order: SortOrder,
+
+    /// Metadata filter expression (KEY=VALUE), repeatable (AND logic)
+    #[arg(short, long)]
+    filter: Vec<String>,
+
+    /// Maximum number of rows to return
+    #[arg(long)]
+    limit: Option<usize>,
+
+    /// Number of rows to skip (for pagination)
+    #[arg(long, default_value = "0")]
+    offset: usize,
 }
 
 #[derive(Parser)]
@@ -908,6 +943,32 @@ async fn run() -> anyhow::Result<()> {
                 format::print_document(&doc);
             }
         }
+        Some(Commands::Collection(args)) => {
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+
+            let mut filters = Vec::new();
+            for f in &args.filter {
+                filters.push(parse_filter(f)?);
+            }
+
+            let opts = CollectionQuery {
+                path: args.path,
+                recursive: args.recursive,
+                sort_by: args.sort,
+                order: args.order,
+                filters,
+                limit: args.limit,
+                offset: args.offset,
+            };
+            let resp = vdb.collection(opts)?;
+
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &resp)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_collection(&resp);
+            }
+        }
         Some(Commands::Links(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy().to_string();
@@ -1130,7 +1191,7 @@ _mdvdb() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="search ingest status schema clusters tree get watch init config doctor links backlinks orphans completions"
+    commands="search ingest status schema clusters tree get collection watch init config doctor links backlinks orphans completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands --help --version --verbose --root --json --no-color" -- "$cur"))
@@ -1148,6 +1209,9 @@ _mdvdb() {
             ;;
         get)
             COMPREPLY=($(compgen -f -- "$cur"))
+            ;;
+        collection|list)
+            COMPREPLY=($(compgen -W "--recursive --sort --order --filter --limit --offset --help" -- "$cur"))
             ;;
         init)
             COMPREPLY=($(compgen -W "--global --help" -- "$cur"))
@@ -1171,6 +1235,7 @@ _mdvdb() {
         'clusters:Show document clusters'
         'tree:Show file tree with sync status indicators'
         'get:Get metadata for a specific file'
+        'collection:List a folder'\''s documents as a table'
         'watch:Watch for file changes and re-index automatically'
         'init:Initialize a new .markdownvdb config file'
         'config:Show resolved configuration'
@@ -1222,6 +1287,16 @@ _mdvdb() {
                         '--hops[Number of link hops for graph boosting (1-3)]:hops:' \
                         '--expand[Graph expansion depth for context (0-3)]:depth:'
                     ;;
+                collection|list)
+                    _arguments \
+                        '1:path:_directories' \
+                        '(-r --recursive)'{-r,--recursive}'[Include nested subfolders]' \
+                        '--sort[Frontmatter field to sort by]:field:' \
+                        '--order[Sort direction]:order:(asc desc)' \
+                        '(-f --filter)'{-f,--filter}'[Metadata filter (KEY=VALUE)]:filter:' \
+                        '--limit[Maximum rows to return]:number:' \
+                        '--offset[Rows to skip]:number:'
+                    ;;
             esac
             ;;
     esac
@@ -1237,6 +1312,7 @@ complete -c mdvdb -n '__fish_use_subcommand' -a schema -d 'Show inferred metadat
 complete -c mdvdb -n '__fish_use_subcommand' -a clusters -d 'Show document clusters'
 complete -c mdvdb -n '__fish_use_subcommand' -a tree -d 'Show file tree with sync status indicators'
 complete -c mdvdb -n '__fish_use_subcommand' -a get -d 'Get metadata for a specific file'
+complete -c mdvdb -n '__fish_use_subcommand' -a collection -d 'List a folder'\''s documents as a table'
 complete -c mdvdb -n '__fish_use_subcommand' -a watch -d 'Watch for file changes and re-index automatically'
 complete -c mdvdb -n '__fish_use_subcommand' -a init -d 'Initialize a new .markdownvdb config file'
 complete -c mdvdb -n '__fish_use_subcommand' -a config -d 'Show resolved configuration'
@@ -1276,6 +1352,14 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-include -d 'P
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l hops -d 'Number of link hops for graph boosting (1-3)' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l expand -d 'Graph expansion depth for context (0-3)' -r
 
+# Collection subcommand flags
+complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l recursive -s r -d 'Include nested subfolders'
+complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l sort -d 'Frontmatter field to sort by' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l order -d 'Sort direction' -r -a 'asc desc'
+complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l filter -s f -d 'Metadata filter (KEY=VALUE)' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l limit -d 'Maximum rows to return' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l offset -d 'Rows to skip' -r
+
 # Init subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'
 
@@ -1294,6 +1378,7 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
         @{ Name = 'clusters'; Tooltip = 'Show document clusters' },
         @{ Name = 'tree'; Tooltip = 'Show file tree with sync status indicators' },
         @{ Name = 'get'; Tooltip = 'Get metadata for a specific file' },
+        @{ Name = 'collection'; Tooltip = 'List a folder''s documents as a table' },
         @{ Name = 'watch'; Tooltip = 'Watch for file changes and re-index automatically' },
         @{ Name = 'init'; Tooltip = 'Initialize a new .markdownvdb config file' },
         @{ Name = 'config'; Tooltip = 'Show resolved configuration' },

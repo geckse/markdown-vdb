@@ -118,7 +118,7 @@ fn is_date_string(s: &str) -> bool {
 }
 
 /// Infer a `FieldType` from a single `serde_json::Value`.
-fn infer_field_type(value: &serde_json::Value) -> FieldType {
+pub(crate) fn infer_field_type(value: &serde_json::Value) -> FieldType {
     match value {
         serde_json::Value::Bool(_) => FieldType::Boolean,
         serde_json::Value::Number(_) => FieldType::Number,

@@ -358,18 +358,23 @@ mod tests {
     }
 
     #[test]
-    fn old_version_returns_mismatch() {
+    fn current_version_passes_version_gate() {
+        // With VERSION == 1, a v1 header is the *current* version: it passes the
+        // version check and fails later on the (garbage) body — NOT as a version
+        // mismatch. There is no version older than 1, so the
+        // `IndexVersionMismatch` branch (version < VERSION) is unreachable today.
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("old.idx");
+        let path = dir.path().join("current.idx");
         let mut data = vec![0u8; 128];
-        data[..6].copy_from_slice(b"MDVDB\x00");
-        data[6..10].copy_from_slice(&1u32.to_le_bytes());
+        data[..6].copy_from_slice(MAGIC);
+        data[6..10].copy_from_slice(&VERSION.to_le_bytes());
         fs::write(&path, &data).unwrap();
         let result = load_index(&path);
-        assert!(matches!(
-            result,
-            Err(Error::IndexVersionMismatch { version: 1 })
-        ));
+        assert!(result.is_err(), "garbage body should fail to load");
+        assert!(
+            !matches!(result, Err(Error::IndexVersionMismatch { .. })),
+            "the current version must pass the version gate"
+        );
     }
 
     #[test]

@@ -54,6 +54,40 @@ impl std::fmt::Display for SearchMode {
     }
 }
 
+/// Sort direction for collection rows (and any future ordered listing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    /// Ascending order (smallest / earliest first).
+    #[default]
+    Asc,
+    /// Descending order (largest / latest first).
+    Desc,
+}
+
+impl FromStr for SortOrder {
+    type Err = Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "asc" | "ascending" => Ok(Self::Asc),
+            "desc" | "descending" => Ok(Self::Desc),
+            other => Err(Error::Config(format!(
+                "unknown sort order '{other}': expected asc or desc"
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for SortOrder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Asc => write!(f, "asc"),
+            Self::Desc => write!(f, "desc"),
+        }
+    }
+}
+
 /// Builder-pattern query for semantic search.
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
@@ -1193,7 +1227,7 @@ fn normalize_rrf_scores(results: &mut [(String, f64)], rrf_k: f64, num_lists: us
 ///
 /// - Empty filters → always `true`
 /// - `None` frontmatter with any filter → `false`
-fn evaluate_filters(filters: &[MetadataFilter], frontmatter: Option<&Value>) -> bool {
+pub(crate) fn evaluate_filters(filters: &[MetadataFilter], frontmatter: Option<&Value>) -> bool {
     if filters.is_empty() {
         return true;
     }
@@ -1269,6 +1303,38 @@ fn compare_values(a: &Value, b: &Value, ordering: std::cmp::Ordering) -> bool {
     let b_str = value_as_string(b);
     let cmp = a_str.cmp(&b_str);
     cmp == std::cmp::Ordering::Equal || cmp == ordering
+}
+
+/// Total ordering of two JSON values for stable sorting.
+///
+/// Uses the same numeric-then-lexicographic rule as the filter path
+/// ([`compare_values`] / [`Range`](MetadataFilter::Range)), but returns a real
+/// [`std::cmp::Ordering`] (the less/equal/greater trichotomy a sort needs)
+/// instead of a bool. This guarantees that sort order and `Range`-filter order
+/// never disagree.
+///
+/// - Both parse as numbers → compared as `f64`.
+/// - Both booleans → `false < true`.
+/// - Otherwise → compared by their stringified form
+///   ([`value_as_string`], which preserves raw strings and JSON-encodes
+///   lists/objects).
+///
+/// Null handling (nulls-last) is the caller's responsibility — this function
+/// only orders two concrete, non-null values.
+pub(crate) fn compare_json_for_sort(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    // Numeric comparison first (mirrors compare_values).
+    if let (Some(a_num), Some(b_num)) = (as_f64(a), as_f64(b)) {
+        return a_num.partial_cmp(&b_num).unwrap_or(Ordering::Equal);
+    }
+    // Booleans: false < true. (Equivalent to the string fallback below, which
+    // yields "false" < "true", so this stays consistent with compare_values.)
+    if let (Value::Bool(a_b), Value::Bool(b_b)) = (a, b) {
+        return a_b.cmp(b_b);
+    }
+    // Fall back to string comparison (strings, dates, lists, objects, mixed).
+    value_as_string(a).cmp(&value_as_string(b))
 }
 
 /// Try to extract a numeric f64 from a JSON value.
@@ -1454,6 +1520,97 @@ mod tests {
     fn test_search_mode_serialize() {
         assert_eq!(serde_json::to_string(&SearchMode::Hybrid).unwrap(), "\"hybrid\"");
         assert_eq!(serde_json::to_string(&SearchMode::Lexical).unwrap(), "\"lexical\"");
+    }
+
+    // --- SortOrder tests ---
+
+    #[test]
+    fn test_sort_order_default_is_asc() {
+        assert_eq!(SortOrder::default(), SortOrder::Asc);
+    }
+
+    #[test]
+    fn test_sort_order_from_str() {
+        assert_eq!("asc".parse::<SortOrder>().unwrap(), SortOrder::Asc);
+        assert_eq!("desc".parse::<SortOrder>().unwrap(), SortOrder::Desc);
+        // Case-insensitive + long forms.
+        assert_eq!("ASC".parse::<SortOrder>().unwrap(), SortOrder::Asc);
+        assert_eq!("Descending".parse::<SortOrder>().unwrap(), SortOrder::Desc);
+        assert!("sideways".parse::<SortOrder>().is_err());
+    }
+
+    #[test]
+    fn test_sort_order_serialize_lowercase() {
+        assert_eq!(serde_json::to_string(&SortOrder::Asc).unwrap(), "\"asc\"");
+        assert_eq!(serde_json::to_string(&SortOrder::Desc).unwrap(), "\"desc\"");
+    }
+
+    // --- compare_json_for_sort tests ---
+
+    #[test]
+    fn test_compare_json_for_sort_numeric() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_json_for_sort(&json!(1), &json!(2)), Ordering::Less);
+        assert_eq!(compare_json_for_sort(&json!(2.5), &json!(2.5)), Ordering::Equal);
+        assert_eq!(compare_json_for_sort(&json!(10), &json!(2)), Ordering::Greater);
+        // Numeric (not lexicographic): 10 > 2 even though "10" < "2" as strings.
+        assert_eq!(compare_json_for_sort(&json!(10), &json!(9)), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_compare_json_for_sort_string() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_json_for_sort(&json!("apple"), &json!("banana")), Ordering::Less);
+        assert_eq!(compare_json_for_sort(&json!("zed"), &json!("zed")), Ordering::Equal);
+        assert_eq!(compare_json_for_sort(&json!("draft"), &json!("published")), Ordering::Less);
+    }
+
+    #[test]
+    fn test_compare_json_for_sort_bool() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_json_for_sort(&json!(false), &json!(true)), Ordering::Less);
+        assert_eq!(compare_json_for_sort(&json!(true), &json!(false)), Ordering::Greater);
+        assert_eq!(compare_json_for_sort(&json!(true), &json!(true)), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_compare_json_for_sort_list_falls_back_to_string() {
+        use std::cmp::Ordering;
+        // Lists are compared by their JSON-string form, deterministically.
+        let ord = compare_json_for_sort(&json!(["a"]), &json!(["b"]));
+        assert_eq!(ord, Ordering::Less);
+        assert_eq!(compare_json_for_sort(&json!(["x"]), &json!(["x"])), Ordering::Equal);
+    }
+
+    #[test]
+    fn test_compare_json_for_sort_consistent_with_compare_values() {
+        // For any pair, compare_json_for_sort must agree with compare_values'
+        // notion of ordering so sort and Range-filter ordering never disagree.
+        let pairs = [
+            (json!(1), json!(2)),
+            (json!(5), json!(5)),
+            (json!(10), json!(2)),
+            (json!("apple"), json!("banana")),
+            (json!("zed"), json!("zed")),
+            (json!(false), json!(true)),
+            (json!(true), json!(true)),
+            (json!("2024-01-01"), json!("2024-12-31")),
+        ];
+        for (a, b) in &pairs {
+            let ord = compare_json_for_sort(a, b);
+            // a <= b  ⟺  compare_values(a, b, Less)
+            assert_eq!(
+                ord != std::cmp::Ordering::Greater,
+                compare_values(a, b, std::cmp::Ordering::Less),
+                "Less mismatch for {a:?} vs {b:?}"
+            );
+            // a >= b  ⟺  compare_values(a, b, Greater)
+            assert_eq!(
+                ord != std::cmp::Ordering::Less,
+                compare_values(a, b, std::cmp::Ordering::Greater),
+                "Greater mismatch for {a:?} vs {b:?}"
+            );
+        }
     }
 
     // --- SearchQuery builder tests ---

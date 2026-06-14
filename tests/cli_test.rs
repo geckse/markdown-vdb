@@ -2075,3 +2075,294 @@ fn test_clusters_list_no_index_needed() {
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["name"], "Test");
 }
+
+// ---------------------------------------------------------------------------
+// Collection (Phase 29) CLI tests
+// ---------------------------------------------------------------------------
+
+/// A fixture vault with a `blog/` folder (direct children + one nested file and
+/// one no-frontmatter file), ingested and ready for `collection` queries.
+fn setup_collection_cli() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("blog")).unwrap();
+    fs::write(
+        root.join("blog/launch.md"),
+        "---\ntitle: Launch\nstatus: published\ndate: 2024-06-01\ntags:\n  - news\n---\n\n# Launch\n\nContent.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("blog/draft.md"),
+        "---\ntitle: Draft\nstatus: draft\ndate: 2024-01-15\n---\n\n# Draft\n\nContent.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("blog/published2.md"),
+        "---\ntitle: Second Published\nstatus: published\ndate: 2024-03-01\n---\n\n# Two\n\nContent.\n",
+    )
+    .unwrap();
+    fs::write(root.join("blog/plain.md"), "# Plain\n\nNo frontmatter.\n").unwrap();
+
+    fs::create_dir_all(root.join("blog/2024")).unwrap();
+    fs::write(
+        root.join("blog/2024/nested.md"),
+        "---\ntitle: Nested\nstatus: published\ndate: 2024-12-31\n---\n\n# Nested\n\nContent.\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .arg("ingest")
+        .current_dir(root)
+        .output()
+        .expect("failed to run ingest");
+    assert!(
+        output.status.success(),
+        "ingest should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    dir
+}
+
+/// Golden test: pin the exact JSON field names + casing the app mirrors verbatim.
+#[test]
+fn test_collection_golden_json_contract() {
+    let dir = setup_collection_cli();
+
+    let output = mdvdb_bin()
+        .args(["collection", "blog", "--limit", "10", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "collection --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
+
+    // Top-level shape.
+    assert_eq!(json["scope"].as_str().unwrap(), "blog/");
+    assert!(!json["recursive"].as_bool().unwrap());
+    assert!(json["columns"].is_array(), "columns must be an array");
+    assert!(json["rows"].is_array(), "rows must be an array");
+    assert!(json["total_rows"].is_number(), "total_rows must be a number");
+    assert_eq!(json["limit"].as_u64().unwrap(), 10, "limit echoed when set");
+    assert_eq!(json["offset"].as_u64().unwrap(), 0);
+
+    // Columns: name (NOT key), field_type PascalCase, in_schema bool, etc.
+    let columns = json["columns"].as_array().unwrap();
+    assert!(!columns.is_empty(), "should have columns");
+    let allowed_types = ["String", "Number", "Boolean", "List", "Date", "Mixed"];
+    for col in columns {
+        assert!(col["name"].is_string(), "column must have string 'name'");
+        assert!(col.get("key").is_none(), "column uses 'name', not 'key'");
+        let ft = col["field_type"].as_str().expect("field_type is a string");
+        assert!(allowed_types.contains(&ft), "field_type '{ft}' must be PascalCase enum");
+        assert!(col["occurrence_count"].is_number());
+        assert!(col["sample_values"].is_array());
+        assert!(col["in_schema"].is_boolean());
+        assert!(col["required"].is_boolean());
+        // description and allowed_values are present (may be null).
+        assert!(col.get("description").is_some());
+        assert!(col.get("allowed_values").is_some());
+    }
+    // The `title` column serializes its type as PascalCase "String".
+    let title_col = columns.iter().find(|c| c["name"] == "title").unwrap();
+    assert_eq!(title_col["field_type"].as_str().unwrap(), "String");
+    assert!(title_col["in_schema"].as_bool().unwrap());
+
+    // Rows: full contract per row.
+    let rows = json["rows"].as_array().unwrap();
+    assert!(!rows.is_empty(), "should have rows");
+    let valid_states = ["indexed", "modified", "new", "deleted"];
+    let valid_title_sources = ["frontmatter", "filename"];
+    for row in rows {
+        assert!(row["path"].is_string());
+        let title = row["title"].as_str().expect("title is a string");
+        assert!(!title.is_empty(), "title must never be empty");
+        let ts = row["title_source"].as_str().unwrap();
+        assert!(valid_title_sources.contains(&ts), "title_source '{ts}' invalid");
+        assert!(row["frontmatter"].is_object(), "frontmatter must be an object, never null");
+        assert!(row["file_size"].is_number());
+        // content_hash / indexed_at are string|null; modified_at is number|null.
+        assert!(row["content_hash"].is_string() || row["content_hash"].is_null());
+        assert!(row["indexed_at"].is_number() || row["indexed_at"].is_null());
+        assert!(row["modified_at"].is_number() || row["modified_at"].is_null());
+        let state = row["state"].as_str().unwrap();
+        assert!(valid_states.contains(&state), "state '{state}' must be lowercase enum");
+    }
+
+    // A plain (no-frontmatter) file yields {} and a filename-derived title.
+    let plain = rows.iter().find(|r| r["path"] == "blog/plain.md").unwrap();
+    assert_eq!(plain["frontmatter"], serde_json::json!({}));
+    assert_eq!(plain["title"].as_str().unwrap(), "plain");
+    assert_eq!(plain["title_source"].as_str().unwrap(), "filename");
+}
+
+#[test]
+fn test_collection_json_omits_limit_when_unset() {
+    let dir = setup_collection_cli();
+    let output = mdvdb_bin()
+        .args(["collection", "blog", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("should be valid JSON");
+    assert!(json.get("limit").is_none(), "limit key absent when None");
+    assert_eq!(json["offset"].as_u64().unwrap(), 0);
+}
+
+#[test]
+fn test_collection_recursive_cli() {
+    let dir = setup_collection_cli();
+
+    let non_recursive: serde_json::Value = serde_json::from_slice(
+        &mdvdb_bin()
+            .args(["collection", "blog", "--json"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let nr_paths: Vec<&str> = non_recursive["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    assert!(!nr_paths.contains(&"blog/2024/nested.md"));
+
+    let recursive: serde_json::Value = serde_json::from_slice(
+        &mdvdb_bin()
+            .args(["collection", "blog", "--recursive", "--json"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(recursive["recursive"].as_bool().unwrap());
+    let r_paths: Vec<&str> = recursive["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["path"].as_str().unwrap())
+        .collect();
+    assert!(r_paths.contains(&"blog/2024/nested.md"), "recursive includes nested, got {r_paths:?}");
+}
+
+#[test]
+fn test_collection_sort_and_order_cli() {
+    let dir = setup_collection_cli();
+
+    let output = mdvdb_bin()
+        .args(["collection", "blog", "--sort", "status", "--order", "desc", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = json["rows"].as_array().unwrap();
+    // Descending by status → "published" rows come before "draft".
+    let first_status = rows[0]["frontmatter"]["status"].as_str().unwrap();
+    assert_eq!(first_status, "published", "desc status puts published first");
+}
+
+#[test]
+fn test_collection_filter_cli_repeatable() {
+    let dir = setup_collection_cli();
+
+    // Single filter: published direct children = launch + published2.
+    let one: serde_json::Value = serde_json::from_slice(
+        &mdvdb_bin()
+            .args(["collection", "blog", "--filter", "status=published", "--json"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(one["total_rows"].as_u64().unwrap(), 2, "post-filter count");
+
+    // Two filters AND together → narrows to one row.
+    let two: serde_json::Value = serde_json::from_slice(
+        &mdvdb_bin()
+            .args([
+                "collection",
+                "blog",
+                "--filter",
+                "status=published",
+                "--filter",
+                "date=2024-03-01",
+                "--json",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert_eq!(two["total_rows"].as_u64().unwrap(), 1, "repeated --filter must AND");
+    assert_eq!(two["rows"][0]["path"].as_str().unwrap(), "blog/published2.md");
+}
+
+#[test]
+fn test_collection_limit_offset_cli() {
+    let dir = setup_collection_cli();
+
+    let output = mdvdb_bin()
+        .args(["collection", "blog", "--limit", "1", "--offset", "1", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(json["limit"].as_u64().unwrap(), 1);
+    assert_eq!(json["offset"].as_u64().unwrap(), 1);
+    assert_eq!(json["rows"].as_array().unwrap().len(), 1, "page size = limit");
+    // total_rows independent of pagination (4 direct children).
+    assert_eq!(json["total_rows"].as_u64().unwrap(), 4);
+}
+
+#[test]
+fn test_collection_list_alias_cli() {
+    let dir = setup_collection_cli();
+    // Hidden `list` alias resolves to the same command.
+    let output = mdvdb_bin()
+        .args(["list", "blog", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success(), "list alias should work");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["scope"].as_str().unwrap(), "blog/");
+}
+
+#[test]
+fn test_collection_human_output_cli() {
+    let dir = setup_collection_cli();
+    let output = mdvdb_bin()
+        .args(["collection", "blog"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Collection"), "human output has a header");
+    assert!(stdout.contains("Showing"), "human output has a pagination footer");
+}

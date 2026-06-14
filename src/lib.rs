@@ -21,7 +21,7 @@ pub use error::Error;
 pub use config::{Config, VectorQuantization};
 pub use index::types::IndexStatus;
 pub use schema::{FieldType, Schema, SchemaField, ScopedSchema};
-pub use search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings};
+pub use search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings, SortOrder};
 // Additional re-exports for library consumers.
 pub use clustering::{ClusterInfo, ClusterState, CustomClusterDef, CustomClusterInfo, CustomClusterState};
 pub use config::{encode_custom_clusters as config_encode_custom_clusters, parse_custom_clusters_value as config_parse_custom_clusters, update_config_value as config_update_value, write_yaml_config as config_write_yaml, update_yaml_config_value as config_update_yaml_value};
@@ -213,6 +213,101 @@ pub struct DocumentInfo {
     pub indexed_at: u64,
     /// Filesystem modification time as Unix timestamp, if available.
     pub modified_at: Option<u64>,
+}
+
+/// How a collection row's title was derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleSource {
+    /// From the frontmatter `title` field.
+    Frontmatter,
+    /// From the filename stem (no usable frontmatter title).
+    Filename,
+}
+
+/// Query options for [`MarkdownVdb::collection`].
+#[derive(Debug, Clone, Default)]
+pub struct CollectionQuery {
+    /// Folder path prefix (relative to project root). "" or "." means the whole vault.
+    pub path: String,
+    /// If true, include files in all nested subfolders. If false, only direct children.
+    pub recursive: bool,
+    /// Frontmatter field name to sort rows by. None = sort by path ascending.
+    pub sort_by: Option<String>,
+    /// Sort direction.
+    pub order: SortOrder,
+    /// Metadata filters (AND logic), reusing the search engine's `MetadataFilter`.
+    pub filters: Vec<MetadataFilter>,
+    /// Max rows to return after filtering+sorting. None = all rows.
+    pub limit: Option<usize>,
+    /// Number of rows to skip (for pagination).
+    pub offset: usize,
+}
+
+/// Top-level response for [`MarkdownVdb::collection`]: columns + the paginated
+/// page of rows + total count.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionResponse {
+    /// The resolved scope prefix (normalized, e.g. "blog/"; "." for whole vault).
+    pub scope: String,
+    /// Whether nested subfolders were included.
+    pub recursive: bool,
+    /// Column definitions (scoped schema fields ∪ present-but-unscoped frontmatter keys).
+    pub columns: Vec<CollectionColumn>,
+    /// The page of rows after filtering, sorting, and limit/offset.
+    pub rows: Vec<CollectionRow>,
+    /// Total rows after filtering, BEFORE limit/offset (for pagination UIs).
+    pub total_rows: usize,
+    /// Echo of the applied limit (key omitted from JSON if None).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    /// Echo of the applied offset.
+    pub offset: usize,
+}
+
+/// One table column. Derived from the scoped `Schema`'s `SchemaField`, plus `in_schema`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionColumn {
+    /// Frontmatter key / column name. (NOT "key" — matches `SchemaField.name`.)
+    pub name: String,
+    /// Inferred or overlay-declared type. Reuses `schema::FieldType` (PascalCase JSON).
+    pub field_type: schema::FieldType,
+    /// Human-readable description from overlay, if any.
+    pub description: Option<String>,
+    /// Number of files (in this scope) that have this field. 0 for present-but-unscoped keys.
+    pub occurrence_count: usize,
+    /// Up to 20 sample values from the schema (empty for present-but-unscoped keys).
+    pub sample_values: Vec<String>,
+    /// Allowed values from overlay, if declared (usually None).
+    pub allowed_values: Option<Vec<String>>,
+    /// Whether the field is marked required in the overlay.
+    pub required: bool,
+    /// True if the column came from the scoped `Schema`; false if it was discovered
+    /// only because a returned row's frontmatter contained the key.
+    pub in_schema: bool,
+}
+
+/// One table row = one Markdown document.
+#[derive(Debug, Clone, Serialize)]
+pub struct CollectionRow {
+    /// Relative path (project-root-relative, forward slashes). Stable row id.
+    pub path: String,
+    /// Derived display title (frontmatter.title -> filename stem). Never empty.
+    pub title: String,
+    /// How the title was derived.
+    pub title_source: TitleSource,
+    /// Full frontmatter as a JSON object. Always an object (`{}` if none), never null.
+    pub frontmatter: serde_json::Value,
+    /// SHA-256 content hash from the index. None for files not in the index (state == New).
+    pub content_hash: Option<String>,
+    /// File size in bytes.
+    pub file_size: u64,
+    /// Filesystem modification time (Unix seconds), if known.
+    pub modified_at: Option<u64>,
+    /// When this file was last indexed (Unix seconds). None for state == New.
+    pub indexed_at: Option<u64>,
+    /// Sync state relative to the index.
+    pub state: tree::FileState,
 }
 
 /// Result of a doctor diagnostic check.
@@ -2117,6 +2212,255 @@ sources:
         })
     }
 
+    /// Return all documents under a folder as table rows, with column definitions,
+    /// applying server-side filter/sort/pagination. Strictly read-only.
+    ///
+    /// This is the backend for a NocoDB/Airtable-style table view: rows are
+    /// documents (full frontmatter each), columns are frontmatter fields (the
+    /// scoped schema ∪ any keys present in the returned rows that the schema
+    /// missed). It performs no embedding, HNSW, or BM25 work and never writes
+    /// Markdown files — it is synchronous like [`preview`](Self::preview) and
+    /// [`file_tree`](Self::file_tree).
+    ///
+    /// Order of operations (so `total_rows` is well-defined):
+    /// gather + scope/depth filter → metadata filter → `total_rows` → sort
+    /// (type-aware, nulls-last) → `offset`/`limit` → columns (from the full
+    /// filtered set, so the column layout is stable across pages).
+    pub fn collection(&self, opts: CollectionQuery) -> Result<CollectionResponse> {
+        let (scope, schema_key, is_whole_vault) = normalize_collection_scope(&opts.path);
+
+        // 1. Gather + scope/depth filter.
+        let mut rows = self.gather_collection_rows(&scope, is_whole_vault, opts.recursive)?;
+
+        // 2. Metadata filter (reuses the search engine's MetadataFilter evaluation).
+        rows.retain(|r| search::evaluate_filters(&opts.filters, Some(&r.frontmatter)));
+
+        // 3. Total count after filtering, before pagination.
+        let total_rows = rows.len();
+
+        // 4. Sort (type-aware, nulls-last; path-asc when no sort field).
+        sort_collection_rows(&mut rows, opts.sort_by.as_deref(), opts.order);
+
+        // 6 (computed before pagination): columns from the full filtered set so the
+        // layout stays stable across pages. Collect present keys + a representative
+        // non-null value per key for type inference of unscoped columns.
+        let mut present_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut key_sample: HashMap<String, serde_json::Value> = HashMap::new();
+        for r in &rows {
+            if let serde_json::Value::Object(map) = &r.frontmatter {
+                for (k, v) in map {
+                    present_keys.insert(k.clone());
+                    if !v.is_null() {
+                        key_sample.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+        }
+        let columns = self.build_collection_columns(
+            &schema_key,
+            is_whole_vault,
+            &present_keys,
+            &key_sample,
+        )?;
+
+        // 5. Paginate: skip offset, take limit (or all).
+        let limit = opts.limit.unwrap_or(usize::MAX);
+        let page: Vec<CollectionRow> = rows.into_iter().skip(opts.offset).take(limit).collect();
+
+        Ok(CollectionResponse {
+            scope,
+            recursive: opts.recursive,
+            columns,
+            rows: page,
+            total_rows,
+            limit: opts.limit,
+            offset: opts.offset,
+        })
+    }
+
+    /// Gather collection rows for a scope, classifying each file's sync state with
+    /// the same four-way logic as [`tree::build_file_tree`] (Indexed/Modified/New/
+    /// Deleted). `New` files are not parsed — they carry empty frontmatter.
+    fn gather_collection_rows(
+        &self,
+        scope: &str,
+        is_whole_vault: bool,
+        recursive: bool,
+    ) -> Result<Vec<CollectionRow>> {
+        let discovery = discovery::FileDiscovery::new(&self.root, &self.config);
+        let disk_files = discovery.discover()?;
+        let indexed_hashes: HashMap<String, String> = self.index.get_file_hashes();
+
+        let disk_paths: std::collections::HashSet<String> = disk_files
+            .iter()
+            .filter_map(|p| p.to_str().map(|s| s.to_string()))
+            .collect();
+
+        // Scope + depth filter: prefix match, then (non-recursive) require the
+        // remainder after the prefix to be a direct child (no further `/`).
+        let in_scope = |path: &str| -> bool {
+            let remainder = if is_whole_vault {
+                path
+            } else {
+                match path.strip_prefix(scope) {
+                    Some(r) => r,
+                    None => return false,
+                }
+            };
+            recursive || !remainder.contains('/')
+        };
+
+        let mut rows = Vec::new();
+
+        // Classify disk files (Indexed / Modified / New).
+        for rel_path in &disk_paths {
+            if !in_scope(rel_path) {
+                continue;
+            }
+            if let Some(expected_hash) = indexed_hashes.get(rel_path) {
+                // On disk + in index → compare hashes (same as tree.rs).
+                let full_path = self.root.join(rel_path);
+                let content = std::fs::read_to_string(&full_path).map_err(|e| {
+                    Error::Io(std::io::Error::new(e.kind(), format!("{rel_path}: {e}")))
+                })?;
+                let disk_hash = parser::compute_content_hash(&content);
+                let state = if disk_hash == *expected_hash {
+                    tree::FileState::Indexed
+                } else {
+                    tree::FileState::Modified
+                };
+                rows.push(self.build_row_from_index(rel_path, state));
+            } else {
+                // On disk, not in index → New. Do not parse (no StoredFile in v1).
+                rows.push(self.build_new_row(rel_path));
+            }
+        }
+
+        // Deleted files: in index, not on disk.
+        for indexed_path in indexed_hashes.keys() {
+            if disk_paths.contains(indexed_path) {
+                continue;
+            }
+            if !in_scope(indexed_path) {
+                continue;
+            }
+            rows.push(self.build_row_from_index(indexed_path, tree::FileState::Deleted));
+        }
+
+        Ok(rows)
+    }
+
+    /// Build a row for a file present in the index (Indexed / Modified / Deleted).
+    fn build_row_from_index(&self, path: &str, state: tree::FileState) -> CollectionRow {
+        let stored = self.index.get_file(path);
+        let frontmatter = stored
+            .as_ref()
+            .and_then(|f| f.frontmatter.as_deref())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+        let (title, title_source) = derive_title(path, &frontmatter);
+
+        CollectionRow {
+            path: path.to_string(),
+            title,
+            title_source,
+            frontmatter,
+            content_hash: stored.as_ref().map(|f| f.content_hash.clone()),
+            file_size: stored.as_ref().map(|f| f.file_size).unwrap_or(0),
+            modified_at: self.index.get_file_mtime(path),
+            indexed_at: stored.as_ref().map(|f| f.indexed_at),
+            state,
+        }
+    }
+
+    /// Build a row for a file on disk but not in the index (New). Frontmatter is
+    /// empty (`{}`) — new files are not parsed in v1. `file_size`/`modified_at`
+    /// come from filesystem metadata; `content_hash`/`indexed_at` are `None`.
+    fn build_new_row(&self, path: &str) -> CollectionRow {
+        let full = self.root.join(path);
+        let meta = std::fs::metadata(&full).ok();
+        let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified_at = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+        let frontmatter = serde_json::json!({});
+        let (title, title_source) = derive_title(path, &frontmatter);
+
+        CollectionRow {
+            path: path.to_string(),
+            title,
+            title_source,
+            frontmatter,
+            content_hash: None,
+            file_size,
+            modified_at,
+            indexed_at: None,
+            state: tree::FileState::New,
+        }
+    }
+
+    /// Build the column set: scoped-schema fields (`in_schema: true`) unioned with
+    /// frontmatter keys present in the filtered rows that the schema missed
+    /// (`in_schema: false`). Schema fields come first (already alphabetical), then
+    /// unscoped keys in sorted order.
+    fn build_collection_columns(
+        &self,
+        schema_key: &str,
+        is_whole_vault: bool,
+        present_keys: &std::collections::BTreeSet<String>,
+        key_sample: &HashMap<String, serde_json::Value>,
+    ) -> Result<Vec<CollectionColumn>> {
+        // Whole-vault uses the global schema; a folder uses the scoped schema
+        // (persisted scoped_schemas preferred, on-the-fly inference as fallback).
+        let schema = if is_whole_vault {
+            self.schema()?
+        } else {
+            self.schema_scoped(schema_key)?.schema
+        };
+
+        let mut columns = Vec::with_capacity(schema.fields.len() + present_keys.len());
+        let mut schema_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for f in &schema.fields {
+            schema_names.insert(f.name.as_str());
+            columns.push(CollectionColumn {
+                name: f.name.clone(),
+                field_type: f.field_type.clone(),
+                description: f.description.clone(),
+                occurrence_count: f.occurrence_count,
+                sample_values: f.sample_values.clone(),
+                allowed_values: f.allowed_values.clone(),
+                required: f.required,
+                in_schema: true,
+            });
+        }
+
+        // Present-but-unscoped keys, in sorted order (BTreeSet iterates sorted).
+        for key in present_keys {
+            if schema_names.contains(key.as_str()) {
+                continue;
+            }
+            let field_type = key_sample
+                .get(key)
+                .map(schema::infer_field_type)
+                .unwrap_or(schema::FieldType::String);
+            columns.push(CollectionColumn {
+                name: key.clone(),
+                field_type,
+                description: None,
+                occurrence_count: 0,
+                sample_values: Vec::new(),
+                allowed_values: None,
+                required: false,
+                in_schema: false,
+            });
+        }
+
+        Ok(columns)
+    }
+
     /// Initialize a user-level config file at the given path.
     ///
     /// Creates parent directories if needed. Returns `Error::ConfigAlreadyExists`
@@ -2332,5 +2676,248 @@ sources:
             passed,
             total,
         })
+    }
+}
+
+/// Normalize a collection scope path into `(scope, schema_key, is_whole_vault)`.
+///
+/// - Trims surrounding whitespace and a leading `./`.
+/// - `""`, `"."`, and `"./"` resolve to the whole-vault scope: `scope = "."`,
+///   `schema_key = ""`, `is_whole_vault = true`.
+/// - Otherwise a trailing `/` is appended for segment-safe prefix matching:
+///   `"blog"` / `"blog/"` → `scope = "blog/"`, `schema_key = "blog"`.
+///
+/// `scope` is used for prefix matching and echoed in the response; `schema_key`
+/// (no trailing slash) is the form that matches persisted `scoped_schemas`.
+fn normalize_collection_scope(path: &str) -> (String, String, bool) {
+    let raw = path.trim();
+    let raw = raw.strip_prefix("./").unwrap_or(raw);
+    let raw = raw.trim_end_matches('/');
+
+    if raw.is_empty() || raw == "." {
+        (".".to_string(), String::new(), true)
+    } else {
+        (format!("{raw}/"), raw.to_string(), false)
+    }
+}
+
+/// Derive a display title for a collection row.
+///
+/// v1 rule: use a non-empty `frontmatter.title` string ([`TitleSource::Frontmatter`]),
+/// otherwise the filename stem of `path` ([`TitleSource::Filename`]). The stem is
+/// the last path segment with a `.md`/`.markdown` extension removed; a `.md` file
+/// always has a non-empty stem, so the result is guaranteed non-empty.
+fn derive_title(path: &str, frontmatter: &serde_json::Value) -> (String, TitleSource) {
+    if let Some(serde_json::Value::String(s)) = frontmatter.get("title") {
+        if !s.trim().is_empty() {
+            return (s.clone(), TitleSource::Frontmatter);
+        }
+    }
+
+    let last = path.rsplit('/').next().unwrap_or(path);
+    // Strip a `.md`/`.markdown` extension, but never down to an empty string:
+    // a dotfile named exactly ".md"/".markdown" keeps its full name so the title
+    // is always non-empty (per the contract guarantee).
+    let stem = match last
+        .strip_suffix(".markdown")
+        .or_else(|| last.strip_suffix(".md"))
+    {
+        Some(s) if !s.is_empty() => s,
+        _ => last,
+    };
+    (stem.to_string(), TitleSource::Filename)
+}
+
+/// Sort collection rows in place.
+///
+/// When `sort_by` is `None`, sorts by `path` ascending for deterministic output.
+/// Otherwise sorts by `frontmatter[sort_by]` using [`search::compare_json_for_sort`]
+/// (type-aware), with a strict **nulls-last** rule: a row whose value is missing
+/// or `null` sorts after all non-null rows in BOTH directions. Ties (and nulls)
+/// are broken by `path` ascending.
+fn sort_collection_rows(rows: &mut [CollectionRow], sort_by: Option<&str>, order: SortOrder) {
+    let Some(field) = sort_by else {
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        return;
+    };
+
+    rows.sort_by(|a, b| {
+        let av = a.frontmatter.get(field).filter(|v| !v.is_null());
+        let bv = b.frontmatter.get(field).filter(|v| !v.is_null());
+        match (av, bv) {
+            (None, None) => a.path.cmp(&b.path),
+            (None, Some(_)) => std::cmp::Ordering::Greater, // a is null → after
+            (Some(_), None) => std::cmp::Ordering::Less,    // b is null → a before
+            (Some(av), Some(bv)) => {
+                let ord = search::compare_json_for_sort(av, bv);
+                let ord = match order {
+                    SortOrder::Asc => ord,
+                    SortOrder::Desc => ord.reverse(),
+                };
+                ord.then_with(|| a.path.cmp(&b.path))
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod collection_unit_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(path: &str, frontmatter: serde_json::Value) -> CollectionRow {
+        let (title, title_source) = derive_title(path, &frontmatter);
+        CollectionRow {
+            path: path.to_string(),
+            title,
+            title_source,
+            frontmatter,
+            content_hash: None,
+            file_size: 0,
+            modified_at: None,
+            indexed_at: None,
+            state: tree::FileState::Indexed,
+        }
+    }
+
+    // --- normalize_collection_scope ---
+
+    #[test]
+    fn normalize_whole_vault_variants() {
+        for input in ["", ".", "./", "  ", "  .  ", "./", "/"] {
+            let (scope, key, whole) = normalize_collection_scope(input);
+            assert!(whole, "input {input:?} should be whole-vault");
+            assert_eq!(scope, ".");
+            assert_eq!(key, "");
+        }
+    }
+
+    #[test]
+    fn normalize_folder_appends_trailing_slash() {
+        let (scope, key, whole) = normalize_collection_scope("blog");
+        assert!(!whole);
+        assert_eq!(scope, "blog/");
+        assert_eq!(key, "blog");
+
+        let (scope, key, _) = normalize_collection_scope("blog/");
+        assert_eq!(scope, "blog/");
+        assert_eq!(key, "blog");
+
+        let (scope, key, _) = normalize_collection_scope("./blog");
+        assert_eq!(scope, "blog/");
+        assert_eq!(key, "blog");
+
+        let (scope, key, _) = normalize_collection_scope("blog/2024/");
+        assert_eq!(scope, "blog/2024/");
+        assert_eq!(key, "blog/2024");
+    }
+
+    // --- derive_title ---
+
+    #[test]
+    fn derive_title_prefers_frontmatter() {
+        let (title, src) = derive_title("blog/launch.md", &json!({"title": "Launch Announcement"}));
+        assert_eq!(title, "Launch Announcement");
+        assert_eq!(src, TitleSource::Frontmatter);
+    }
+
+    #[test]
+    fn derive_title_falls_back_to_stem() {
+        let (title, src) = derive_title("blog/2024/my-post.md", &json!({}));
+        assert_eq!(title, "my-post");
+        assert_eq!(src, TitleSource::Filename);
+
+        // .markdown extension
+        let (title, src) = derive_title("notes/idea.markdown", &json!({}));
+        assert_eq!(title, "idea");
+        assert_eq!(src, TitleSource::Filename);
+    }
+
+    #[test]
+    fn derive_title_ignores_empty_or_non_string_title() {
+        // Empty/whitespace title → stem.
+        let (title, src) = derive_title("a/b.md", &json!({"title": "   "}));
+        assert_eq!(title, "b");
+        assert_eq!(src, TitleSource::Filename);
+        // Non-string title → stem.
+        let (title, src) = derive_title("a/c.md", &json!({"title": 42}));
+        assert_eq!(title, "c");
+        assert_eq!(src, TitleSource::Filename);
+    }
+
+    #[test]
+    fn derive_title_never_empty() {
+        let (title, _) = derive_title("readme.md", &json!({}));
+        assert_eq!(title, "readme");
+        assert!(!title.is_empty());
+    }
+
+    #[test]
+    fn derive_title_extension_only_filename_stays_non_empty() {
+        // A dotfile named exactly ".md"/".markdown" has no real stem; the title
+        // must still be non-empty (contract guarantee), so we keep the full name.
+        let (title, src) = derive_title(".md", &json!({}));
+        assert_eq!(title, ".md");
+        assert_eq!(src, TitleSource::Filename);
+
+        let (title, _) = derive_title("sub/.markdown", &json!({}));
+        assert_eq!(title, ".markdown");
+
+        // And the title is non-empty for these pathological inputs.
+        assert!(!derive_title(".md", &json!({})).0.is_empty());
+        assert!(!derive_title("a/b/.markdown", &json!({})).0.is_empty());
+    }
+
+    // --- sort_collection_rows: nulls-last in both directions ---
+
+    #[test]
+    fn sort_nulls_last_ascending() {
+        let mut rows = vec![
+            row("c.md", json!({})),                 // null (missing)
+            row("a.md", json!({"order": 2})),
+            row("b.md", json!({"order": 1})),
+            row("d.md", json!({"order": serde_json::Value::Null})), // explicit null
+        ];
+        sort_collection_rows(&mut rows, Some("order"), SortOrder::Asc);
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        // non-null first (1 then 2), nulls last tie-broken by path asc (c, d)
+        assert_eq!(paths, vec!["b.md", "a.md", "c.md", "d.md"]);
+    }
+
+    #[test]
+    fn sort_nulls_last_descending() {
+        let mut rows = vec![
+            row("c.md", json!({})),
+            row("a.md", json!({"order": 2})),
+            row("b.md", json!({"order": 1})),
+        ];
+        sort_collection_rows(&mut rows, Some("order"), SortOrder::Desc);
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        // desc among non-null (2 then 1), null still LAST
+        assert_eq!(paths, vec!["a.md", "b.md", "c.md"]);
+    }
+
+    #[test]
+    fn sort_by_path_when_no_field() {
+        let mut rows = vec![
+            row("zebra.md", json!({})),
+            row("alpha.md", json!({})),
+            row("mango.md", json!({})),
+        ];
+        sort_collection_rows(&mut rows, None, SortOrder::Asc);
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["alpha.md", "mango.md", "zebra.md"]);
+    }
+
+    #[test]
+    fn sort_numeric_not_lexicographic() {
+        let mut rows = vec![
+            row("a.md", json!({"n": 10})),
+            row("b.md", json!({"n": 2})),
+            row("c.md", json!({"n": 1})),
+        ];
+        sort_collection_rows(&mut rows, Some("n"), SortOrder::Asc);
+        let paths: Vec<&str> = rows.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(paths, vec!["c.md", "b.md", "a.md"]);
     }
 }
