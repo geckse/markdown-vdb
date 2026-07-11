@@ -7,7 +7,7 @@ use notify_debouncer_full::notify::{EventKind, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::discovery::FileDiscovery;
@@ -224,6 +224,7 @@ impl Watcher {
                 crate::links::remove_file_links(&mut graph, &relative);
                 self.index.update_link_graph(Some(graph));
 
+                self.remove_from_clusters(&relative);
                 self.fts_index.remove_file(&relative)?;
                 self.fts_index.commit()?;
                 self.index.save()?;
@@ -239,6 +240,7 @@ impl Watcher {
                 crate::links::remove_file_links(&mut graph, &from_str);
                 self.index.update_link_graph(Some(graph));
 
+                self.remove_from_clusters(&from_str);
                 self.fts_index.remove_file(&from_str)?;
                 self.process_file(to).await
             }
@@ -255,6 +257,7 @@ impl Watcher {
             let relative = relative_path.to_string_lossy().to_string();
             info!(path = %relative, "file no longer exists, removing from index");
             self.index.remove_file(&relative)?;
+            self.remove_from_clusters(&relative);
             self.fts_index.remove_file(&relative)?;
             self.fts_index.commit()?;
             self.index.save()?;
@@ -333,6 +336,9 @@ impl Watcher {
             self.index.set_schema(Some(merged));
         }
 
+        // Keep cluster and topic membership live under watch mode.
+        self.update_clusters_for_file(&path_str_fts);
+
         self.fts_index.commit()?;
         self.index.save()?;
         let chunk_count = chunks.len();
@@ -343,6 +349,84 @@ impl Watcher {
         );
 
         Ok(chunk_count)
+    }
+
+    /// Incrementally assign a new/changed document to the auto clusters and
+    /// topics. Skipped when no compatible state exists (a full ingest will
+    /// bootstrap or refresh it); all failures are non-fatal.
+    fn update_clusters_for_file(&self, relative: &str) {
+        let clusterer = crate::clustering::Clusterer::new(&self.config);
+
+        if self.config.clustering_enabled {
+            if let Some(mut state) = self.index.get_clusters() {
+                if !state.clusters.is_empty() && !clusterer.algorithm_changed(&state) {
+                    let doc_vectors = self.index.get_document_vectors();
+                    if let Some(vector) = doc_vectors.get(relative) {
+                        match clusterer.assign_incremental(
+                            &mut state,
+                            relative,
+                            vector,
+                            &doc_vectors,
+                        ) {
+                            Ok(_) => {
+                                let doc_contents = self.index.get_document_contents();
+                                if let Err(e) = clusterer.maybe_rebalance(
+                                    &mut state,
+                                    &doc_vectors,
+                                    &doc_contents,
+                                ) {
+                                    warn!(error = %e, "cluster rebalance failed (non-fatal)");
+                                }
+                                self.index.update_clusters(Some(state));
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "cluster assignment failed (non-fatal)")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !self.config.custom_cluster_defs.is_empty() {
+            if let Some(mut state) = self.index.get_custom_clusters() {
+                let expected = crate::clustering::topics_fingerprint(
+                    &self.config.custom_cluster_defs,
+                    self.config.topics_min_similarity,
+                    &self.config.embedding_model,
+                    self.config.embedding_dimensions,
+                );
+                if state.fingerprint == expected {
+                    let doc_vectors = self.index.get_document_vectors();
+                    if let Some(vector) = doc_vectors.get(relative) {
+                        match clusterer.assign_single_to_custom(&mut state, relative, vector) {
+                            Ok(()) => self.index.update_custom_clusters(Some(state)),
+                            Err(e) => {
+                                warn!(error = %e, "topic assignment failed (non-fatal)")
+                            }
+                        }
+                    }
+                } else {
+                    debug!("topic definitions changed; run a full ingest to recompute topics");
+                }
+            }
+        }
+    }
+
+    /// Remove a deleted/renamed document from cluster and topic membership.
+    fn remove_from_clusters(&self, relative: &str) {
+        let clusterer = crate::clustering::Clusterer::new(&self.config);
+
+        if let Some(mut state) = self.index.get_clusters() {
+            if clusterer.remove_document(&mut state, relative) {
+                self.index.update_clusters(Some(state));
+            }
+        }
+        if let Some(mut state) = self.index.get_custom_clusters() {
+            if clusterer.remove_document_from_topics(&mut state, relative) {
+                self.index.update_custom_clusters(Some(state));
+            }
+        }
     }
 }
 
@@ -458,6 +542,11 @@ mod tests {
             chunk_max_tokens: 512,
             chunk_overlap_tokens: 50,
             clustering_enabled: false,
+            clustering_algorithm: crate::config::ClusteringAlgorithm::Leiden,
+            clustering_knn: 15,
+            clustering_resolution: 1.0,
+            clustering_min_cluster_size: 2,
+            topics_min_similarity: 0.30,
             clustering_rebalance_threshold: 50,
             clustering_granularity: 1.0,
             search_default_limit: 10,

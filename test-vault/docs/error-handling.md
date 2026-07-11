@@ -5,7 +5,6 @@ category: documentation
 author: "Jane Chen"
 status: draft
 ---
-
 # Error Handling Patterns
 
 Conventions for how services handle, propagate, and report errors.
@@ -101,3 +100,5 @@ Trip threshold: 5 failures in 30 seconds. Recovery probe: every 10 seconds.
 - [API Reference](api-reference.md#error-handling) — client-facing error format
 - [Incident Response Runbook](../runbooks/incident-response.md) — production incident procedures
 - [Security Best Practices](../guides/security-best-practices.md) — security-specific error handling
+
+&nbsp;

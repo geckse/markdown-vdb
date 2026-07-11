@@ -125,8 +125,20 @@ impl Default for YamlChunking {
 #[serde(default)]
 pub struct YamlClustering {
     pub enabled: bool,
+    /// Auto-clustering algorithm: "leiden" (default) or "kmeans".
+    pub algorithm: String,
+    /// k-NN graph degree for Leiden clustering. Range [2, 64].
+    pub knn: usize,
+    /// Leiden modularity resolution (gamma). Higher = more clusters. Range [0.1, 10.0].
+    pub resolution: f64,
+    /// Communities smaller than this are merged into their strongest neighbor.
+    /// Range [1, 50]; 1 disables merging.
+    pub min_cluster_size: usize,
     pub rebalance_threshold: usize,
+    /// K-means fallback only: cluster-count multiplier. Range [0.25, 4.0].
     pub granularity: f64,
+    /// Global defaults for custom-cluster (topic) assignment.
+    pub topics: YamlTopicsDefaults,
     pub custom: Vec<YamlCustomCluster>,
 }
 
@@ -134,18 +146,48 @@ impl Default for YamlClustering {
     fn default() -> Self {
         Self {
             enabled: true,
+            algorithm: "leiden".to_string(),
+            knn: 15,
+            resolution: 1.0,
+            min_cluster_size: 2,
             rebalance_threshold: 50,
             granularity: 1.0,
+            topics: YamlTopicsDefaults::default(),
             custom: Vec::new(),
         }
     }
 }
 
+/// Global defaults for topic (custom cluster) assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YamlTopicsDefaults {
+    /// Global similarity floor: documents scoring below this against every
+    /// topic centroid land in the Unassigned bucket. Range [0.0, 1.0].
+    pub min_similarity: f64,
+}
+
+impl Default for YamlTopicsDefaults {
+    fn default() -> Self {
+        Self {
+            min_similarity: 0.30,
+        }
+    }
+}
+
 /// A single custom cluster definition in YAML.
+///
+/// Old `{name, seeds}` files keep parsing (new fields default) and keep
+/// serializing byte-identically (new fields are skipped when unset).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YamlCustomCluster {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
     pub seeds: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
 }
 
 /// File watcher settings.
@@ -251,6 +293,41 @@ impl FromStr for VectorQuantization {
     }
 }
 
+/// Supported auto-clustering algorithms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusteringAlgorithm {
+    /// Leiden community detection on a cosine k-NN graph (default).
+    #[default]
+    Leiden,
+    /// K-means over document vectors (legacy fallback).
+    Kmeans,
+}
+
+impl ClusteringAlgorithm {
+    /// The lowercase name persisted in the index and used in config files.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Leiden => "leiden",
+            Self::Kmeans => "kmeans",
+        }
+    }
+}
+
+impl FromStr for ClusteringAlgorithm {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "leiden" => Ok(Self::Leiden),
+            "kmeans" | "k-means" => Ok(Self::Kmeans),
+            other => Err(Error::Config(format!(
+                "unknown clustering algorithm '{other}': expected leiden or kmeans"
+            ))),
+        }
+    }
+}
+
 /// Full configuration for mdvdb, loaded from environment / `.markdownvdb` file / defaults.
 #[derive(Debug, Clone, Serialize)]
 pub struct Config {
@@ -268,9 +345,21 @@ pub struct Config {
     pub chunk_max_tokens: usize,
     pub chunk_overlap_tokens: usize,
     pub clustering_enabled: bool,
+    /// Auto-clustering algorithm. Default: Leiden.
+    pub clustering_algorithm: ClusteringAlgorithm,
+    /// k-NN graph degree for Leiden clustering. Default: 15, range [2, 64].
+    pub clustering_knn: usize,
+    /// Leiden modularity resolution. Higher = more clusters. Default: 1.0, range [0.1, 10.0].
+    pub clustering_resolution: f64,
+    /// Minimum community size for Leiden; smaller communities merge into their
+    /// strongest neighbor. Default: 2, range [1, 50]; 1 = off.
+    pub clustering_min_cluster_size: usize,
     pub clustering_rebalance_threshold: usize,
-    /// Cluster granularity multiplier. Higher = more clusters. Default: 1.0, range [0.25, 4.0].
+    /// K-means fallback only: cluster granularity multiplier. Default: 1.0, range [0.25, 4.0].
     pub clustering_granularity: f64,
+    /// Global similarity floor for topic (custom cluster) assignment.
+    /// Default: 0.30, range [0.0, 1.0].
+    pub topics_min_similarity: f32,
     pub search_default_limit: usize,
     pub search_min_score: f64,
     pub search_default_mode: SearchMode,
@@ -508,7 +597,31 @@ impl Config {
                 self.clustering_granularity
             )));
         }
-        // Check for duplicate custom cluster names.
+        if !(2..=64).contains(&self.clustering_knn) {
+            return Err(Error::Config(format!(
+                "clustering.knn ({}) must be in [2, 64]",
+                self.clustering_knn
+            )));
+        }
+        if !(0.1..=10.0).contains(&self.clustering_resolution) {
+            return Err(Error::Config(format!(
+                "clustering.resolution ({}) must be in [0.1, 10.0]",
+                self.clustering_resolution
+            )));
+        }
+        if !(1..=50).contains(&self.clustering_min_cluster_size) {
+            return Err(Error::Config(format!(
+                "clustering.min_cluster_size ({}) must be in [1, 50]",
+                self.clustering_min_cluster_size
+            )));
+        }
+        if !(0.0..=1.0).contains(&self.topics_min_similarity) {
+            return Err(Error::Config(format!(
+                "clustering.topics.min_similarity ({}) must be in [0.0, 1.0]",
+                self.topics_min_similarity
+            )));
+        }
+        // Check for duplicate custom cluster names, per-topic requirements.
         let mut seen_names = std::collections::HashSet::new();
         for def in &self.custom_cluster_defs {
             if !seen_names.insert(&def.name) {
@@ -516,6 +629,24 @@ impl Config {
                     "duplicate custom cluster name: '{}'",
                     def.name
                 )));
+            }
+            let has_description = def
+                .description
+                .as_deref()
+                .is_some_and(|d| !d.trim().is_empty());
+            if !has_description && def.seeds.is_empty() {
+                return Err(Error::Config(format!(
+                    "custom cluster '{}' needs a description or at least one seed",
+                    def.name
+                )));
+            }
+            if let Some(t) = def.threshold {
+                if !(0.0..=1.0).contains(&t) {
+                    return Err(Error::Config(format!(
+                        "custom cluster '{}' threshold ({t}) must be in [0.0, 1.0]",
+                        def.name
+                    )));
+                }
             }
         }
         Ok(())
@@ -575,38 +706,6 @@ fn parse_comma_list_string(key: &str, default: Vec<String>) -> Vec<String> {
     match std::env::var(key) {
         Ok(val) if !val.trim().is_empty() => val.split(',').map(|s| s.trim().to_string()).collect(),
         _ => default,
-    }
-}
-
-/// Parse `MDVDB_CUSTOM_CLUSTERS` env var into custom cluster definitions.
-///
-/// Format: `Name1:seed1,seed2|Name2:seed3,seed4`
-/// - Pipe `|` separates clusters
-/// - Colon `:` separates name from seeds
-/// - Comma `,` separates seeds within a cluster
-#[allow(dead_code)]
-fn parse_custom_clusters(key: &str) -> Vec<CustomClusterDef> {
-    match std::env::var(key) {
-        Ok(val) if !val.trim().is_empty() => val
-            .split('|')
-            .filter_map(|entry| {
-                let (name, seeds_str) = entry.split_once(':')?;
-                let name = name.trim().to_string();
-                if name.is_empty() {
-                    return None;
-                }
-                let seeds: Vec<String> = seeds_str
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if seeds.is_empty() {
-                    return None;
-                }
-                Some(CustomClusterDef { name, seeds })
-            })
-            .collect(),
-        _ => Vec::new(),
     }
 }
 
@@ -683,13 +782,32 @@ pub fn update_config_value(config_path: &Path, key: &str, value: &str) -> Result
 
 /// Parse a raw custom clusters string value into definitions.
 ///
-/// This is the public counterpart to `parse_custom_clusters()` for use outside
-/// the config loading path (e.g., the CLI `clusters add/remove` commands).
+/// Two formats are accepted:
+/// - **JSON** (value starts with `[`): a `Vec<CustomClusterDef>` with full
+///   fidelity (description, threshold). Invalid JSON logs a warning and yields
+///   no definitions, matching the lenient legacy behavior.
+/// - **Legacy pipe format**: `Name1:seed1,seed2|Name2:seed3,seed4`.
 pub fn parse_custom_clusters_value(val: &str) -> Vec<CustomClusterDef> {
-    if val.trim().is_empty() {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
         return Vec::new();
     }
-    val.split('|')
+
+    if trimmed.starts_with('[') {
+        return match serde_json::from_str::<Vec<CustomClusterDef>>(trimmed) {
+            Ok(defs) => defs
+                .into_iter()
+                .filter(|d| !d.name.trim().is_empty())
+                .collect(),
+            Err(e) => {
+                tracing::warn!("MDVDB_CUSTOM_CLUSTERS: invalid JSON ({e}), ignoring value");
+                Vec::new()
+            }
+        };
+    }
+
+    trimmed
+        .split('|')
         .filter_map(|entry| {
             let (name, seeds_str) = entry.split_once(':')?;
             let name = name.trim().to_string();
@@ -704,24 +822,48 @@ pub fn parse_custom_clusters_value(val: &str) -> Vec<CustomClusterDef> {
             if seeds.is_empty() {
                 return None;
             }
-            Some(CustomClusterDef { name, seeds })
+            Some(CustomClusterDef {
+                name,
+                description: None,
+                seeds,
+                threshold: None,
+            })
         })
         .collect()
 }
 
-/// Encode custom cluster definitions back to the dotenv format.
+/// Encode custom cluster definitions back to a string value.
 ///
-/// Format: `Name1:seed1,seed2|Name2:seed3,seed4`
+/// Emits the legacy pipe format (`Name1:seed1,seed2|...`) when every def uses
+/// only name + seeds — keeping old round-trips byte-identical — and JSON when
+/// any def carries a description or threshold (or has no seeds).
 pub fn encode_custom_clusters(defs: &[CustomClusterDef]) -> String {
-    defs.iter()
-        .map(|d| format!("{}:{}", d.name, d.seeds.join(",")))
-        .collect::<Vec<_>>()
-        .join("|")
+    let legacy_ok = defs
+        .iter()
+        .all(|d| d.description.is_none() && d.threshold.is_none() && !d.seeds.is_empty());
+    if legacy_ok {
+        defs.iter()
+            .map(|d| format!("{}:{}", d.name, d.seeds.join(",")))
+            .collect::<Vec<_>>()
+            .join("|")
+    } else {
+        serde_json::to_string(defs).unwrap_or_default()
+    }
 }
 
 // ---------------------------------------------------------------------------
 // YAML pipeline functions
 // ---------------------------------------------------------------------------
+
+/// Convert a runtime custom cluster def into its YAML counterpart.
+fn yaml_custom_cluster_from_def(d: CustomClusterDef) -> YamlCustomCluster {
+    YamlCustomCluster {
+        name: d.name,
+        description: d.description,
+        seeds: d.seeds,
+        threshold: d.threshold,
+    }
+}
 
 /// Recursively merge two YAML values. Mappings merge recursively; scalars and
 /// sequences from `overlay` replace `base`.
@@ -799,12 +941,17 @@ pub fn apply_env_overrides(yaml: &mut YamlConfig) {
 
     // Clustering
     if let Some(v) = env_bool("MDVDB_CLUSTERING_ENABLED") { yaml.clustering.enabled = v; }
+    if let Some(v) = env_str("MDVDB_CLUSTERING_ALGORITHM") { yaml.clustering.algorithm = v; }
+    if let Some(v) = env_usize("MDVDB_CLUSTERING_KNN") { yaml.clustering.knn = v; }
+    if let Some(v) = env_f64("MDVDB_CLUSTERING_RESOLUTION") { yaml.clustering.resolution = v; }
+    if let Some(v) = env_usize("MDVDB_CLUSTERING_MIN_CLUSTER_SIZE") { yaml.clustering.min_cluster_size = v; }
     if let Some(v) = env_usize("MDVDB_CLUSTERING_REBALANCE_THRESHOLD") { yaml.clustering.rebalance_threshold = v; }
     if let Some(v) = env_f64("MDVDB_CLUSTER_GRANULARITY") { yaml.clustering.granularity = v; }
+    if let Some(v) = env_f64("MDVDB_TOPICS_MIN_SIMILARITY") { yaml.clustering.topics.min_similarity = v; }
     if let Some(v) = env_str("MDVDB_CUSTOM_CLUSTERS") {
         yaml.clustering.custom = parse_custom_clusters_value(&v)
             .into_iter()
-            .map(|d| YamlCustomCluster { name: d.name, seeds: d.seeds })
+            .map(yaml_custom_cluster_from_def)
             .collect();
     }
 
@@ -916,7 +1063,7 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
             "MDVDB_CUSTOM_CLUSTERS" => {
                 yaml.clustering.custom = parse_custom_clusters_value(value)
                     .into_iter()
-                    .map(|d| YamlCustomCluster { name: d.name, seeds: d.seeds })
+                    .map(yaml_custom_cluster_from_def)
                     .collect();
             }
             "MDVDB_WATCH" => {
@@ -1120,13 +1267,16 @@ impl Config {
             .unwrap_or_else(|_| "http://localhost:11434".to_string());
 
         let source_dirs = yaml.sources.dirs.iter().map(PathBuf::from).collect();
+        let clustering_algorithm = yaml.clustering.algorithm.parse::<ClusteringAlgorithm>()?;
         let custom_cluster_defs = yaml
             .clustering
             .custom
             .into_iter()
             .map(|c| CustomClusterDef {
                 name: c.name,
+                description: c.description,
                 seeds: c.seeds,
+                threshold: c.threshold,
             })
             .collect();
 
@@ -1145,8 +1295,13 @@ impl Config {
             chunk_max_tokens: yaml.chunking.max_tokens,
             chunk_overlap_tokens: yaml.chunking.overlap_tokens,
             clustering_enabled: yaml.clustering.enabled,
+            clustering_algorithm,
+            clustering_knn: yaml.clustering.knn,
+            clustering_resolution: yaml.clustering.resolution,
+            clustering_min_cluster_size: yaml.clustering.min_cluster_size,
             clustering_rebalance_threshold: yaml.clustering.rebalance_threshold,
             clustering_granularity: yaml.clustering.granularity,
+            topics_min_similarity: yaml.clustering.topics.min_similarity as f32,
             search_default_limit: yaml.search.limit,
             search_min_score: yaml.search.min_score,
             search_default_mode,
@@ -1640,7 +1795,9 @@ search:
     fn yaml_custom_cluster_roundtrip() {
         let cluster = YamlCustomCluster {
             name: "TestCluster".to_string(),
+            description: None,
             seeds: vec!["seed1".to_string(), "seed2".to_string(), "seed3".to_string()],
+            threshold: None,
         };
 
         let yaml_str = serde_yaml::to_string(&cluster).unwrap();
@@ -1846,7 +2003,9 @@ MDVDB_SEARCH_DEFAULT_LIMIT=5\n\
         yaml.sources.dirs = vec!["src".to_string(), "docs".to_string()];
         yaml.clustering.custom = vec![YamlCustomCluster {
             name: "Test".to_string(),
+            description: None,
             seeds: vec!["s1".to_string(), "s2".to_string()],
+            threshold: None,
         }];
 
         let config = Config::from_yaml(yaml, Path::new("/tmp")).unwrap();

@@ -1,9 +1,14 @@
 ---
 title: "RAG Evaluation Framework"
-tags: [evaluation, rag, testing, metrics]
+tags:
+  - evaluation
+  - rag
+  - testing
+  - metrics
+  - retrieval
 category: knowledge-graph
 author: "Priya Sharma"
-status: draft
+status: drafted
 ---
 
 # RAG Evaluation Framework

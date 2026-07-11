@@ -32,6 +32,11 @@ fn test_config(source_dir: &str) -> Config {
         chunk_max_tokens: 512,
         chunk_overlap_tokens: 50,
         clustering_enabled: false,
+        clustering_algorithm: mdvdb::config::ClusteringAlgorithm::Leiden,
+        clustering_knn: 15,
+        clustering_resolution: 1.0,
+        clustering_min_cluster_size: 2,
+        topics_min_similarity: 0.30,
         clustering_rebalance_threshold: 50,
         clustering_granularity: 1.0,
         search_default_limit: 10,
@@ -250,4 +255,200 @@ async fn watcher_graceful_shutdown_via_cancellation_token() {
         .expect("task should not panic");
 
     assert!(result.is_ok(), "watcher should return Ok on graceful shutdown");
+}
+
+// ---------------------------------------------------------------------------
+// Cluster maintenance under watch (driven via handle_event, no FS events)
+// ---------------------------------------------------------------------------
+
+use mdvdb::clustering::{Clusterer, CustomClusterInfo, CustomClusterState};
+use mdvdb::watcher::FileEvent;
+
+fn clustering_config(source_dir: &str) -> Config {
+    let mut config = test_config(source_dir);
+    config.clustering_enabled = true;
+    config
+}
+
+async fn index_initial_docs(
+    watcher: &Watcher,
+    docs_dir: &std::path::Path,
+    names: &[(&str, &str)],
+) {
+    for (name, content) in names {
+        fs::write(docs_dir.join(name), content).unwrap();
+        watcher
+            .handle_event(&FileEvent::Created(PathBuf::from(format!("docs/{name}"))))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn watcher_assigns_new_file_to_existing_cluster() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let docs_dir = project_root.join("docs");
+    let config = clustering_config("docs");
+
+    let watcher = Watcher::new(
+        config.clone(),
+        &project_root,
+        Arc::clone(&index),
+        Arc::clone(&fts_index),
+        Arc::clone(&provider),
+        None,
+    );
+
+    index_initial_docs(
+        &watcher,
+        &docs_dir,
+        &[
+            ("a.md", "# Alpha\nRust systems programming content"),
+            ("b.md", "# Beta\nCooking recipes and kitchen notes"),
+            ("c.md", "# Gamma\nMore rust cargo content here"),
+        ],
+    )
+    .await;
+
+    // Bootstrap cluster state (normally done by a full ingest).
+    let clusterer = Clusterer::new(&config);
+    let state = clusterer
+        .cluster_all(
+            &index.get_document_vectors(),
+            &index.get_document_contents(),
+            None,
+        )
+        .unwrap();
+    assert!(!state.clusters.is_empty());
+    index.update_clusters(Some(state));
+    index.save().unwrap();
+
+    // A new file arriving under watch must get a cluster assignment.
+    fs::write(docs_dir.join("d.md"), "# Delta\nFresh document about testing").unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(PathBuf::from("docs/d.md")))
+        .await
+        .unwrap();
+
+    let state = index.get_clusters().expect("cluster state persisted");
+    let memberships: usize = state
+        .clusters
+        .iter()
+        .map(|c| c.members.iter().filter(|m| *m == "docs/d.md").count())
+        .sum();
+    assert_eq!(memberships, 1, "new file must be in exactly one cluster");
+}
+
+#[tokio::test]
+async fn watcher_delete_removes_from_cluster_members() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let docs_dir = project_root.join("docs");
+    let config = clustering_config("docs");
+
+    let watcher = Watcher::new(
+        config.clone(),
+        &project_root,
+        Arc::clone(&index),
+        Arc::clone(&fts_index),
+        Arc::clone(&provider),
+        None,
+    );
+
+    index_initial_docs(
+        &watcher,
+        &docs_dir,
+        &[
+            ("a.md", "# Alpha\nRust systems content"),
+            ("b.md", "# Beta\nCooking recipes content"),
+        ],
+    )
+    .await;
+
+    let clusterer = Clusterer::new(&config);
+    let state = clusterer
+        .cluster_all(
+            &index.get_document_vectors(),
+            &index.get_document_contents(),
+            None,
+        )
+        .unwrap();
+    index.update_clusters(Some(state));
+    index.save().unwrap();
+
+    fs::remove_file(docs_dir.join("a.md")).unwrap();
+    watcher
+        .handle_event(&FileEvent::Deleted(PathBuf::from("docs/a.md")))
+        .await
+        .unwrap();
+
+    let state = index.get_clusters().expect("cluster state persisted");
+    for cluster in &state.clusters {
+        assert!(
+            !cluster.members.contains(&"docs/a.md".to_string()),
+            "deleted file must leave cluster membership"
+        );
+    }
+}
+
+#[tokio::test]
+async fn watcher_reassigns_topics_when_fingerprint_matches() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let docs_dir = project_root.join("docs");
+    let mut config = clustering_config("docs");
+    config.custom_cluster_defs = vec![mdvdb::CustomClusterDef {
+        name: "Everything".to_string(),
+        description: None,
+        seeds: vec!["notes".to_string()],
+        threshold: None,
+    }];
+    config.topics_min_similarity = 0.0; // accept any non-negative match
+
+    let fingerprint = mdvdb::clustering::topics_fingerprint(
+        &config.custom_cluster_defs,
+        config.topics_min_similarity,
+        &config.embedding_model,
+        config.embedding_dimensions,
+    );
+
+    // Seed a matching topic state (normally produced by a full ingest).
+    index.update_custom_clusters(Some(CustomClusterState {
+        clusters: vec![CustomClusterInfo {
+            id: 0,
+            name: "Everything".to_string(),
+            description: None,
+            seed_phrases: vec!["notes".to_string()],
+            threshold: None,
+            centroid: vec![0.35; 8],
+            members: vec![],
+        }],
+        unassigned: vec![],
+        fingerprint,
+    }));
+    index.save().unwrap();
+
+    let watcher = Watcher::new(
+        config.clone(),
+        &project_root,
+        Arc::clone(&index),
+        Arc::clone(&fts_index),
+        Arc::clone(&provider),
+        None,
+    );
+
+    fs::write(docs_dir.join("new.md"), "# New\nSome notes content").unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(PathBuf::from("docs/new.md")))
+        .await
+        .unwrap();
+
+    let state = index.get_custom_clusters().expect("topic state persisted");
+    let in_topic = state.clusters[0]
+        .members
+        .iter()
+        .any(|m| m.path == "docs/new.md");
+    let in_unassigned = state.unassigned.contains(&"docs/new.md".to_string());
+    assert!(
+        in_topic != in_unassigned,
+        "new file must be topic-assigned XOR unassigned (topic={in_topic}, unassigned={in_unassigned})"
+    );
 }

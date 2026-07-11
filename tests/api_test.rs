@@ -29,6 +29,11 @@ fn mock_config() -> Config {
         chunk_max_tokens: 512,
         chunk_overlap_tokens: 50,
         clustering_enabled: false,
+        clustering_algorithm: mdvdb::config::ClusteringAlgorithm::Leiden,
+        clustering_knn: 15,
+        clustering_resolution: 1.0,
+        clustering_min_cluster_size: 2,
+        topics_min_similarity: 0.30,
         clustering_rebalance_threshold: 50,
         clustering_granularity: 1.0,
         search_default_limit: 10,
@@ -1029,11 +1034,15 @@ async fn custom_clusters_full_pipeline() {
     config.custom_cluster_defs = vec![
         mdvdb::CustomClusterDef {
             name: "AI".to_string(),
+            description: None,
             seeds: vec!["machine learning".to_string(), "neural networks".to_string()],
+            threshold: None,
         },
         mdvdb::CustomClusterDef {
             name: "Web".to_string(),
+            description: None,
             seeds: vec!["html".to_string(), "css".to_string(), "javascript".to_string()],
+            threshold: None,
         },
     ];
 
@@ -1046,15 +1055,39 @@ async fn custom_clusters_full_pipeline() {
     assert_eq!(custom[0].name, "AI");
     assert_eq!(custom[1].name, "Web");
 
-    // All 3 documents should be assigned
-    let total_docs: usize = custom.iter().map(|c| c.document_count).sum();
-    assert_eq!(total_docs, 3);
-
-    // Graph data should include custom cluster info
+    // Multi-label semantics: every document is either a member of >= 1 topic
+    // (primary id set) or in the explicit Unassigned bucket — never both.
+    let unassigned = vdb.topic_unassigned().unwrap();
     let graph = vdb.graph_data(None).unwrap();
     assert_eq!(graph.custom_clusters.len(), 2);
+    assert_eq!(graph.nodes.len(), 3);
     for node in &graph.nodes {
-        assert!(node.custom_cluster_id.is_some(), "every node should have a custom_cluster_id");
+        let in_topics = node.custom_cluster_id.is_some();
+        let in_unassigned = unassigned.contains(&node.path);
+        assert!(
+            in_topics != in_unassigned,
+            "{} must be assigned XOR unassigned",
+            node.path
+        );
+        assert_eq!(
+            node.custom_cluster_ids.len(),
+            node.custom_cluster_scores.len(),
+            "ids and scores must be parallel arrays"
+        );
+        if in_topics {
+            assert_eq!(
+                node.custom_cluster_id,
+                Some(node.custom_cluster_ids[0]),
+                "primary topic must be the highest-scoring membership"
+            );
+        } else {
+            assert!(node.custom_cluster_ids.is_empty());
+        }
+    }
+
+    // Summaries expose mean scores exactly for non-empty topics.
+    for c in &custom {
+        assert_eq!(c.mean_score.is_some(), c.document_count > 0);
     }
 }
 
@@ -1070,7 +1103,9 @@ async fn custom_clusters_cleared_when_defs_removed() {
     let mut config = mock_config();
     config.custom_cluster_defs = vec![mdvdb::CustomClusterDef {
         name: "Test".to_string(),
+        description: None,
         seeds: vec!["hello".to_string()],
+        threshold: None,
     }];
 
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), config).unwrap();
@@ -1099,21 +1134,33 @@ async fn custom_clusters_incremental_ingest() {
     config.custom_cluster_defs = vec![
         mdvdb::CustomClusterDef {
             name: "A".to_string(),
+            description: None,
             seeds: vec!["first".to_string()],
+            threshold: None,
         },
         mdvdb::CustomClusterDef {
             name: "B".to_string(),
+            description: None,
             seeds: vec!["second".to_string()],
+            threshold: None,
         },
     ];
 
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), config.clone()).unwrap();
     vdb.ingest(mdvdb::IngestOptions::default()).await.unwrap();
 
-    // Should have 1 doc assigned
-    let custom = vdb.custom_clusters().unwrap();
-    let total: usize = custom.iter().map(|c| c.document_count).sum();
-    assert_eq!(total, 1);
+    // Coverage: the one document is either assigned somewhere or unassigned.
+    let covered = |vdb: &MarkdownVdb| -> std::collections::HashSet<String> {
+        let graph = vdb.graph_data(None).unwrap();
+        let unassigned = vdb.topic_unassigned().unwrap();
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.custom_cluster_id.is_some() || unassigned.contains(&n.path))
+            .map(|n| n.path.clone())
+            .collect()
+    };
+    assert_eq!(covered(&vdb).len(), 1);
 
     // Add a new file and do incremental ingest
     std::fs::write(root.join("doc2.md"), "# Second\nContent two").unwrap();
@@ -1123,8 +1170,14 @@ async fn custom_clusters_incremental_ingest() {
     };
     vdb.ingest(opts).await.unwrap();
 
-    // Now should have 2 docs assigned
-    let custom = vdb.custom_clusters().unwrap();
-    let total: usize = custom.iter().map(|c| c.document_count).sum();
-    assert_eq!(total, 2);
+    // Both documents are now covered (assigned or unassigned), exactly once each.
+    let coverage = covered(&vdb);
+    assert_eq!(coverage.len(), 2);
+    assert!(coverage.contains("doc2.md"));
+
+    // doc2 must not be duplicated within any topic's member list.
+    let graph = vdb.graph_data(None).unwrap();
+    for cluster in &graph.custom_clusters {
+        assert!(cluster.member_count <= 2);
+    }
 }

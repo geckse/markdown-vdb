@@ -1,11 +1,10 @@
 ---
 title: "Deployment Guide"
-tags: [devops, kubernetes, deployment]
+tags: [ devops, kubernetes, deployment ]
 category: documentation
-author: "Marcus Rivera"
+author: "Marcus Riveras"
 status: draft
 ---
-
 # Deployment Guide
 
 How to deploy, configure, and operate the platform in production.
@@ -23,13 +22,15 @@ All services read configuration from environment variables. Secrets are mounted 
 
 Required environment variables per service:
 
-| Variable | Service | Description |
-|---|---|---|
-| `DATABASE_URL` | auth, documents | PostgreSQL connection string |
-| `REDIS_URL` | notifications | Redis connection string |
-| `S3_BUCKET` | documents | Document storage bucket |
-| `JWT_PUBLIC_KEY` | all | RSA public key for token verification |
-| `EVENT_BUS_URL` | all | Message broker connection string |
+
+| Variable         | Service         | Description                           |
+| ---------------- | --------------- | ------------------------------------- |
+| `DATABASE_URL`   | auth, documents | PostgreSQL connection string          |
+| `REDIS_URL`      | notifications   | Redis connection string               |
+| `S3_BUCKET`      | documents       | Document storage bucket               |
+| `JWT_PUBLIC_KEY` | all             | RSA public key for token verification |
+| `EVENT_BUS_URL`  | all             | Message broker connection string      |
+
 
 ## Deployment Steps
 
@@ -135,3 +136,5 @@ Never run migrations during peak traffic. Always take a database snapshot before
 - [Database Maintenance Runbook](../runbooks/database-maintenance.md) — backup, recovery, and maintenance procedures
 - [Incident Response Runbook](../runbooks/incident-response.md) — handling production incidents during deploys
 - [Contributing Guide](../guides/contributing.md) — development workflow and CI/CD process
+
+&nbsp;

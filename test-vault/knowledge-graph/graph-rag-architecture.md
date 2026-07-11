@@ -1,6 +1,9 @@
 ---
 title: "Graph RAG Architecture"
-tags: [graph-rag, architecture, ai, knowledge-graph]
+tags:
+  - architecture
+  - ai
+  - knowledge-graph
 category: knowledge-graph
 author: "Priya Sharma"
 status: published

@@ -343,7 +343,7 @@ pub enum CheckStatus {
 /// Summary of a cluster.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClusterSummary {
-    /// Cluster identifier.
+    /// Cluster identifier — stable across re-clustering, not contiguous.
     pub id: usize,
     /// Number of documents in this cluster.
     pub document_count: usize,
@@ -351,19 +351,34 @@ pub struct ClusterSummary {
     pub label: Option<String>,
     /// Top keywords extracted via TF-IDF.
     pub keywords: Vec<String>,
+    /// Parent cluster id when a hierarchy level exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<usize>,
+    /// The member document closest to the cluster centroid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub representative: Option<String>,
 }
 
-/// Summary of a user-defined custom cluster.
+/// Summary of a user-defined topic (custom cluster).
 #[derive(Debug, Clone, Serialize)]
 pub struct CustomClusterSummary {
     /// Cluster identifier.
     pub id: usize,
-    /// User-provided cluster name.
+    /// User-provided topic name.
     pub name: String,
-    /// Seed phrases used to define this cluster.
+    /// User-provided description, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Seed phrases used to define this topic.
     pub seed_phrases: Vec<String>,
-    /// Number of documents assigned to this cluster.
+    /// Per-topic similarity threshold override, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
+    /// Number of documents assigned to this topic.
     pub document_count: usize,
+    /// Mean similarity score of the members, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_score: Option<f32>,
 }
 
 /// Graph detail level: document (file) or chunk.
@@ -389,8 +404,14 @@ pub struct GraphNode {
     pub chunk_index: Option<usize>,
     /// Cluster assignment, if any.
     pub cluster_id: Option<usize>,
-    /// Custom cluster assignment, if any (separate layer from auto-clusters).
+    /// Primary topic assignment (highest score), if any; `None` = Unassigned.
     pub custom_cluster_id: Option<usize>,
+    /// All topic memberships (multi-label), sorted by score descending.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_cluster_ids: Vec<usize>,
+    /// Similarity scores parallel to `custom_cluster_ids`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_cluster_scores: Vec<f32>,
     /// Optional size metric for visualization (e.g. content length for chunks).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<f64>,
@@ -430,6 +451,15 @@ pub struct GraphCluster {
     pub keywords: Vec<String>,
     /// Number of members in this cluster.
     pub member_count: usize,
+    /// Topic description (custom clusters only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Per-topic threshold override (custom clusters only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f32>,
+    /// Parent cluster id (auto clusters with a hierarchy level only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<usize>,
 }
 
 /// Complete graph data combining nodes, edges, and clusters.
@@ -449,6 +479,57 @@ pub struct GraphData {
     /// User-defined custom clusters, if available.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_clusters: Vec<GraphCluster>,
+}
+
+/// Map each document path to its topic memberships `(id, score)`, sorted by
+/// score descending (ties → lower id). The first entry is the primary topic.
+fn topic_membership_map(
+    state: Option<&clustering::CustomClusterState>,
+) -> HashMap<String, Vec<(usize, f32)>> {
+    let mut map: HashMap<String, Vec<(usize, f32)>> = HashMap::new();
+    if let Some(state) = state {
+        for cluster in &state.clusters {
+            for member in &cluster.members {
+                map.entry(member.path.clone())
+                    .or_default()
+                    .push((cluster.id, member.score));
+            }
+        }
+    }
+    for memberships in map.values_mut() {
+        memberships.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+    }
+    map
+}
+
+/// Convert an auto cluster to its graph representation.
+fn graph_cluster_from_auto(cluster: &clustering::ClusterInfo) -> GraphCluster {
+    GraphCluster {
+        id: cluster.id,
+        label: cluster.label.clone(),
+        keywords: cluster.keywords.clone(),
+        member_count: cluster.members.len(),
+        description: None,
+        threshold: None,
+        parent_id: cluster.parent_id,
+    }
+}
+
+/// Convert a topic (custom cluster) to its graph representation.
+fn graph_cluster_from_topic(cluster: &clustering::CustomClusterInfo) -> GraphCluster {
+    GraphCluster {
+        id: cluster.id,
+        label: cluster.name.clone(),
+        keywords: cluster.seed_phrases.clone(),
+        member_count: cluster.members.len(),
+        description: cluster.description.clone(),
+        threshold: cluster.threshold,
+        parent_id: None,
+    }
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -1294,83 +1375,136 @@ impl MarkdownVdb {
             let doc_contents = self.index.get_document_contents();
 
             if !doc_vectors.is_empty() {
-                if let Some(ref single_file) = options.file {
-                    // Single-file ingest: assign to nearest cluster + maybe rebalance.
-                    if let Some(mut state) = self.index.get_clusters() {
-                        let path_str = single_file.to_string_lossy().to_string();
-                        if let Some(vec) = doc_vectors.get(&path_str) {
-                            if let Err(e) = clusterer.assign_to_nearest(&mut state, &path_str, vec) {
-                                warn!(error = %e, "failed to assign document to cluster");
-                            } else {
-                                // Attempt rebalance with all document vectors.
-                                match clusterer.maybe_rebalance(&mut state, &doc_vectors, &doc_contents) {
-                                    Ok(rebalanced) => {
-                                        if rebalanced {
-                                            info!("clusters rebalanced after single-file ingest");
-                                        }
+                // Single-file fast path only when a compatible state exists;
+                // otherwise (full ingest, missing state, or algorithm switch)
+                // run a full pass seeded with the previous state for id/label
+                // stability.
+                let existing = self.index.get_clusters();
+                let single_fast_path = options.file.is_some()
+                    && existing
+                        .as_ref()
+                        .is_some_and(|s| !s.clusters.is_empty() && !clusterer.algorithm_changed(s));
+
+                if single_fast_path {
+                    let single_file = options.file.as_ref().expect("checked above");
+                    let mut state = existing.expect("checked above");
+                    let path_str = single_file.to_string_lossy().to_string();
+                    if let Some(vec) = doc_vectors.get(&path_str) {
+                        if let Err(e) =
+                            clusterer.assign_incremental(&mut state, &path_str, vec, &doc_vectors)
+                        {
+                            warn!(error = %e, "failed to assign document to cluster");
+                        } else {
+                            // Attempt rebalance with all document vectors.
+                            match clusterer.maybe_rebalance(&mut state, &doc_vectors, &doc_contents) {
+                                Ok(rebalanced) => {
+                                    if rebalanced {
+                                        info!("clusters rebalanced after single-file ingest");
                                     }
-                                    Err(e) => warn!(error = %e, "cluster rebalance failed"),
                                 }
-                                self.index.update_clusters(Some(state));
-                                self.index.save()?;
+                                Err(e) => warn!(error = %e, "cluster rebalance failed"),
                             }
+                            self.index.update_clusters(Some(state));
+                            self.index.save()?;
                         }
                     }
-                    // If no existing clusters, skip — full ingest will create them.
-                } else {
-                    // Full ingest: run full K-means clustering.
-                    match clusterer.cluster_all(&doc_vectors, &doc_contents) {
+                } else if options.file.is_none() || existing.is_none() {
+                    // Full clustering pass (also covers single-file ingest with
+                    // no prior state — bootstrap instead of silently skipping).
+                    match clusterer.cluster_all(&doc_vectors, &doc_contents, existing.as_ref()) {
                         Ok(state) => {
                             self.index.update_clusters(Some(state));
                             self.index.save()?;
-                            info!("clustering complete after full ingest");
+                            info!("clustering complete");
                         }
                         Err(e) => {
                             warn!(error = %e, "clustering failed (non-fatal)");
                         }
                     }
+                } else {
+                    // Single-file ingest with an algorithm switch: re-cluster fully.
+                    match clusterer.cluster_all(&doc_vectors, &doc_contents, existing.as_ref()) {
+                        Ok(state) => {
+                            self.index.update_clusters(Some(state));
+                            self.index.save()?;
+                            info!("clusters rebuilt after algorithm change");
+                        }
+                        Err(e) => warn!(error = %e, "clustering failed (non-fatal)"),
+                    }
                 }
             }
         }
 
-        // Custom clustering (separate layer from K-means).
+        // Topic (custom cluster) assignment — separate layer from auto clusters.
         if !self.config.custom_cluster_defs.is_empty() {
             let doc_vectors = self.index.get_document_vectors();
             if !doc_vectors.is_empty() {
-                if let Some(ref single_file) = options.file {
-                    // Single-file ingest: assign to nearest custom cluster using existing centroids.
-                    if let Some(mut state) = self.index.get_custom_clusters() {
-                        let path_str = single_file.to_string_lossy().to_string();
-                        if let Some(vec) = doc_vectors.get(&path_str) {
-                            let clusterer = clustering::Clusterer::new(&self.config);
-                            clusterer.assign_single_to_custom(&mut state, &path_str, vec);
-                            self.index.update_custom_clusters(Some(state));
-                            self.index.save()?;
+                let clusterer = clustering::Clusterer::new(&self.config);
+                let expected_fp = clustering::topics_fingerprint(
+                    &self.config.custom_cluster_defs,
+                    self.config.topics_min_similarity,
+                    &self.config.embedding_model,
+                    self.config.embedding_dimensions,
+                );
+                let existing = self.index.get_custom_clusters();
+                let fp_matches = existing
+                    .as_ref()
+                    .is_some_and(|s| s.fingerprint == expected_fp);
+
+                if let (Some(single_file), true) = (options.file.as_ref(), fp_matches) {
+                    // Fast path: definitions unchanged — re-assign just this
+                    // document against the stored centroids (no provider call).
+                    let mut state = existing.expect("fingerprint matched");
+                    let path_str = single_file.to_string_lossy().to_string();
+                    if let Some(vec) = doc_vectors.get(&path_str) {
+                        match clusterer.assign_single_to_custom(&mut state, &path_str, vec) {
+                            Ok(()) => {
+                                self.index.update_custom_clusters(Some(state));
+                                self.index.save()?;
+                            }
+                            Err(e) => warn!(error = %e, "topic assignment failed (non-fatal)"),
                         }
                     }
-                    // If no existing custom cluster state, skip — next full ingest will create it.
                 } else {
-                    // Full ingest: embed seeds and assign all documents.
-                    let provider = self.ensure_provider()?;
-                    match clustering::embed_seed_centroids(
-                        &self.config.custom_cluster_defs,
-                        provider.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(centroids) => {
-                            let clusterer = clustering::Clusterer::new(&self.config);
-                            let state = clusterer.assign_all_to_custom(
-                                &self.config.custom_cluster_defs,
-                                &centroids,
-                                &doc_vectors,
-                            );
+                    // Full recompute: full ingest, stale fingerprint (edited
+                    // definitions / model change), or missing state. Reuse the
+                    // stored centroids when the fingerprint still matches.
+                    let centroids: crate::Result<Vec<Vec<f32>>> = if fp_matches {
+                        Ok(existing
+                            .as_ref()
+                            .expect("fingerprint matched")
+                            .clusters
+                            .iter()
+                            .map(|c| c.centroid.clone())
+                            .collect())
+                    } else {
+                        match self.ensure_provider() {
+                            Ok(provider) => {
+                                clustering::embed_topic_centroids(
+                                    &self.config.custom_cluster_defs,
+                                    provider.as_ref(),
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        }
+                    };
+
+                    match centroids.and_then(|centroids| {
+                        clusterer.assign_all_to_custom(
+                            &self.config.custom_cluster_defs,
+                            &centroids,
+                            &doc_vectors,
+                            expected_fp,
+                        )
+                    }) {
+                        Ok(state) => {
                             self.index.update_custom_clusters(Some(state));
                             self.index.save()?;
-                            info!("custom clustering complete");
+                            info!("topic assignment complete");
                         }
                         Err(e) => {
-                            warn!(error = %e, "custom clustering failed (non-fatal)");
+                            warn!(error = %e, "topic assignment failed (non-fatal)");
                         }
                     }
                 }
@@ -1784,13 +1918,15 @@ sources:
                         Some(c.label.clone())
                     },
                     keywords: c.keywords.clone(),
+                    parent_id: c.parent_id,
+                    representative: c.representative.clone(),
                 })
                 .collect()),
             None => Ok(Vec::new()),
         }
     }
 
-    /// Return summaries of user-defined custom clusters.
+    /// Return summaries of user-defined topics (custom clusters).
     pub fn custom_clusters(&self) -> Result<Vec<CustomClusterSummary>> {
         match self.index.get_custom_clusters() {
             Some(state) => Ok(state
@@ -1799,12 +1935,32 @@ sources:
                 .map(|c| CustomClusterSummary {
                     id: c.id,
                     name: c.name.clone(),
+                    description: c.description.clone(),
                     seed_phrases: c.seed_phrases.clone(),
+                    threshold: c.threshold,
                     document_count: c.members.len(),
+                    mean_score: if c.members.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            c.members.iter().map(|m| m.score).sum::<f32>()
+                                / c.members.len() as f32,
+                        )
+                    },
                 })
                 .collect()),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Return the documents matching no topic (the Unassigned bucket).
+    /// Empty when no topics are defined or computed.
+    pub fn topic_unassigned(&self) -> Result<Vec<String>> {
+        Ok(self
+            .index
+            .get_custom_clusters()
+            .map(|state| state.unassigned)
+            .unwrap_or_default())
     }
 
     /// Return graph data combining indexed files, link edges, and cluster membership.
@@ -1829,44 +1985,44 @@ sources:
                 for member in &cluster.members {
                     path_to_cluster.insert(member.clone(), cluster.id);
                 }
-                clusters.push(GraphCluster {
-                    id: cluster.id,
-                    label: cluster.label.clone(),
-                    keywords: cluster.keywords.clone(),
-                    member_count: cluster.members.len(),
-                });
+                clusters.push(graph_cluster_from_auto(cluster));
             }
         }
 
-        // 2b. Build path → custom_cluster_id map
+        // 2b. Build path → topic memberships map (multi-label, score-sorted)
         let custom_cluster_state = self.index.get_custom_clusters();
-        let mut path_to_custom_cluster: HashMap<String, usize> = HashMap::new();
-        let mut custom_clusters = Vec::new();
-        if let Some(ref state) = custom_cluster_state {
-            for cluster in &state.clusters {
-                for member in &cluster.members {
-                    path_to_custom_cluster.insert(member.clone(), cluster.id);
-                }
-                custom_clusters.push(GraphCluster {
-                    id: cluster.id,
-                    label: cluster.name.clone(),
-                    keywords: cluster.seed_phrases.clone(),
-                    member_count: cluster.members.len(),
-                });
-            }
-        }
+        let path_to_topics = topic_membership_map(custom_cluster_state.as_ref());
+        let custom_clusters = custom_cluster_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .clusters
+                    .iter()
+                    .map(graph_cluster_from_topic)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         // 3. Build nodes
         let nodes: Vec<GraphNode> = indexed_paths
             .iter()
-            .map(|path| GraphNode {
-                id: path.clone(),
-                path: path.clone(),
-                label: None,
-                chunk_index: None,
-                cluster_id: path_to_cluster.get(path).copied(),
-                custom_cluster_id: path_to_custom_cluster.get(path).copied(),
-                size: None,
+            .map(|path| {
+                let topics = path_to_topics.get(path);
+                GraphNode {
+                    id: path.clone(),
+                    path: path.clone(),
+                    label: None,
+                    chunk_index: None,
+                    cluster_id: path_to_cluster.get(path).copied(),
+                    custom_cluster_id: topics.and_then(|t| t.first().map(|(id, _)| *id)),
+                    custom_cluster_ids: topics
+                        .map(|t| t.iter().map(|(id, _)| *id).collect())
+                        .unwrap_or_default(),
+                    custom_cluster_scores: topics
+                        .map(|t| t.iter().map(|(_, s)| *s).collect())
+                        .unwrap_or_default(),
+                    size: None,
+                }
             })
             .collect();
 
@@ -1906,6 +2062,9 @@ sources:
                     label: c.label.clone(),
                     keywords: c.keywords.clone(),
                     member_count: c.members.len(),
+                    description: None,
+                    threshold: None,
+                    parent_id: None,
                 }).collect()
             })
             .unwrap_or_default();
@@ -1954,34 +2113,25 @@ sources:
                 for member in &cluster.members {
                     path_to_cluster.insert(member.clone(), cluster.id);
                 }
-                clusters.push(GraphCluster {
-                    id: cluster.id,
-                    label: cluster.label.clone(),
-                    keywords: cluster.keywords.clone(),
-                    member_count: cluster.members.len(),
-                });
+                clusters.push(graph_cluster_from_auto(cluster));
             }
         }
 
-        // Build path → custom_cluster_id map
+        // Build path → topic memberships map (multi-label, score-sorted)
         let custom_cluster_state = self.index.get_custom_clusters();
-        let mut path_to_custom_cluster: HashMap<String, usize> = HashMap::new();
-        let mut custom_clusters = Vec::new();
-        if let Some(ref state) = custom_cluster_state {
-            for cluster in &state.clusters {
-                for member in &cluster.members {
-                    path_to_custom_cluster.insert(member.clone(), cluster.id);
-                }
-                custom_clusters.push(GraphCluster {
-                    id: cluster.id,
-                    label: cluster.name.clone(),
-                    keywords: cluster.seed_phrases.clone(),
-                    member_count: cluster.members.len(),
-                });
-            }
-        }
+        let path_to_topics = topic_membership_map(custom_cluster_state.as_ref());
+        let custom_clusters = custom_cluster_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .clusters
+                    .iter()
+                    .map(graph_cluster_from_topic)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
-        // Build nodes — inherit cluster_id from parent document
+        // Build nodes — inherit cluster/topic membership from parent document
         let nodes: Vec<GraphNode> = chunk_vectors
             .iter()
             .map(|cv| {
@@ -1992,13 +2142,20 @@ sources:
                 };
                 let content_len = self.index.get_chunk(&cv.chunk_id)
                     .map(|c| c.content.len() as f64);
+                let topics = path_to_topics.get(&cv.source_path);
                 GraphNode {
                     id: cv.chunk_id.clone(),
                     path: cv.source_path.clone(),
                     label,
                     chunk_index: Some(cv.chunk_index),
                     cluster_id: path_to_cluster.get(&cv.source_path).copied(),
-                    custom_cluster_id: path_to_custom_cluster.get(&cv.source_path).copied(),
+                    custom_cluster_id: topics.and_then(|t| t.first().map(|(id, _)| *id)),
+                    custom_cluster_ids: topics
+                        .map(|t| t.iter().map(|(id, _)| *id).collect())
+                        .unwrap_or_default(),
+                    custom_cluster_scores: topics
+                        .map(|t| t.iter().map(|(_, s)| *s).collect())
+                        .unwrap_or_default(),
                     size: content_len,
                 }
             })

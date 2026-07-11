@@ -284,21 +284,46 @@ struct ClustersArgs {
 
 #[derive(Subcommand)]
 enum ClusterAction {
-    /// Add a custom cluster definition
+    /// Add a topic (custom cluster) definition
     Add {
-        /// Cluster name
+        /// Topic name
         name: String,
         /// Comma-separated seed words/phrases
         #[arg(long)]
-        seeds: String,
+        seeds: Option<String>,
+        /// Natural-language description (improves matching accuracy)
+        #[arg(long)]
+        description: Option<String>,
+        /// Per-topic similarity threshold in [0.0, 1.0]
+        #[arg(long)]
+        threshold: Option<f32>,
     },
-    /// Remove a custom cluster definition
+    /// Update an existing topic (custom cluster) definition
+    Update {
+        /// Topic name to update
+        name: String,
+        /// Replace the comma-separated seed list
+        #[arg(long)]
+        seeds: Option<String>,
+        /// Replace the description ("" clears it)
+        #[arg(long)]
+        description: Option<String>,
+        /// Replace the similarity threshold (negative value clears it)
+        #[arg(long)]
+        threshold: Option<f32>,
+        /// Rename the topic
+        #[arg(long)]
+        rename: Option<String>,
+    },
+    /// Remove a topic (custom cluster) definition
     Remove {
-        /// Cluster name to remove
+        /// Topic name to remove
         name: String,
     },
-    /// List custom cluster definitions from config
+    /// List topic (custom cluster) definitions from config
     List,
+    /// Show documents matching no topic (the Unassigned bucket)
+    Unassigned,
 }
 
 #[derive(Parser)]
@@ -402,7 +427,23 @@ struct InitArgs {
 }
 
 #[derive(Parser)]
-struct ConfigArgs {}
+struct ConfigArgs {
+    /// Modify configuration
+    #[command(subcommand)]
+    action: Option<ConfigAction>,
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Set a config value in .markdownvdb/config.yaml using a dotted key path
+    /// (e.g. `mdvdb config set clustering.algorithm kmeans`)
+    Set {
+        /// Dotted key path (e.g. clustering.topics.min_similarity)
+        key: String,
+        /// New value (parsed as bool/number when possible, else string)
+        value: String,
+    },
+}
 
 #[derive(Parser)]
 struct DoctorArgs {}
@@ -763,24 +804,15 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Clusters(args)) => {
             match args.action {
-                Some(ClusterAction::Add { name, seeds }) => {
-                    // Validate name and seeds.
-                    if name.contains(':') || name.contains('|') {
-                        anyhow::bail!("cluster name cannot contain ':' or '|'");
-                    }
-                    let seed_list: Vec<String> = seeds
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if seed_list.is_empty() {
-                        anyhow::bail!("--seeds must contain at least one seed phrase");
-                    }
-                    for seed in &seed_list {
-                        if seed.contains('|') {
-                            anyhow::bail!("seed phrases cannot contain '|'");
-                        }
-                    }
+                Some(ClusterAction::Add {
+                    name,
+                    seeds,
+                    description,
+                    threshold,
+                }) => {
+                    let seed_list = parse_seed_list(seeds.as_deref())?;
+                    let description = normalize_description(description);
+                    validate_topic_fields(&name, &seed_list, description.as_deref(), threshold)?;
 
                     // Read existing defs, add new one, write back.
                     let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
@@ -788,18 +820,70 @@ async fn run() -> anyhow::Result<()> {
 
                     // Check for duplicate name.
                     if defs.iter().any(|d| d.name == name) {
-                        anyhow::bail!("custom cluster '{}' already exists", name);
+                        anyhow::bail!("topic '{}' already exists", name);
                     }
 
                     defs.push(mdvdb::CustomClusterDef {
                         name: name.clone(),
+                        description,
                         seeds: seed_list,
+                        threshold,
                     });
 
                     write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
 
                     if !json {
-                        eprintln!("Added custom cluster '{name}'. Run `mdvdb ingest` to compute assignments.");
+                        eprintln!("Added topic '{name}'. Run `mdvdb ingest` to compute assignments.");
+                    }
+                }
+                Some(ClusterAction::Update {
+                    name,
+                    seeds,
+                    description,
+                    threshold,
+                    rename,
+                }) => {
+                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                    let mut defs = read_custom_clusters_from_yaml(&yaml_config_path);
+
+                    let Some(def) = defs.iter_mut().find(|d| d.name == name) else {
+                        anyhow::bail!("topic '{}' not found", name);
+                    };
+
+                    if let Some(seeds) = seeds.as_deref() {
+                        def.seeds = parse_seed_list(Some(seeds))?;
+                    }
+                    if let Some(desc) = description {
+                        def.description = normalize_description(Some(desc));
+                    }
+                    if let Some(t) = threshold {
+                        def.threshold = if t < 0.0 { None } else { Some(t) };
+                    }
+                    if let Some(new_name) = rename {
+                        def.name = new_name;
+                    }
+                    let def_snapshot = def.clone();
+                    validate_topic_fields(
+                        &def_snapshot.name,
+                        &def_snapshot.seeds,
+                        def_snapshot.description.as_deref(),
+                        def_snapshot.threshold,
+                    )?;
+                    let duplicates = defs
+                        .iter()
+                        .filter(|d| d.name == def_snapshot.name)
+                        .count();
+                    if duplicates > 1 {
+                        anyhow::bail!("topic '{}' already exists", def_snapshot.name);
+                    }
+
+                    write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
+
+                    if !json {
+                        eprintln!(
+                            "Updated topic '{}'. Run `mdvdb ingest` to recompute assignments.",
+                            def_snapshot.name
+                        );
                     }
                 }
                 Some(ClusterAction::Remove { name }) => {
@@ -809,13 +893,13 @@ async fn run() -> anyhow::Result<()> {
                     defs.retain(|d| d.name != name);
 
                     if defs.len() == before_len {
-                        anyhow::bail!("custom cluster '{}' not found", name);
+                        anyhow::bail!("topic '{}' not found", name);
                     }
 
                     write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
 
                     if !json {
-                        eprintln!("Removed custom cluster '{name}'. Run `mdvdb ingest` to update assignments.");
+                        eprintln!("Removed topic '{name}'. Run `mdvdb ingest` to update assignments.");
                     }
                 }
                 Some(ClusterAction::List) => {
@@ -826,12 +910,45 @@ async fn run() -> anyhow::Result<()> {
                         serde_json::to_writer_pretty(std::io::stdout(), &defs)?;
                         writeln!(std::io::stdout())?;
                     } else if defs.is_empty() {
-                        println!("No custom cluster definitions.");
+                        println!("No topic definitions.");
                     } else {
-                        println!("Custom cluster definitions:");
+                        println!("Topic definitions:");
                         for (i, def) in defs.iter().enumerate() {
                             println!("  {}. {}", i + 1, def.name);
-                            println!("     Seeds: {}", def.seeds.join(", "));
+                            if let Some(desc) = &def.description {
+                                println!("     Description: {desc}");
+                            }
+                            if !def.seeds.is_empty() {
+                                println!("     Seeds: {}", def.seeds.join(", "));
+                            }
+                            if let Some(t) = def.threshold {
+                                println!("     Threshold: {t:.2}");
+                            }
+                        }
+                    }
+                }
+                Some(ClusterAction::Unassigned) => {
+                    let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+                    let paths = vdb.topic_unassigned()?;
+
+                    if json {
+                        #[derive(serde::Serialize)]
+                        struct UnassignedOutput {
+                            count: usize,
+                            paths: Vec<String>,
+                        }
+                        let out = UnassignedOutput {
+                            count: paths.len(),
+                            paths,
+                        };
+                        serde_json::to_writer_pretty(std::io::stdout(), &out)?;
+                        writeln!(std::io::stdout())?;
+                    } else if paths.is_empty() {
+                        println!("No unassigned documents.");
+                    } else {
+                        println!("Unassigned documents ({}):", paths.len());
+                        for p in &paths {
+                            println!("  {p}");
                         }
                     }
                 }
@@ -839,22 +956,37 @@ async fn run() -> anyhow::Result<()> {
                     if args.custom {
                         let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
                         let custom = vdb.custom_clusters()?;
+                        let unassigned_count = vdb.topic_unassigned()?.len();
 
                         if json {
                             serde_json::to_writer_pretty(std::io::stdout(), &custom)?;
                             writeln!(std::io::stdout())?;
                         } else if custom.is_empty() {
-                            println!("No custom clusters. Use `mdvdb clusters add` or define them in .markdownvdb/config.yaml and run ingest.");
+                            println!("No topics. Use `mdvdb clusters add` or define them in .markdownvdb/config.yaml and run ingest.");
                         } else {
                             let total_docs: usize = custom.iter().map(|c| c.document_count).sum();
                             println!(
-                                "Custom clusters ({} clusters, {} documents):",
+                                "Topics ({} topics, {} memberships):",
                                 custom.len(),
                                 total_docs
                             );
                             for c in &custom {
-                                println!("  {}. {} ({} docs)", c.id + 1, c.name, c.document_count);
+                                let mean = c
+                                    .mean_score
+                                    .map(|s| format!(", avg {:.0}%", s * 100.0))
+                                    .unwrap_or_default();
+                                let threshold = c
+                                    .threshold
+                                    .map(|t| format!(", threshold {t:.2}"))
+                                    .unwrap_or_default();
+                                println!(
+                                    "  {}. {} ({} docs{mean}{threshold})",
+                                    c.id + 1,
+                                    c.name,
+                                    c.document_count
+                                );
                             }
+                            println!("  Unassigned: {unassigned_count} documents");
                         }
                     } else {
                         let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
@@ -1116,15 +1248,33 @@ async fn run() -> anyhow::Result<()> {
                 format::print_init_success(&cwd.display().to_string());
             }
         }
-        Some(Commands::Config(_args)) => {
-            if json {
-                serde_json::to_writer_pretty(std::io::stdout(), &config)?;
-                writeln!(std::io::stdout())?;
-            } else {
-                let user_config = mdvdb::config::Config::user_config_path();
-                format::print_config(&config, user_config.as_deref());
+        Some(Commands::Config(args)) => match args.action {
+            Some(ConfigAction::Set { key, value }) => {
+                let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                mdvdb::config_update_yaml_value(
+                    &yaml_config_path,
+                    &key,
+                    parse_yaml_scalar(&value),
+                )?;
+                // Validate the resulting config; roll back is not needed since
+                // the user can simply set the value again, but surface errors.
+                if let Err(e) = mdvdb::config::Config::load(&cwd) {
+                    eprintln!("warning: config now fails validation: {e}");
+                }
+                if !json {
+                    eprintln!("Set {key} = {value}");
+                }
             }
-        }
+            None => {
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &config)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    let user_config = mdvdb::config::Config::user_config_path();
+                    format::print_config(&config, user_config.as_deref());
+                }
+            }
+        },
         Some(Commands::Doctor(_args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let result = vdb.doctor().await?;
@@ -1410,6 +1560,68 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
     Ok(())
 }
 
+/// Parse a comma-separated seed list, rejecting '|' inside seeds.
+fn parse_seed_list(seeds: Option<&str>) -> anyhow::Result<Vec<String>> {
+    let list: Vec<String> = seeds
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    for seed in &list {
+        if seed.contains('|') {
+            anyhow::bail!("seed phrases cannot contain '|'");
+        }
+    }
+    Ok(list)
+}
+
+/// Treat an empty/whitespace description as None.
+fn normalize_description(description: Option<String>) -> Option<String> {
+    description
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+}
+
+/// Shared validation for topic definitions from the CLI.
+fn validate_topic_fields(
+    name: &str,
+    seeds: &[String],
+    description: Option<&str>,
+    threshold: Option<f32>,
+) -> anyhow::Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!("topic name cannot be empty");
+    }
+    if name.contains(':') || name.contains('|') {
+        anyhow::bail!("topic name cannot contain ':' or '|'");
+    }
+    if seeds.is_empty() && description.is_none() {
+        anyhow::bail!("a topic needs --seeds or --description (or both)");
+    }
+    if let Some(t) = threshold {
+        if !(0.0..=1.0).contains(&t) {
+            anyhow::bail!("--threshold must be in [0.0, 1.0], got {t}");
+        }
+    }
+    Ok(())
+}
+
+/// Parse a CLI string into a YAML scalar: bool and numbers when possible,
+/// otherwise a string.
+fn parse_yaml_scalar(value: &str) -> serde_yaml::Value {
+    if let Ok(b) = value.parse::<bool>() {
+        return serde_yaml::Value::Bool(b);
+    }
+    if let Ok(i) = value.parse::<i64>() {
+        return serde_yaml::Value::Number(serde_yaml::Number::from(i));
+    }
+    if let Ok(f) = value.parse::<f64>() {
+        return serde_yaml::Value::Number(serde_yaml::Number::from(f));
+    }
+    serde_yaml::Value::String(value.to_string())
+}
+
 /// Read custom cluster definitions from a YAML config file.
 fn read_custom_clusters_from_yaml(yaml_path: &std::path::Path) -> Vec<mdvdb::CustomClusterDef> {
     let content = std::fs::read_to_string(yaml_path).unwrap_or_default();
@@ -1422,7 +1634,9 @@ fn read_custom_clusters_from_yaml(yaml_path: &std::path::Path) -> Vec<mdvdb::Cus
         .into_iter()
         .map(|c| mdvdb::CustomClusterDef {
             name: c.name,
+            description: c.description,
             seeds: c.seeds,
+            threshold: c.threshold,
         })
         .collect()
 }
@@ -1440,12 +1654,26 @@ fn write_custom_clusters_to_yaml(
                 serde_yaml::Value::String("name".into()),
                 serde_yaml::Value::String(d.name.clone()),
             );
-            map.insert(
-                serde_yaml::Value::String("seeds".into()),
-                serde_yaml::Value::Sequence(
-                    d.seeds.iter().map(|s| serde_yaml::Value::String(s.clone())).collect(),
-                ),
-            );
+            if let Some(desc) = &d.description {
+                map.insert(
+                    serde_yaml::Value::String("description".into()),
+                    serde_yaml::Value::String(desc.clone()),
+                );
+            }
+            if !d.seeds.is_empty() {
+                map.insert(
+                    serde_yaml::Value::String("seeds".into()),
+                    serde_yaml::Value::Sequence(
+                        d.seeds.iter().map(|s| serde_yaml::Value::String(s.clone())).collect(),
+                    ),
+                );
+            }
+            if let Some(t) = d.threshold {
+                map.insert(
+                    serde_yaml::Value::String("threshold".into()),
+                    serde_yaml::Value::Number(serde_yaml::Number::from(t as f64)),
+                );
+            }
             serde_yaml::Value::Mapping(map)
         })
         .collect();

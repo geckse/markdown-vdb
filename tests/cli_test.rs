@@ -2045,9 +2045,22 @@ fn test_clusters_custom_json_after_ingest() {
     assert_eq!(arr[0]["name"], "AI");
     assert_eq!(arr[1]["name"], "Web");
 
-    // Every cluster should have a document count
-    let total_docs: usize = arr.iter().map(|c| c["document_count"].as_u64().unwrap() as usize).sum();
-    assert_eq!(total_docs, 2);
+    // Every topic has a document count; multi-label means a doc may appear in
+    // both topics, so the sum is bounded by docs × topics.
+    let total_memberships: usize = arr
+        .iter()
+        .map(|c| c["document_count"].as_u64().unwrap() as usize)
+        .sum();
+    assert!(total_memberships <= 4, "2 docs × 2 topics is the ceiling");
+    // Non-empty topics expose a mean member score.
+    for c in arr {
+        let count = c["document_count"].as_u64().unwrap();
+        assert_eq!(
+            c.get("mean_score").is_some(),
+            count > 0,
+            "mean_score present iff the topic has members"
+        );
+    }
 }
 
 #[test]
@@ -2365,4 +2378,197 @@ fn test_collection_human_output_cli() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Collection"), "human output has a header");
     assert!(stdout.contains("Showing"), "human output has a pagination footer");
+}
+
+// ---------------------------------------------------------------------------
+// Topics CLI (add --description/--threshold, update, unassigned, config set)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_clusters_add_description_only() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+
+    let output = mdvdb_bin()
+        .args([
+            "clusters", "add", "Rust",
+            "--description", "Notes about Rust programming and cargo",
+            "--root",
+        ])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = mdvdb_bin()
+        .args(["clusters", "list", "--json", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "Rust");
+    assert_eq!(arr[0]["description"], "Notes about Rust programming and cargo");
+    // Seed-less topic: seeds serialize as an empty array.
+    assert!(arr[0]["seeds"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn test_clusters_add_rejects_empty_definition() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+
+    let output = mdvdb_bin()
+        .args(["clusters", "add", "Empty", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--seeds or --description"), "stderr: {stderr}");
+}
+
+#[test]
+fn test_clusters_add_rejects_bad_threshold() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+
+    let output = mdvdb_bin()
+        .args([
+            "clusters", "add", "Bad", "--seeds", "x", "--threshold", "1.5", "--root",
+        ])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("threshold"));
+}
+
+#[test]
+fn test_clusters_update_edits_and_renames() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+
+    let ok = mdvdb_bin()
+        .args(["clusters", "add", "Old", "--seeds", "a,b", "--root"])
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(ok.status.success());
+
+    let output = mdvdb_bin()
+        .args([
+            "clusters", "update", "Old",
+            "--seeds", "c,d",
+            "--description", "updated desc",
+            "--threshold", "0.4",
+            "--rename", "New",
+            "--root",
+        ])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "update failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = mdvdb_bin()
+        .args(["clusters", "list", "--json", "--root"])
+        .arg(root)
+        .output()
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "New");
+    assert_eq!(arr[0]["description"], "updated desc");
+    assert_eq!(arr[0]["seeds"], serde_json::json!(["c", "d"]));
+    assert!((arr[0]["threshold"].as_f64().unwrap() - 0.4).abs() < 1e-6);
+
+    // Updating an unknown topic fails.
+    let output = mdvdb_bin()
+        .args(["clusters", "update", "Missing", "--seeds", "x", "--root"])
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn test_clusters_unassigned_json_shape() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    // Impossible floor: everything lands in Unassigned.
+    fs::write(
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\nclustering:\n  topics:\n    min_similarity: 1.0\n  custom:\n    - name: AI\n      seeds: [machine learning]\n",
+    )
+    .unwrap();
+    fs::write(root.join("doc.md"), "# Doc\nSome content").unwrap();
+
+    let output = mdvdb_bin()
+        .args(["ingest", "--root"])
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let output = mdvdb_bin()
+        .args(["clusters", "unassigned", "--json", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "unassigned failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(parsed["count"], 1);
+    assert_eq!(parsed["paths"], serde_json::json!(["doc.md"]));
+}
+
+#[test]
+fn test_config_set_writes_yaml() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+
+    let output = mdvdb_bin()
+        .args(["config", "set", "clustering.algorithm", "kmeans", "--root"])
+        .arg(root)
+        .output()
+        .expect("failed to run");
+    assert!(
+        output.status.success(),
+        "config set failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let content = fs::read_to_string(root.join(".markdownvdb").join("config.yaml")).unwrap();
+    assert!(content.contains("algorithm: kmeans"), "yaml: {content}");
+
+    // Numbers parse as numbers.
+    let output = mdvdb_bin()
+        .args([
+            "config", "set", "clustering.topics.min_similarity", "0.45", "--root",
+        ])
+        .arg(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let content = fs::read_to_string(root.join(".markdownvdb").join("config.yaml")).unwrap();
+    assert!(content.contains("min_similarity: 0.45"), "yaml: {content}");
 }

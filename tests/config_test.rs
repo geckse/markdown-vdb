@@ -40,6 +40,11 @@ const ALL_ENV_VARS: &[&str] = &[
     "MDVDB_SEARCH_EXPAND_GRAPH",
     "MDVDB_SEARCH_EXPAND_LIMIT",
     "MDVDB_CUSTOM_CLUSTERS",
+    "MDVDB_CLUSTERING_ALGORITHM",
+    "MDVDB_CLUSTERING_KNN",
+    "MDVDB_CLUSTERING_RESOLUTION",
+    "MDVDB_CLUSTERING_MIN_CLUSTER_SIZE",
+    "MDVDB_TOPICS_MIN_SIMILARITY",
 ];
 
 /// Clear all MDVDB-related env vars to ensure test isolation.
@@ -1352,4 +1357,280 @@ fn yaml_ignore_patterns_as_list() {
     assert_eq!(config.ignore_patterns, vec!["*.tmp", "drafts/"]);
 
     clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// Clustering Algorithm / Leiden / Topics Config Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn clustering_new_key_defaults() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    let config = Config::load(tmp.path()).unwrap();
+
+    assert_eq!(
+        config.clustering_algorithm,
+        mdvdb::config::ClusteringAlgorithm::Leiden
+    );
+    assert_eq!(config.clustering_knn, 15);
+    assert!((config.clustering_resolution - 1.0).abs() < f64::EPSILON);
+    assert_eq!(config.clustering_min_cluster_size, 2);
+    assert!((config.topics_min_similarity - 0.30).abs() < 1e-6);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn clustering_new_keys_from_yaml() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(
+        tmp.path(),
+        "clustering:\n  algorithm: kmeans\n  knn: 8\n  resolution: 2.5\n  min_cluster_size: 3\n  topics:\n    min_similarity: 0.45\n",
+    );
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(
+        config.clustering_algorithm,
+        mdvdb::config::ClusteringAlgorithm::Kmeans
+    );
+    assert_eq!(config.clustering_knn, 8);
+    assert!((config.clustering_resolution - 2.5).abs() < f64::EPSILON);
+    assert_eq!(config.clustering_min_cluster_size, 3);
+    assert!((config.topics_min_similarity - 0.45).abs() < 1e-6);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn clustering_new_keys_env_overrides() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    std::env::set_var("MDVDB_CLUSTERING_ALGORITHM", "kmeans");
+    std::env::set_var("MDVDB_CLUSTERING_KNN", "20");
+    std::env::set_var("MDVDB_CLUSTERING_RESOLUTION", "0.5");
+    std::env::set_var("MDVDB_CLUSTERING_MIN_CLUSTER_SIZE", "5");
+    std::env::set_var("MDVDB_TOPICS_MIN_SIMILARITY", "0.6");
+
+    let tmp = TempDir::new().unwrap();
+    let config = Config::load(tmp.path()).unwrap();
+
+    assert_eq!(
+        config.clustering_algorithm,
+        mdvdb::config::ClusteringAlgorithm::Kmeans
+    );
+    assert_eq!(config.clustering_knn, 20);
+    assert!((config.clustering_resolution - 0.5).abs() < f64::EPSILON);
+    assert_eq!(config.clustering_min_cluster_size, 5);
+    assert!((config.topics_min_similarity - 0.6).abs() < 1e-6);
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn unknown_clustering_algorithm_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(tmp.path(), "clustering:\n  algorithm: dbscan\n");
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("unknown clustering algorithm"));
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn clustering_knn_out_of_range_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(tmp.path(), "clustering:\n  knn: 1\n");
+    assert!(Config::load(tmp.path()).is_err());
+
+    write_project_yaml(tmp.path(), "clustering:\n  knn: 100\n");
+    assert!(Config::load(tmp.path()).is_err());
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn clustering_resolution_out_of_range_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(tmp.path(), "clustering:\n  resolution: 0.05\n");
+    assert!(Config::load(tmp.path()).is_err());
+
+    write_project_yaml(tmp.path(), "clustering:\n  resolution: 11\n");
+    assert!(Config::load(tmp.path()).is_err());
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn topics_min_similarity_out_of_range_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(tmp.path(), "clustering:\n  topics:\n    min_similarity: 1.5\n");
+    assert!(Config::load(tmp.path()).is_err());
+
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// Topic Definition (description / threshold) Config Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn topic_with_description_only_valid() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(
+        tmp.path(),
+        "clustering:\n  custom:\n    - name: Rust\n      description: Notes about Rust programming\n",
+    );
+
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(config.custom_cluster_defs.len(), 1);
+    let def = &config.custom_cluster_defs[0];
+    assert_eq!(def.name, "Rust");
+    assert_eq!(def.description.as_deref(), Some("Notes about Rust programming"));
+    assert!(def.seeds.is_empty());
+    assert!(def.threshold.is_none());
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn topic_with_neither_description_nor_seeds_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(
+        tmp.path(),
+        "clustering:\n  custom:\n    - name: Empty\n      seeds: []\n",
+    );
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err())
+        .contains("needs a description or at least one seed"));
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn topic_threshold_out_of_range_rejected() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(
+        tmp.path(),
+        "clustering:\n  custom:\n    - name: Rust\n      seeds: [cargo]\n      threshold: 1.2\n",
+    );
+
+    let result = Config::load(tmp.path());
+    assert!(result.is_err());
+    assert!(format!("{}", result.unwrap_err()).contains("threshold"));
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn topic_full_definition_from_yaml() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    let tmp = TempDir::new().unwrap();
+    write_project_yaml(
+        tmp.path(),
+        "clustering:\n  custom:\n    - name: AI\n      description: Machine learning notes\n      seeds: [neural networks, transformers]\n      threshold: 0.4\n",
+    );
+
+    let config = Config::load(tmp.path()).unwrap();
+    let def = &config.custom_cluster_defs[0];
+    assert_eq!(def.description.as_deref(), Some("Machine learning notes"));
+    assert_eq!(def.seeds, vec!["neural networks", "transformers"]);
+    assert!((def.threshold.unwrap() - 0.4).abs() < 1e-6);
+
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// Dual-format MDVDB_CUSTOM_CLUSTERS Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn custom_clusters_env_json_format() {
+    clear_env();
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+    std::env::set_var(
+        "MDVDB_CUSTOM_CLUSTERS",
+        r#"[{"name":"AI","description":"ML notes","seeds":["neural nets"],"threshold":0.4},{"name":"Cooking","seeds":["recipes"]}]"#,
+    );
+
+    let tmp = TempDir::new().unwrap();
+    let config = Config::load(tmp.path()).unwrap();
+
+    assert_eq!(config.custom_cluster_defs.len(), 2);
+    assert_eq!(config.custom_cluster_defs[0].name, "AI");
+    assert_eq!(
+        config.custom_cluster_defs[0].description.as_deref(),
+        Some("ML notes")
+    );
+    assert!((config.custom_cluster_defs[0].threshold.unwrap() - 0.4).abs() < 1e-6);
+    assert_eq!(config.custom_cluster_defs[1].name, "Cooking");
+    assert!(config.custom_cluster_defs[1].description.is_none());
+
+    clear_env();
+}
+
+#[test]
+fn encode_custom_clusters_legacy_roundtrip_unchanged() {
+    let input = "AI Research:machine learning,neural networks|Web Dev:html,css,react";
+    let defs = mdvdb::config_parse_custom_clusters(input);
+    assert_eq!(defs.len(), 2);
+    // Seed-only defs round-trip byte-identically through the legacy format.
+    assert_eq!(mdvdb::config_encode_custom_clusters(&defs), input);
+}
+
+#[test]
+fn encode_custom_clusters_emits_json_when_description_present() {
+    let defs = vec![mdvdb::CustomClusterDef {
+        name: "AI".to_string(),
+        description: Some("ML notes".to_string()),
+        seeds: vec![],
+        threshold: Some(0.4),
+    }];
+    let encoded = mdvdb::config_encode_custom_clusters(&defs);
+    assert!(encoded.starts_with('['), "expected JSON, got: {encoded}");
+    // And it parses back with full fidelity.
+    let parsed = mdvdb::config_parse_custom_clusters(&encoded);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].description.as_deref(), Some("ML notes"));
+    assert!((parsed[0].threshold.unwrap() - 0.4).abs() < 1e-6);
+}
+
+#[test]
+fn parse_custom_clusters_invalid_json_yields_empty() {
+    let defs = mdvdb::config_parse_custom_clusters("[{broken json");
+    assert!(defs.is_empty());
 }

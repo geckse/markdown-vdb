@@ -361,8 +361,9 @@ mod tests {
     fn current_version_passes_version_gate() {
         // With VERSION == 1, a v1 header is the *current* version: it passes the
         // version check and fails later on the (garbage) body — NOT as a version
-        // mismatch. There is no version older than 1, so the
-        // `IndexVersionMismatch` branch (version < VERSION) is unreachable today.
+        // mismatch. Pre-rework index files (old rkyv layout, same version) fail
+        // validated deserialization as IndexCorrupted, which open_or_create also
+        // heals by recreating the index.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("current.idx");
         let mut data = vec![0u8; 128];

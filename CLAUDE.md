@@ -2,7 +2,7 @@
 
 A filesystem-native vector database built around Markdown files. Rust, zero infrastructure, optimized for AI agents.
 
-All 18 implementation phases plus graph-enhanced search are complete and passing (612 tests, clippy clean).
+All 18 implementation phases plus graph-enhanced search and the Leiden/topics clustering rework are complete and passing (942 tests, clippy clean).
 
 ## Architecture
 
@@ -51,7 +51,11 @@ src/
 ├── links.rs             # Link graph extraction, backlinks, orphan detection, multi-hop BFS, neighborhood
 ├── tree.rs              # File tree with sync status indicators
 ├── schema.rs            # Auto-infer + overlay schema system
-├── clustering.rs        # K-means, nearest-centroid, rebalancing, TF-IDF labels
+├── clustering/
+│   ├── mod.rs           # Cluster types, Clusterer facade, stability matching, topics (multi-label)
+│   ├── leiden.rs        # Cosine k-NN graph + seeded Leiden community detection + hierarchy
+│   ├── kmeans.rs        # Seeded K-means fallback (also backs edge clustering)
+│   └── labels.rs        # TF-IDF keywords (unigrams+bigrams, smoothed IDF), label generation
 ├── watcher.rs           # Filesystem watcher (notify + debouncer)
 ├── ingest.rs            # Full + incremental ingestion pipeline
 ├── embedding/
@@ -71,7 +75,7 @@ tests/
 ├── api_test.rs          # Library API integration tests
 ├── cli_test.rs          # CLI binary integration tests
 ├── chunker_test.rs      # Chunking pipeline tests
-├── clustering_test.rs   # K-means clustering tests
+├── clustering_test.rs   # Leiden/K-means + topics clustering tests
 ├── config_test.rs       # Configuration loading tests
 ├── discovery_test.rs    # File discovery tests
 ├── embedding_test.rs    # Embedding provider tests
@@ -91,8 +95,8 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 
 ## Core Design Decisions
 
-- **Config:** YAML config files with deep merge strategy. Resolution: shell env `MDVDB_*` > `.markdownvdb/config.yaml` (project) > `.env` (secrets only) > `~/.mdvdb/config.yaml` (user) > defaults. Legacy dotenv configs are auto-migrated on first load. The YAML config is organized into 7 domains: `embedding` (provider, model, dimensions, batch size), `search` (default limit, mode, weights, decay settings), `chunking` (max tokens, overlap), `clustering` (min/max clusters, custom cluster definitions), `watch` (debounce interval), `index` (directory path), and `sources` (ignore patterns). Multiple YAML files are deep-merged recursively (maps merged key-by-key, scalars overwritten by higher-priority source).
-- **Index directory:** `.markdownvdb/` contains `config.yaml` + `index` (binary: `[64B header][rkyv metadata][usearch HNSW]`) + `fts/` (Tantivy BM25 segments). Configured via `MDVDB_INDEX_DIR` or `index.dir` in YAML.
+- **Config:** YAML config files with deep merge strategy. Resolution: shell env `MDVDB_*` > `.markdownvdb/config.yaml` (project) > `.env` (secrets only) > `~/.mdvdb/config.yaml` (user) > defaults. Legacy dotenv configs are auto-migrated on first load. The YAML config is organized into 7 domains: `embedding` (provider, model, dimensions, batch size), `search` (default limit, mode, weights, decay settings), `chunking` (max tokens, overlap), `clustering` (algorithm, knn, resolution, min_cluster_size, topics defaults, custom topic definitions), `watch` (debounce interval), `index` (directory path), and `sources` (ignore patterns). Multiple YAML files are deep-merged recursively (maps merged key-by-key, scalars overwritten by higher-priority source).
+- **Index directory:** `.markdownvdb/` contains `config.yaml` + `index` (binary: `[64B header][rkyv metadata][usearch HNSW]`; unreadable/outdated index files are deleted and rebuilt on open) + `fts/` (Tantivy BM25 segments). Configured via `MDVDB_INDEX_DIR` or `index.dir` in YAML.
 - **Paths:** ALL file paths in the index are relative to project root. Never absolute.
 - **Errors:** `thiserror` for typed library errors, `anyhow` only at CLI boundary in `main.rs`
 - **Concurrency:** `parking_lot::RwLock` (not std). Read lock for queries, write lock only during upsert.
@@ -101,7 +105,9 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Embeddings:** Trait-based pluggable providers. Batch-first (up to 4 concurrent). Skip unchanged files via SHA-256 hash.
 - **Ignore files:** `.gitignore` respected automatically. `.mdvdbignore` (same syntax) for index-only exclusions. 15 built-in dir ignores always applied. `MDVDB_IGNORE_PATTERNS` env var for additional patterns.
 - **Chunking:** Primary split by headings, secondary token-count size guard. Deterministic `"path#index"` IDs.
-- **Clustering:** Document-level vectors (averaged chunk vectors per file). K-means with cross-cluster TF-IDF keyword extraction. User-defined custom clusters via `clustering.custom` in YAML or `MDVDB_CUSTOM_CLUSTERS` env var (separate layer from auto-clusters).
+- **Clustering:** Document-level vectors (averaged chunk vectors per file, unit-normalized; cosine everywhere). Default algorithm is **Leiden community detection** on an exact cosine k-NN graph (`clustering.algorithm: leiden`, seeded → deterministic); K-means remains as `kmeans` fallback. Cluster ids are **stable across re-clustering** (Jaccard member-overlap matching against the previous state, fresh ids minted from a persisted counter) but NOT contiguous — treat as opaque. One derived parent hierarchy level (`parent_id`/`parent_clusters`) when >6 clusters. Labels via cross-cluster TF-IDF with bigrams and smoothed IDF; each cluster stores a `representative` doc. Zero-norm docs land in `unclustered`.
+- **Topics (custom clusters):** User-defined via `clustering.custom` in YAML (`name` + optional `description` + optional `seeds` + optional `threshold`) or `MDVDB_CUSTOM_CLUSTERS` env var (legacy pipe format or JSON). Centroid = normalize(0.6·embed("name: description") + 0.4·mean(normalized seed embeddings)). Assignment is **multi-label**: a doc joins every topic with cosine ≥ max(topic.threshold, `clustering.topics.min_similarity` [default 0.30]); docs matching nothing go to the explicit **Unassigned** bucket; per-membership similarity scores are persisted. A SHA-256 fingerprint of (defs, floor, model, dims) is stored in the state — any ingest detects definition changes and recomputes centroids/assignments; unchanged defs reuse stored centroids (no provider calls).
+- **CLI:** `mdvdb clusters add|update|remove|list|unassigned` manage topics in `config.yaml`; `mdvdb clusters --custom` shows computed topics; `mdvdb config set <dotted.key> <value>` writes any YAML config key (used by the Tesseract app GUI).
 - **CLI output:** stdout for data (JSON with `--json`, human-readable otherwise), stderr for errors/logs. Search JSON uses wrapped format: `{"results": [...], "query": "...", "total_results": N}`. When `--expand` is used, includes `"graph_context": [...]` with linked-file chunks.
 
 ## Key Conventions
@@ -143,7 +149,8 @@ vdb.preview(reindex, file) // Dry-run: what would ingest do
 vdb.status()            // Index stats (doc/chunk/vector counts)
 vdb.schema()            // Inferred metadata schema
 vdb.clusters()          // Document clusters with labels
-vdb.custom_clusters()   // User-defined custom clusters with assignments
+vdb.custom_clusters()   // User-defined topics with multi-label assignments + scores
+vdb.topic_unassigned()  // Documents matching no topic (Unassigned bucket)
 vdb.file_tree()         // File tree with sync status
 vdb.get_document(path)  // Single document info + frontmatter + modified_at
 vdb.links(path)         // Outgoing + incoming links for a file
@@ -183,7 +190,7 @@ cargo run -- search "query" --json  # Test search
 | Memory mapping | `memmap2` | On-demand index loading via OS page cache |
 | File watching | `notify` + `notify-debouncer-full` | Cross-platform FS events + debouncing |
 | Concurrency | `parking_lot` | Fast RwLock for read-heavy workloads |
-| Clustering | `linfa` + `linfa-clustering` | K-means + nearest-centroid assignment |
+| Clustering | `leiden-rs` + `linfa-clustering` | Leiden community detection (default) + seeded K-means fallback |
 | Async streams | `futures` | Concurrent batch embedding (buffer_unordered) |
 | File scanning | `ignore` | Gitignore-native directory traversal |
 | Hashing | `sha2` | Content change detection (SHA-256) |
@@ -220,3 +227,4 @@ Full specifications for all 18 phases live in `docs/prds/`. These document the d
 | 18 | `phase-18-time-decay.md` | Optional time-based decay for search scores (exponential half-life) |
 | 21 | *(spec)* | Multi-hop graph traversal: BFS link boost, graph context expansion, deep neighborhood |
 | 24 | `phase-24-mdvdbignore.md` | `.mdvdbignore` file support (`.gitignore` syntax, index-only exclusions) |
+| 30 | `phase-30-leiden-clustering-and-topics.md` | Leiden auto-clustering (stable ids, hierarchy, seeded determinism) + multi-label topics (descriptions, thresholds, Unassigned, fingerprint). Supersedes semantics of phases 9 & 27; app counterpart: app repo `phase-40-topics-and-graph-coloring.md` |
