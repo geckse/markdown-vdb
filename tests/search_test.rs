@@ -44,6 +44,7 @@ fn fake_markdown_file_with_mtime(path: &str, hash: &str, frontmatter: Option<ser
         file_size: 100,
         links: Vec::new(),
         modified_at,
+        frontmatter_links: Vec::new(),
     }
 }
 
@@ -951,6 +952,7 @@ fn fake_markdown_file_with_links(
             })
             .collect(),
         modified_at: 0,
+        frontmatter_links: Vec::new(),
     }
 }
 
@@ -1017,7 +1019,7 @@ async fn test_graph_expansion_disabled() {
     );
 
     // Build and store link graph.
-    let graph = links::build_link_graph(&[file_a, file_b, file_c]);
+    let graph = links::build_link_graph(&[file_a, file_b, file_c], &mdvdb::relations::RelationContext::empty());
     index.update_link_graph(Some(graph));
 
     // Search with expand_graph=0 (explicit).
@@ -1054,7 +1056,7 @@ async fn test_graph_expansion_returns_items() {
     );
 
     // Build and store link graph.
-    let graph = links::build_link_graph(&[file_a, file_b, file_c]);
+    let graph = links::build_link_graph(&[file_a, file_b, file_c], &mdvdb::relations::RelationContext::empty());
     index.update_link_graph(Some(graph));
 
     // Search with expand_graph=1.
@@ -1107,7 +1109,7 @@ async fn test_graph_expansion_no_duplicates() {
         &index, "d.md", "h4", Some(json!({"title": "D"})), 2, &[],
     );
 
-    let graph = links::build_link_graph(&[file_a, file_b, file_c, file_d]);
+    let graph = links::build_link_graph(&[file_a, file_b, file_c, file_d], &mdvdb::relations::RelationContext::empty());
     index.update_link_graph(Some(graph));
 
     // Search with expand_graph=2 for wider reach.
@@ -1174,7 +1176,7 @@ async fn test_multihop_boost_reorders() {
         &index, "alone.md", "h4", Some(json!({"title": "Alone"})), 1, &[],
     );
 
-    let graph = links::build_link_graph(&[file_hub, file_mid, file_far, file_alone]);
+    let graph = links::build_link_graph(&[file_hub, file_mid, file_far, file_alone], &mdvdb::relations::RelationContext::empty());
     index.update_link_graph(Some(graph));
 
     // Search with 1-hop boost — only direct neighbors of top results get boosted.

@@ -17,10 +17,14 @@ pub struct LinkEntry {
     pub target: String,
     /// Display text of the link.
     pub text: String,
-    /// Line number in source file (1-based).
+    /// Line number in source file (1-based). `0` for frontmatter relations
+    /// (YAML parsing loses per-key line info) — invariant: `field != null ⇔ line_number == 0`.
     pub line_number: usize,
     /// Whether this was a [[wikilink]].
     pub is_wikilink: bool,
+    /// Originating frontmatter field for relation edges; `None` = body link.
+    /// Serialized as an always-present JSON key (`"field": null` for body links).
+    pub field: Option<String>,
 }
 
 /// A semantic edge representing a link with its surrounding paragraph context.
@@ -166,6 +170,16 @@ pub fn edge_id(source: &str, target: &str, line_number: usize) -> String {
     format!("edge:{}->{}@{}", source, target, line_number)
 }
 
+/// Edge id for a link-graph entry. Frontmatter relation entries use a
+/// field-qualified suffix (`@fm.<field>` instead of `@<line>`) so two different
+/// fields linking the same target cannot collide at the shared `line_number: 0`.
+pub fn entry_edge_id(entry: &LinkEntry) -> String {
+    match &entry.field {
+        Some(field) => format!("edge:{}->{}@fm.{}", entry.source, entry.target, field),
+        None => edge_id(&entry.source, &entry.target, entry.line_number),
+    }
+}
+
 /// Resolve a raw link target relative to the source file's directory.
 ///
 /// Normalizes path components (`.`, `..`, separators) and ensures `.md` extension.
@@ -200,7 +214,7 @@ pub fn resolve_link(source: &str, target: &str) -> String {
 }
 
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
-fn normalize_path(path: &Path) -> PathBuf {
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
     let mut components = Vec::new();
     for component in path.components() {
         match component {
@@ -214,42 +228,81 @@ fn normalize_path(path: &Path) -> PathBuf {
     components.iter().collect()
 }
 
+/// Build the deduplicated link entries for a single file: body links first,
+/// then frontmatter relations (tagged with their originating `field`).
+///
+/// The dedup key is `(target, field)` so a body link and a frontmatter relation
+/// to the same target coexist, while duplicate values within one field dedupe.
+/// Self-links and empty targets are skipped on both paths.
+fn build_entries_for_file(
+    file: &MarkdownFile,
+    ctx: &crate::relations::RelationContext,
+) -> (String, Vec<LinkEntry>) {
+    let source = file.path.to_string_lossy().replace('\\', "/");
+    let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
+    let mut entries = Vec::new();
+
+    for raw_link in &file.links {
+        let resolved = resolve_link(&source, &raw_link.target);
+        if resolved.is_empty() {
+            continue;
+        }
+        if resolved == source {
+            continue;
+        }
+        if !seen.insert((resolved.clone(), None)) {
+            continue;
+        }
+        entries.push(LinkEntry {
+            source: source.clone(),
+            target: resolved,
+            text: raw_link.text.clone(),
+            line_number: raw_link.line_number,
+            is_wikilink: raw_link.is_wikilink,
+            field: None,
+        });
+    }
+
+    for fm_link in &file.frontmatter_links {
+        let target_folder = ctx.target_for(&source, &fm_link.field);
+        let Some((resolved, _exists)) = crate::relations::resolve_relation_target(
+            &source,
+            &fm_link.target,
+            target_folder.as_deref(),
+            &ctx.known_files,
+        ) else {
+            continue;
+        };
+        if resolved == source {
+            continue;
+        }
+        if !seen.insert((resolved.clone(), Some(fm_link.field.clone()))) {
+            continue;
+        }
+        entries.push(LinkEntry {
+            source: source.clone(),
+            target: resolved,
+            text: fm_link.text.clone(),
+            line_number: 0,
+            is_wikilink: fm_link.is_wikilink,
+            field: Some(fm_link.field.clone()),
+        });
+    }
+
+    (source, entries)
+}
+
 /// Build a link graph from parsed markdown files.
 ///
-/// Deduplicates same-target links within a file and excludes self-links.
-pub fn build_link_graph(files: &[MarkdownFile]) -> LinkGraph {
+/// Includes body links and frontmatter relations (see [`build_entries_for_file`]).
+pub fn build_link_graph(
+    files: &[MarkdownFile],
+    ctx: &crate::relations::RelationContext,
+) -> LinkGraph {
     let mut forward: HashMap<String, Vec<LinkEntry>> = HashMap::new();
 
     for file in files {
-        let source = file.path.to_string_lossy().replace('\\', "/");
-        let mut seen_targets: HashSet<String> = HashSet::new();
-        let mut entries = Vec::new();
-
-        for raw_link in &file.links {
-            let resolved = resolve_link(&source, &raw_link.target);
-            if resolved.is_empty() {
-                continue;
-            }
-
-            // Skip self-links
-            if resolved == source {
-                continue;
-            }
-
-            // Deduplicate by target
-            if !seen_targets.insert(resolved.clone()) {
-                continue;
-            }
-
-            entries.push(LinkEntry {
-                source: source.clone(),
-                target: resolved,
-                text: raw_link.text.clone(),
-                line_number: raw_link.line_number,
-                is_wikilink: raw_link.is_wikilink,
-            });
-        }
-
+        let (source, entries) = build_entries_for_file(file, ctx);
         if !entries.is_empty() {
             forward.insert(source, entries);
         }
@@ -408,36 +461,18 @@ pub fn find_orphans(
 
 /// Update link entries for a single file (incremental update).
 ///
-/// Replaces the forward links for the given file in the graph.
-pub fn update_file_links(graph: &mut LinkGraph, file: &MarkdownFile) {
-    let source = file.path.to_string_lossy().replace('\\', "/");
+/// Replaces the forward links (body + frontmatter relations) for the given file
+/// in the graph. A file whose links were all removed drops out of the graph —
+/// call this unconditionally, not gated on the file still having links.
+pub fn update_file_links(
+    graph: &mut LinkGraph,
+    file: &MarkdownFile,
+    ctx: &crate::relations::RelationContext,
+) {
+    let (source, entries) = build_entries_for_file(file, ctx);
 
     // Remove old entries
     graph.forward.remove(&source);
-
-    // Build new entries
-    let mut seen_targets: HashSet<String> = HashSet::new();
-    let mut entries = Vec::new();
-
-    for raw_link in &file.links {
-        let resolved = resolve_link(&source, &raw_link.target);
-        if resolved.is_empty() {
-            continue;
-        }
-        if resolved == source {
-            continue;
-        }
-        if !seen_targets.insert(resolved.clone()) {
-            continue;
-        }
-        entries.push(LinkEntry {
-            source: source.clone(),
-            target: resolved,
-            text: raw_link.text.clone(),
-            line_number: raw_link.line_number,
-            is_wikilink: raw_link.is_wikilink,
-        });
-    }
 
     if !entries.is_empty() {
         graph.forward.insert(source, entries);
@@ -637,6 +672,27 @@ mod tests {
             file_size: 0,
             links,
             modified_at: 0,
+            frontmatter_links: Vec::new(),
+        }
+    }
+
+    fn make_file_with_fm_links(
+        path: &str,
+        links: Vec<RawLink>,
+        fm_links: Vec<crate::parser::FrontmatterLink>,
+    ) -> MarkdownFile {
+        let mut file = make_file(path, links);
+        file.frontmatter_links = fm_links;
+        file
+    }
+
+    fn make_fm_link(field: &str, target: &str) -> crate::parser::FrontmatterLink {
+        crate::parser::FrontmatterLink {
+            field: field.to_string(),
+            raw: format!("[[{target}]]"),
+            target: target.to_string(),
+            text: target.to_string(),
+            is_wikilink: true,
         }
     }
 
@@ -647,6 +703,10 @@ mod tests {
             line_number: line,
             is_wikilink: wikilink,
         }
+    }
+
+    fn empty_ctx() -> crate::relations::RelationContext {
+        crate::relations::RelationContext::empty()
     }
 
     // --- edge_id tests ---
@@ -741,7 +801,7 @@ mod tests {
 
     #[test]
     fn link_graph_new_fields_default_none() {
-        let graph = build_link_graph(&[]);
+        let graph = build_link_graph(&[], &empty_ctx());
         assert!(graph.semantic_edges.is_none());
         assert!(graph.edge_cluster_state.is_none());
     }
@@ -799,7 +859,7 @@ mod tests {
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
             make_file("b.md", vec![make_link("a", "A", 1, true)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
 
         assert_eq!(graph.forward.len(), 2);
         assert_eq!(graph.forward["a.md"].len(), 1);
@@ -816,20 +876,20 @@ mod tests {
                 make_link("b", "B2", 5, false),
             ],
         )];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         assert_eq!(graph.forward["a.md"].len(), 1);
     }
 
     #[test]
     fn build_graph_excludes_self_links() {
         let files = vec![make_file("a.md", vec![make_link("a", "self", 1, false)])];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         assert!(graph.forward.is_empty());
     }
 
     #[test]
     fn build_graph_empty() {
-        let graph = build_link_graph(&[]);
+        let graph = build_link_graph(&[], &empty_ctx());
         assert!(graph.forward.is_empty());
     }
 
@@ -841,7 +901,7 @@ mod tests {
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
             make_file("c.md", vec![make_link("b", "B", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         assert_eq!(backlinks["b.md"].len(), 2);
@@ -861,7 +921,7 @@ mod tests {
                 make_link("missing", "M", 2, false),
             ],
         )];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
         let known: HashSet<String> = ["a.md", "b.md"].iter().map(|s| s.to_string()).collect();
 
@@ -882,7 +942,7 @@ mod tests {
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
             make_file("c.md", vec![make_link("b", "B", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
         let known: HashSet<String> = ["a.md", "b.md", "c.md"].iter().map(|s| s.to_string()).collect();
 
@@ -895,7 +955,7 @@ mod tests {
     #[test]
     fn find_orphans_identifies_disconnected_files() {
         let files = vec![make_file("a.md", vec![make_link("b", "B", 1, false)])];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let all: HashSet<String> = ["a.md", "b.md", "orphan.md"]
             .iter()
             .map(|s| s.to_string())
@@ -912,7 +972,7 @@ mod tests {
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
             make_file("b.md", vec![make_link("a", "A", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let all: HashSet<String> = ["a.md", "b.md"].iter().map(|s| s.to_string()).collect();
 
         let orphans = find_orphans(&graph, &all);
@@ -924,11 +984,11 @@ mod tests {
     #[test]
     fn update_file_links_replaces_entries() {
         let files = vec![make_file("a.md", vec![make_link("b", "B", 1, false)])];
-        let mut graph = build_link_graph(&files);
+        let mut graph = build_link_graph(&files, &empty_ctx());
         assert_eq!(graph.forward["a.md"][0].target, "b.md");
 
         let updated = make_file("a.md", vec![make_link("c", "C", 1, false)]);
-        update_file_links(&mut graph, &updated);
+        update_file_links(&mut graph, &updated, &empty_ctx());
 
         assert_eq!(graph.forward["a.md"][0].target, "c.md");
     }
@@ -936,12 +996,193 @@ mod tests {
     #[test]
     fn update_file_links_removes_when_no_links() {
         let files = vec![make_file("a.md", vec![make_link("b", "B", 1, false)])];
-        let mut graph = build_link_graph(&files);
+        let mut graph = build_link_graph(&files, &empty_ctx());
 
         let updated = make_file("a.md", vec![]);
-        update_file_links(&mut graph, &updated);
+        update_file_links(&mut graph, &updated, &empty_ctx());
 
         assert!(!graph.forward.contains_key("a.md"));
+    }
+
+    // --- frontmatter relation edge tests (phase 31) ---
+
+    fn ctx_with_known(paths: &[&str]) -> crate::relations::RelationContext {
+        crate::relations::RelationContext::new(
+            paths.iter().map(|s| s.to_string()).collect(),
+            None,
+        )
+    }
+
+    #[test]
+    fn build_graph_tags_relation_edges() {
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![],
+            vec![make_fm_link("client", "clients/acme")],
+        )];
+        let graph = build_link_graph(&files, &ctx_with_known(&["clients/acme.md"]));
+        let entries = &graph.forward["invoices/i1.md"];
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].target, "clients/acme.md");
+        assert_eq!(entries[0].field.as_deref(), Some("client"));
+        assert_eq!(entries[0].line_number, 0);
+        assert!(entries[0].is_wikilink);
+    }
+
+    #[test]
+    fn build_graph_body_and_relation_to_same_target_both_kept() {
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![make_link("../clients/acme", "acme", 5, true)],
+            vec![make_fm_link("client", "clients/acme")],
+        )];
+        let graph = build_link_graph(&files, &ctx_with_known(&["clients/acme.md"]));
+        let entries = &graph.forward["invoices/i1.md"];
+        assert_eq!(entries.len(), 2);
+        let body = entries.iter().find(|e| e.field.is_none()).unwrap();
+        let relation = entries.iter().find(|e| e.field.is_some()).unwrap();
+        assert_eq!(body.target, "clients/acme.md");
+        assert_eq!(body.line_number, 5);
+        assert_eq!(relation.target, "clients/acme.md");
+        assert_eq!(relation.line_number, 0);
+    }
+
+    #[test]
+    fn build_graph_dedupes_within_field_keeps_across_fields() {
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![],
+            vec![
+                make_fm_link("client", "clients/acme"),
+                make_fm_link("client", "clients/acme"), // duplicate value in one field
+                make_fm_link("owner", "clients/acme"),  // different field, same target
+            ],
+        )];
+        let graph = build_link_graph(&files, &ctx_with_known(&["clients/acme.md"]));
+        let entries = &graph.forward["invoices/i1.md"];
+        assert_eq!(entries.len(), 2);
+        let fields: Vec<&str> = entries.iter().filter_map(|e| e.field.as_deref()).collect();
+        assert!(fields.contains(&"client"));
+        assert!(fields.contains(&"owner"));
+    }
+
+    #[test]
+    fn build_graph_skips_self_relation() {
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![],
+            vec![make_fm_link("parent", "invoices/i1")],
+        )];
+        let graph = build_link_graph(&files, &ctx_with_known(&["invoices/i1.md"]));
+        assert!(graph.forward.is_empty());
+    }
+
+    #[test]
+    fn build_graph_resolves_via_overlay_target_folder() {
+        use crate::schema::{OverlayField, OverlaySchema, ScopeOverlay};
+        let mut scope_fields = std::collections::HashMap::new();
+        scope_fields.insert(
+            "client".to_string(),
+            OverlayField {
+                description: None,
+                field_type: Some("relation".to_string()),
+                allowed_values: None,
+                required: None,
+                target: Some("clients".to_string()),
+            },
+        );
+        let mut scopes = std::collections::HashMap::new();
+        scopes.insert("invoices/".to_string(), ScopeOverlay { fields: scope_fields });
+        let overlay = OverlaySchema {
+            fields: std::collections::HashMap::new(),
+            scopes,
+        };
+        let ctx = crate::relations::RelationContext::new(
+            ["clients/acme.md".to_string()].into_iter().collect(),
+            Some(overlay),
+        );
+
+        // Bare [[acme]] resolves through the declared target folder.
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![],
+            vec![make_fm_link("client", "acme")],
+        )];
+        let graph = build_link_graph(&files, &ctx);
+        let entries = &graph.forward["invoices/i1.md"];
+        assert_eq!(entries[0].target, "clients/acme.md");
+        assert_eq!(entries[0].field.as_deref(), Some("client"));
+    }
+
+    #[test]
+    fn update_file_links_removes_last_relation() {
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![],
+            vec![make_fm_link("client", "clients/acme")],
+        )];
+        let mut graph = build_link_graph(&files, &empty_ctx());
+        assert!(graph.forward.contains_key("invoices/i1.md"));
+
+        // Frontmatter link removed → file drops out of the graph entirely.
+        let updated = make_file("invoices/i1.md", vec![]);
+        update_file_links(&mut graph, &updated, &empty_ctx());
+        assert!(!graph.forward.contains_key("invoices/i1.md"));
+    }
+
+    #[test]
+    fn entry_edge_id_field_qualified_for_relations() {
+        let body = LinkEntry {
+            source: "a.md".into(),
+            target: "b.md".into(),
+            text: "b".into(),
+            line_number: 7,
+            is_wikilink: false,
+            field: None,
+        };
+        assert_eq!(entry_edge_id(&body), "edge:a.md->b.md@7");
+
+        let relation = LinkEntry {
+            source: "a.md".into(),
+            target: "b.md".into(),
+            text: "b".into(),
+            line_number: 0,
+            is_wikilink: true,
+            field: Some("client".into()),
+        };
+        assert_eq!(entry_edge_id(&relation), "edge:a.md->b.md@fm.client");
+    }
+
+    #[test]
+    fn link_entry_field_serializes_always_present() {
+        let entry = LinkEntry {
+            source: "a.md".into(),
+            target: "b.md".into(),
+            text: "b".into(),
+            line_number: 1,
+            is_wikilink: false,
+            field: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.as_object().unwrap().contains_key("field"));
+        assert!(json["field"].is_null());
+    }
+
+    #[test]
+    fn frontmatter_only_referenced_doc_is_not_orphan() {
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![],
+            vec![make_fm_link("client", "clients/acme")],
+        )];
+        let graph = build_link_graph(&files, &ctx_with_known(&["clients/acme.md", "invoices/i1.md"]));
+        let all: HashSet<String> = ["invoices/i1.md", "clients/acme.md", "orphan.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let orphans = find_orphans(&graph, &all);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].path, "orphan.md");
     }
 
     // --- remove_file_links tests ---
@@ -949,7 +1190,7 @@ mod tests {
     #[test]
     fn remove_file_links_removes_entries() {
         let files = vec![make_file("a.md", vec![make_link("b", "B", 1, false)])];
-        let mut graph = build_link_graph(&files);
+        let mut graph = build_link_graph(&files, &empty_ctx());
         assert!(graph.forward.contains_key("a.md"));
 
         remove_file_links(&mut graph, "a.md");
@@ -965,7 +1206,7 @@ mod tests {
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
             make_file("b.md", vec![make_link("c", "C", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         let neighbors = bfs_neighbors(
@@ -987,7 +1228,7 @@ mod tests {
             make_file("b.md", vec![make_link("c", "C", 1, false)]),
             make_file("c.md", vec![make_link("d", "D", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         let neighbors = bfs_neighbors(
@@ -1013,7 +1254,7 @@ mod tests {
             make_file("c.md", vec![make_link("d", "D", 1, false)]),
             make_file("d.md", vec![make_link("e", "E", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         let neighbors = bfs_neighbors(
@@ -1041,7 +1282,7 @@ mod tests {
             make_file("c.md", vec![make_link("d", "D", 1, false)]),
             make_file("d.md", vec![make_link("a", "A", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         // With max_depth 3, BFS should not loop forever
@@ -1069,7 +1310,7 @@ mod tests {
         let files = vec![
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         let neighbors = bfs_neighbors(
@@ -1093,7 +1334,7 @@ mod tests {
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
             make_file("c.md", vec![make_link("a", "A", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         let neighbors = bfs_neighbors(
@@ -1114,7 +1355,7 @@ mod tests {
         let files = vec![
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         let neighbors = bfs_neighbors(&graph, &backlinks, &[], 2);
@@ -1124,7 +1365,7 @@ mod tests {
 
     #[test]
     fn bfs_empty_graph() {
-        let graph = build_link_graph(&[]);
+        let graph = build_link_graph(&[], &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
         let neighbors = bfs_neighbors(
@@ -1149,7 +1390,7 @@ mod tests {
             ]),
             make_file("d.md", vec![make_link("a", "A", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let known: HashSet<String> = ["a.md", "b.md", "c.md", "d.md"]
             .iter()
             .map(|s| s.to_string())
@@ -1189,7 +1430,7 @@ mod tests {
             make_file("d.md", vec![make_link("a", "A", 1, false)]),
             make_file("e.md", vec![make_link("d", "D", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let known: HashSet<String> = ["a.md", "b.md", "c.md", "d.md", "e.md"]
             .iter()
             .map(|s| s.to_string())
@@ -1224,7 +1465,7 @@ mod tests {
             make_file("b.md", vec![make_link("c", "C", 1, false)]),
             make_file("c.md", vec![make_link("a", "A", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let known: HashSet<String> = ["a.md", "b.md", "c.md"]
             .iter()
             .map(|s| s.to_string())
@@ -1255,7 +1496,7 @@ mod tests {
         let files = vec![
             make_file("a.md", vec![make_link("b", "B", 1, false)]),
         ];
-        let graph = build_link_graph(&files);
+        let graph = build_link_graph(&files, &empty_ctx());
         let known: HashSet<String> = ["a.md", "b.md"]
             .iter()
             .map(|s| s.to_string())

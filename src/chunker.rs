@@ -347,6 +347,7 @@ mod tests {
             file_size: body.len() as u64,
             links: Vec::new(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
         }
     }
 

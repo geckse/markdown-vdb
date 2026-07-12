@@ -2,7 +2,7 @@
 
 A filesystem-native vector database built around Markdown files. Rust, zero infrastructure, optimized for AI agents.
 
-All 18 implementation phases plus graph-enhanced search and the Leiden/topics clustering rework are complete and passing (942 tests, clippy clean).
+All 18 implementation phases plus graph-enhanced search, the Leiden/topics clustering rework, and frontmatter relations (phase 31) are complete and passing (1032 tests, clippy clean).
 
 ## Architecture
 
@@ -49,6 +49,7 @@ src/
 ├── search.rs            # Query pipeline, metadata filtering, time decay, graph expansion, results
 ├── fts.rs               # Full-text search (Tantivy BM25 wrapper)
 ├── links.rs             # Link graph extraction, backlinks, orphan detection, multi-hop BFS, neighborhood
+├── relations.rs         # Frontmatter relations: link-shape predicate, 3-step target resolution, RelationValue/ReferencedBy
 ├── tree.rs              # File tree with sync status indicators
 ├── schema.rs            # Auto-infer + overlay schema system
 ├── clustering/
@@ -85,6 +86,7 @@ tests/
 ├── ingest_test.rs       # Ingestion pipeline tests
 ├── links_test.rs        # Link graph + backlinks tests
 ├── parser_test.rs       # Markdown parsing tests
+├── relations_test.rs    # Frontmatter relations (populate, graph edges, filters, doctor) tests
 ├── schema_test.rs       # Schema inference tests
 ├── search_test.rs       # Search engine + time decay tests
 ├── tree_test.rs         # File tree tests
@@ -102,6 +104,7 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Concurrency:** `parking_lot::RwLock` (not std). Read lock for queries, write lock only during upsert.
 - **Writes:** Always atomic — write to `.tmp`, fsync, rename. Never write directly to index file.
 - **Frontmatter:** Read-only. The system NEVER writes to markdown files. All computed data lives in the index.
+- **Relations (phase 31):** Whole-value frontmatter links (`client: "[[clients/acme]]"`, markdown links, bare `.md` paths) are foreign keys. Detection is **value-driven** (never schema-driven — persisted schemas go stale after single-file ingest); the schema contributes only the `Relation` label (`FieldType::Relation`, PascalCase `"Relation"`) and the overlay-declared `relation_target` folder (slash-less; overlay key `target:`, `type:` accepted as alias for `field_type:`). Resolution order for frontmatter targets: contains `/` → root-relative (source-dir fallback) → overlay target folder → source-dir-relative; body-link resolution is unchanged. Relation edges join the link graph as `LinkEntry`s tagged with `field` + `line_number: 0` sentinel (`field != null ⇔ line_number == 0`; dedup key `(target, field)`; edge id `@fm.<field>`), so backlinks/orphans/boost/`--expand` see them with zero changes. `--populate` on `get`/`collection`/`search` resolves values to `RelationValue {raw, path, exists, title, frontmatter}` (depth 1, never nested; `frontmatter` and `field` are always-present JSON keys — do NOT skip-serialize); `get --populate` adds `referenced_by` sorted by `(source, field)`. Collection populates page rows only; `rows[].frontmatter` stays raw. `Equals`/`In` filters normalize relation syntax at match time (purely syntactic). Doctor has a "Relations" check (dangling targets, overlay hygiene, unquoted-`[[x]]` YAML footgun). Full spec: `docs/prds/phase-31-frontmatter-relations.md` (app counterpart: `app/docs/prds/phase-42-frontmatter-relations.md`).
 - **Embeddings:** Trait-based pluggable providers. Batch-first (up to 4 concurrent). Skip unchanged files via SHA-256 hash.
 - **Ignore files:** `.gitignore` respected automatically. `.mdvdbignore` (same syntax) for index-only exclusions. 15 built-in dir ignores always applied. `MDVDB_IGNORE_PATTERNS` env var for additional patterns.
 - **Chunking:** Primary split by headings, secondary token-count size guard. Deterministic `"path#index"` IDs.
@@ -153,6 +156,7 @@ vdb.custom_clusters()   // User-defined topics with multi-label assignments + sc
 vdb.topic_unassigned()  // Documents matching no topic (Unassigned bucket)
 vdb.file_tree()         // File tree with sync status
 vdb.get_document(path)  // Single document info + frontmatter + modified_at
+vdb.get_document_populated(path) // + resolved relations map + referenced_by (reverse lookups)
 vdb.links(path)         // Outgoing + incoming links for a file
 vdb.links_neighborhood(path, depth) // Multi-hop link tree (depth 1-3)
 vdb.orphans()           // Files with no links
@@ -161,7 +165,7 @@ vdb.watch(cancel)       // File watcher with CancellationToken
 vdb.config()            // Access current config
 ```
 
-Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `SearchResponse`, `GraphContextItem`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `CustomClusterDef`, `CustomClusterInfo`, `CustomClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`, `NeighborhoodNode`, `NeighborhoodResult`.
+Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `SearchResponse`, `GraphContextItem`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `CustomClusterDef`, `CustomClusterInfo`, `CustomClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`, `NeighborhoodNode`, `NeighborhoodResult`, `RelationValue`, `ReferencedBy`, `RelationContext`, `FrontmatterLink`.
 
 ## Development Workflow
 
@@ -228,3 +232,4 @@ Full specifications for all 18 phases live in `docs/prds/`. These document the d
 | 21 | *(spec)* | Multi-hop graph traversal: BFS link boost, graph context expansion, deep neighborhood |
 | 24 | `phase-24-mdvdbignore.md` | `.mdvdbignore` file support (`.gitignore` syntax, index-only exclusions) |
 | 30 | `phase-30-leiden-clustering-and-topics.md` | Leiden auto-clustering (stable ids, hierarchy, seeded determinism) + multi-label topics (descriptions, thresholds, Unassigned, fingerprint). Supersedes semantics of phases 9 & 27; app counterpart: app repo `phase-40-topics-and-graph-coloring.md` |
+| 31 | `phase-31-frontmatter-relations.md` | Frontmatter relations (wiki-link foreign keys): `FieldType::Relation` + overlay `target:`, field-tagged link-graph edges, `--populate` (RelationValue + referenced_by), relation-aware filters, doctor Relations check. App counterpart: app repo `phase-42-frontmatter-relations.md` |

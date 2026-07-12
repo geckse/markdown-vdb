@@ -522,6 +522,45 @@ pub fn print_document(doc: &DocumentInfo) {
             }
         }
     }
+
+    // Relations (populate only).
+    if let Some(relations) = &doc.relations {
+        if !relations.is_empty() {
+            println!();
+            println!("  {}", "Relations:".cyan());
+            for (field, values) in relations {
+                for value in values {
+                    let path = value.path.as_deref().unwrap_or("(unresolved)");
+                    let status = if value.exists {
+                        format!(
+                            "{} {}",
+                            "✓".green(),
+                            value.title.as_deref().unwrap_or_default()
+                        )
+                    } else {
+                        format!("{} {}", "✗".red(), "missing".red())
+                    };
+                    println!("    {} → {}  {}", field.dimmed(), path.bold(), status);
+                }
+            }
+        }
+    }
+
+    // Referenced by (populate only).
+    if let Some(referenced_by) = &doc.referenced_by {
+        if !referenced_by.is_empty() {
+            println!();
+            println!("  {}", "Referenced by:".cyan());
+            for entry in referenced_by {
+                println!(
+                    "    {}  {}  {}",
+                    entry.source.bold(),
+                    format!("({})", entry.field).dimmed(),
+                    entry.title.dimmed()
+                );
+            }
+        }
+    }
     println!();
 }
 
@@ -552,14 +591,18 @@ pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
     );
 
     for field in &schema.fields {
-        // Field type display
+        // Field type display (relation columns show their declared target folder)
         let type_str = match &field.field_type {
-            FieldType::String => "string",
-            FieldType::Number => "number",
-            FieldType::Boolean => "boolean",
-            FieldType::List => "list",
-            FieldType::Date => "date",
-            FieldType::Mixed => "mixed",
+            FieldType::String => "string".to_string(),
+            FieldType::Number => "number".to_string(),
+            FieldType::Boolean => "boolean".to_string(),
+            FieldType::List => "list".to_string(),
+            FieldType::Date => "date".to_string(),
+            FieldType::Mixed => "mixed".to_string(),
+            FieldType::Relation => match &field.relation_target {
+                Some(target) => format!("relation → {target}"),
+                None => "relation".to_string(),
+            },
         };
 
         // Occurrence bar: 20-char width, proportional to total_docs
@@ -637,12 +680,16 @@ pub fn print_collection(resp: &CollectionResponse) {
     } else {
         for col in &resp.columns {
             let type_str = match &col.field_type {
-                FieldType::String => "string",
-                FieldType::Number => "number",
-                FieldType::Boolean => "boolean",
-                FieldType::List => "list",
-                FieldType::Date => "date",
-                FieldType::Mixed => "mixed",
+                FieldType::String => "string".to_string(),
+                FieldType::Number => "number".to_string(),
+                FieldType::Boolean => "boolean".to_string(),
+                FieldType::List => "list".to_string(),
+                FieldType::Date => "date".to_string(),
+                FieldType::Mixed => "mixed".to_string(),
+                FieldType::Relation => match &col.relation_target {
+                    Some(target) => format!("relation → {target}"),
+                    None => "relation".to_string(),
+                },
             };
             let required_tag = if col.required {
                 format!(" {}", "[required]".yellow())
@@ -863,6 +910,9 @@ pub fn print_links(result: &LinkQueryResult) {
         if link.entry.is_wikilink {
             badges.push_str(&format!(" {}", "[wikilink]".blue()));
         }
+        if let Some(field) = &link.entry.field {
+            badges.push_str(&format!(" {}", format!("({field})").dimmed()));
+        }
 
         println!(
             "  {} {} {}{}",
@@ -874,7 +924,7 @@ pub fn print_links(result: &LinkQueryResult) {
         println!(
             "  {}   {}",
             if i == outgoing_count - 1 { " " } else { "│" }.dimmed(),
-            format!("line {}", link.entry.line_number).dimmed()
+            link_location(&link.entry).dimmed()
         );
     }
 
@@ -903,6 +953,9 @@ pub fn print_links(result: &LinkQueryResult) {
         if entry.is_wikilink {
             badges.push_str(&format!(" {}", "[wikilink]".blue()));
         }
+        if let Some(field) = &entry.field {
+            badges.push_str(&format!(" {}", format!("({field})").dimmed()));
+        }
 
         println!(
             "  {} {} {}{}",
@@ -914,7 +967,7 @@ pub fn print_links(result: &LinkQueryResult) {
         println!(
             "  {}   {}",
             if i == incoming_count - 1 { " " } else { "│" }.dimmed(),
-            format!("line {}", entry.line_number).dimmed()
+            link_location(entry).dimmed()
         );
     }
 
@@ -975,6 +1028,9 @@ pub fn print_backlinks(file_path: &str, backlinks: &[ResolvedLink]) {
         if link.entry.is_wikilink {
             badges.push_str(&format!(" {}", "[wikilink]".blue()));
         }
+        if let Some(field) = &link.entry.field {
+            badges.push_str(&format!(" {}", format!("({field})").dimmed()));
+        }
 
         println!(
             "  {} {} {}{}",
@@ -986,11 +1042,21 @@ pub fn print_backlinks(file_path: &str, backlinks: &[ResolvedLink]) {
         println!(
             "  {}   {}",
             if i == backlinks.len() - 1 { " " } else { "│" }.dimmed(),
-            format!("line {}", link.entry.line_number).dimmed()
+            link_location(&link.entry).dimmed()
         );
     }
 
     println!();
+}
+
+/// Human-readable location of a link entry: `line N` for body links,
+/// `frontmatter` for relation entries (which carry the `line_number: 0` sentinel).
+fn link_location(entry: &mdvdb::links::LinkEntry) -> String {
+    if entry.field.is_some() {
+        "frontmatter".to_string()
+    } else {
+        format!("line {}", entry.line_number)
+    }
 }
 
 /// Print orphan files (files with no incoming or outgoing links).

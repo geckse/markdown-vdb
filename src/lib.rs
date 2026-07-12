@@ -10,6 +10,7 @@ pub mod logging;
 pub mod parser;
 pub mod ingest;
 pub mod links;
+pub mod relations;
 pub mod schema;
 pub mod search;
 pub mod tree;
@@ -29,7 +30,8 @@ pub use links::{
     EdgeClusterInfo, EdgeClusterState, LinkEntry, LinkGraph, LinkQueryResult, LinkState,
     NeighborhoodNode, NeighborhoodResult, OrphanFile, ResolvedLink, SemanticEdge,
 };
-pub use parser::LinkContext;
+pub use parser::{FrontmatterLink, LinkContext};
+pub use relations::{ReferencedBy, RelationContext, RelationValue};
 pub use tree::{FileState, FileTree, FileTreeNode};
 pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
 // Graph visualization types are defined in this file and automatically public.
@@ -213,6 +215,14 @@ pub struct DocumentInfo {
     pub indexed_at: u64,
     /// Filesystem modification time as Unix timestamp, if available.
     pub modified_at: Option<u64>,
+    /// Resolved frontmatter relations, keyed by field name (alphabetical).
+    /// Present iff populate was requested (`{}` when empty, key absent otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relations: Option<std::collections::BTreeMap<String, Vec<relations::RelationValue>>>,
+    /// Reverse relation lookups (documents referencing this one via frontmatter),
+    /// sorted by `(source, field)`. Present iff populate was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referenced_by: Option<Vec<relations::ReferencedBy>>,
 }
 
 /// How a collection row's title was derived.
@@ -242,6 +252,8 @@ pub struct CollectionQuery {
     pub limit: Option<usize>,
     /// Number of rows to skip (for pagination).
     pub offset: usize,
+    /// Resolve frontmatter relations on the returned page rows (depth 1).
+    pub populate: bool,
 }
 
 /// Top-level response for [`MarkdownVdb::collection`]: columns + the paginated
@@ -285,6 +297,9 @@ pub struct CollectionColumn {
     /// True if the column came from the scoped `Schema`; false if it was discovered
     /// only because a returned row's frontmatter contained the key.
     pub in_schema: bool,
+    /// Overlay-declared FK target folder for relation columns (slash-less).
+    /// Always-present JSON key (`null` when unscoped), mirroring `SchemaField`.
+    pub relation_target: Option<String>,
 }
 
 /// One table row = one Markdown document.
@@ -308,6 +323,10 @@ pub struct CollectionRow {
     pub indexed_at: Option<u64>,
     /// Sync state relative to the index.
     pub state: tree::FileState,
+    /// Resolved frontmatter relations (populate only; key absent otherwise).
+    /// `rows[].frontmatter` stays the raw object — populate never mutates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relations: Option<std::collections::BTreeMap<String, Vec<relations::RelationValue>>>,
 }
 
 /// Result of a doctor diagnostic check.
@@ -438,6 +457,11 @@ pub struct GraphEdge {
     /// Edge cluster assignment.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edge_cluster_id: Option<usize>,
+    /// Originating frontmatter field for relation edges; `None` for body and
+    /// similarity edges. Deliberately NOT skip-serialized (unlike the other
+    /// options on this struct): the contract requires an always-present
+    /// `"field": null` key that the app mirrors as required.
+    pub field: Option<String>,
 }
 
 /// A cluster in the graph visualization.
@@ -1305,8 +1329,16 @@ impl MarkdownVdb {
         }
 
         // Build / update link graph.
+        // The overlay is loaded live here (graph build runs before the schema
+        // recompute below, so the persisted schema can't supply target folders).
+        let graph_overlay = schema::Schema::load_overlay(&self.root).unwrap_or(None);
         if let Some(ref single_file) = options.file {
             // Single-file ingest: update links for just this file.
+            // known_files = the indexed file set (same source as body-link validity).
+            let relation_ctx = relations::RelationContext::new(
+                self.index.get_file_hashes().keys().cloned().collect(),
+                graph_overlay,
+            );
             let mut graph = self.index.get_link_graph().unwrap_or_else(|| links::LinkGraph {
                 forward: HashMap::new(),
                 last_updated: 0,
@@ -1314,7 +1346,7 @@ impl MarkdownVdb {
                 edge_cluster_state: None,
             });
             if let Some((md, _)) = parsed_files.get(single_file) {
-                links::update_file_links(&mut graph, md);
+                links::update_file_links(&mut graph, md, &relation_ctx);
             }
             self.index.update_link_graph(Some(graph));
         } else {
@@ -1335,7 +1367,11 @@ impl MarkdownVdb {
                     }
                 }
             }
-            let mut graph = links::build_link_graph(&all_md_files);
+            // known_files = the discovered on-disk set (matches body-link
+            // Valid/Broken classification downstream).
+            let relation_ctx =
+                relations::RelationContext::new(discovered_paths.clone(), graph_overlay);
+            let mut graph = links::build_link_graph(&all_md_files, &relation_ctx);
             // Preserve semantic edges and edge cluster state from the earlier
             // edge-embedding pass (which stored them before this rebuild).
             if let Some(prev) = self.index.get_link_graph() {
@@ -1622,7 +1658,7 @@ impl MarkdownVdb {
         &self,
         query: search::SearchQuery,
     ) -> Result<search::SearchResponse> {
-        search::search(
+        let mut response = search::search(
             &query,
             &self.index,
             self.ensure_provider()?.as_ref(),
@@ -1639,7 +1675,22 @@ impl MarkdownVdb {
             self.config.search_expand_limit,
             self.config.edge_boost_weight,
         )
-        .await
+        .await?;
+
+        // Populate is post-processing in this wrapper (the engine ignores the
+        // flag) so overlay/index context never threads through its signature.
+        // Only ranked results are populated — graph_context stays untouched.
+        if query.populate {
+            let ctx = self.relation_context();
+            let empty = serde_json::json!({});
+            for result in &mut response.results {
+                let frontmatter = result.file.frontmatter.as_ref().unwrap_or(&empty);
+                result.file.relations =
+                    Some(self.compute_relations(&result.file.path, frontmatter, &ctx));
+            }
+        }
+
+        Ok(response)
     }
 
     /// Preview what an ingestion would do, without making any API calls or modifying the index.
@@ -2035,8 +2086,9 @@ sources:
                 }
                 for entry in entries {
                     if indexed_paths.contains(&entry.target) {
-                        // Look up semantic edge metadata if available
-                        let edge_id = format!("edge:{}->{}@{}", source, entry.target, entry.line_number);
+                        // Look up semantic edge metadata if available (relation
+                        // edges use field-qualified ids and never carry semantic data).
+                        let edge_id = links::entry_edge_id(entry);
                         let semantic = link_graph.semantic_edges.as_ref()
                             .and_then(|se| se.get(&edge_id));
                         edges.push(GraphEdge {
@@ -2047,6 +2099,7 @@ sources:
                             strength: semantic.and_then(|s| s.strength),
                             context_text: semantic.map(|s| s.context_text.clone()),
                             edge_cluster_id: semantic.and_then(|s| s.cluster_id),
+                            field: entry.field.clone(),
                         });
                     }
                 }
@@ -2208,6 +2261,7 @@ sources:
                     strength: None,
                     context_text: None,
                     edge_cluster_id: None,
+                    field: None,
                 });
                 cross_file_count += 1;
             }
@@ -2366,7 +2420,126 @@ sources:
             file_size: file.file_size,
             indexed_at: file.indexed_at,
             modified_at,
+            relations: None,
+            referenced_by: None,
         })
+    }
+
+    /// [`get_document`](Self::get_document) plus resolved `relations` and
+    /// `referenced_by` (phase-31 populate). Output is otherwise byte-identical
+    /// to `get_document`; both populate keys are always set (`{}` / `[]` when
+    /// empty), never `None`.
+    pub fn get_document_populated(&self, relative_path: &str) -> Result<DocumentInfo> {
+        let mut doc = self.get_document(relative_path)?;
+        let ctx = self.relation_context();
+        let empty = serde_json::json!({});
+        let frontmatter = doc.frontmatter.as_ref().unwrap_or(&empty);
+        doc.relations = Some(self.compute_relations(relative_path, frontmatter, &ctx));
+        doc.referenced_by = Some(self.compute_referenced_by(relative_path)?);
+        Ok(doc)
+    }
+
+    /// Build a [`relations::RelationContext`] for populate calls: the indexed
+    /// file set plus the live overlay. Build ONE per populate call.
+    fn relation_context(&self) -> relations::RelationContext {
+        let overlay = schema::Schema::load_overlay(&self.root).unwrap_or(None);
+        relations::RelationContext::new(
+            self.index.get_file_hashes().keys().cloned().collect(),
+            overlay,
+        )
+    }
+
+    /// Resolve every link-shaped frontmatter value of `source` to a
+    /// [`relations::RelationValue`] (value-driven; the schema only labels).
+    /// Self-references are skipped; a field left with no values produces no key.
+    /// `BTreeMap` keeps the map keys alphabetical per the contract.
+    fn compute_relations(
+        &self,
+        source: &str,
+        frontmatter: &serde_json::Value,
+        ctx: &relations::RelationContext,
+    ) -> std::collections::BTreeMap<String, Vec<relations::RelationValue>> {
+        let mut map: std::collections::BTreeMap<String, Vec<relations::RelationValue>> =
+            std::collections::BTreeMap::new();
+
+        for fm_link in parser::extract_frontmatter_links(Some(frontmatter)) {
+            let target_folder = ctx.target_for(source, &fm_link.field);
+            let resolved = relations::resolve_relation_target(
+                source,
+                &fm_link.target,
+                target_folder.as_deref(),
+                &ctx.known_files,
+            );
+
+            let value = match resolved {
+                Some((path, _)) if path == source => continue, // self-FK is meaningless
+                Some((path, exists)) => {
+                    let (title, target_frontmatter) = if exists {
+                        let stored_fm: Option<serde_json::Value> = self
+                            .index
+                            .get_file(&path)
+                            .and_then(|f| f.frontmatter)
+                            .and_then(|s| serde_json::from_str(&s).ok());
+                        let title_fm = stored_fm.clone().unwrap_or_else(|| serde_json::json!({}));
+                        (Some(derive_title(&path, &title_fm).0), stored_fm)
+                    } else {
+                        (None, None)
+                    };
+                    relations::RelationValue {
+                        raw: fm_link.raw,
+                        path: Some(path),
+                        exists,
+                        title,
+                        frontmatter: target_frontmatter,
+                    }
+                }
+                None => relations::RelationValue {
+                    raw: fm_link.raw,
+                    path: None,
+                    exists: false,
+                    title: None,
+                    frontmatter: None,
+                },
+            };
+
+            map.entry(fm_link.field).or_default().push(value);
+        }
+
+        map
+    }
+
+    /// Reverse relation lookups for `path`: link-graph backlinks carrying a
+    /// `field`, sorted by `(source, field)`. An absent graph degrades to an
+    /// empty list — populate must not fail on fresh vaults.
+    fn compute_referenced_by(&self, path: &str) -> Result<Vec<relations::ReferencedBy>> {
+        let Some(graph) = self.index.get_link_graph() else {
+            return Ok(Vec::new());
+        };
+        let backlinks = links::compute_backlinks(&graph);
+        let mut result: Vec<relations::ReferencedBy> = backlinks
+            .get(path)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let field = entry.field.clone()?;
+                        let source_fm = self
+                            .index
+                            .get_file(&entry.source)
+                            .and_then(|f| f.frontmatter)
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        Some(relations::ReferencedBy {
+                            title: derive_title(&entry.source, &source_fm).0,
+                            source: entry.source.clone(),
+                            field,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        result.sort_by(|a, b| a.source.cmp(&b.source).then_with(|| a.field.cmp(&b.field)));
+        Ok(result)
     }
 
     /// Return all documents under a folder as table rows, with column definitions,
@@ -2422,7 +2595,16 @@ sources:
 
         // 5. Paginate: skip offset, take limit (or all).
         let limit = opts.limit.unwrap_or(usize::MAX);
-        let page: Vec<CollectionRow> = rows.into_iter().skip(opts.offset).take(limit).collect();
+        let mut page: Vec<CollectionRow> = rows.into_iter().skip(opts.offset).take(limit).collect();
+
+        // 7. Populate relations for the RETURNED PAGE rows only (never the full
+        // filtered set); one RelationContext per call. `frontmatter` stays raw.
+        if opts.populate {
+            let ctx = self.relation_context();
+            for row in &mut page {
+                row.relations = Some(self.compute_relations(&row.path, &row.frontmatter, &ctx));
+            }
+        }
 
         Ok(CollectionResponse {
             scope,
@@ -2528,6 +2710,7 @@ sources:
             modified_at: self.index.get_file_mtime(path),
             indexed_at: stored.as_ref().map(|f| f.indexed_at),
             state,
+            relations: None,
         }
     }
 
@@ -2556,6 +2739,7 @@ sources:
             modified_at,
             indexed_at: None,
             state: tree::FileState::New,
+            relations: None,
         }
     }
 
@@ -2591,6 +2775,7 @@ sources:
                 allowed_values: f.allowed_values.clone(),
                 required: f.required,
                 in_schema: true,
+                relation_target: f.relation_target.clone(),
             });
         }
 
@@ -2612,6 +2797,7 @@ sources:
                 allowed_values: None,
                 required: false,
                 in_schema: false,
+                relation_target: None,
             });
         }
 
@@ -2825,6 +3011,11 @@ sources:
             }
         }
 
+        // 8. Relations: dangling relation targets, overlay target hygiene,
+        // and the unquoted-[[x]] YAML footgun. Warn (not Fail): broken
+        // references are vault content, not index health.
+        checks.push(self.doctor_relations_check());
+
         let passed = checks.iter().filter(|c| c.status == CheckStatus::Pass).count();
         let total = checks.len();
 
@@ -2833,6 +3024,148 @@ sources:
             passed,
             total,
         })
+    }
+
+    /// Build the doctor "Relations" check: dangling relation edges (capped
+    /// examples), overlay `target:` folders matching no indexed file, and
+    /// frontmatter values that are unquoted `[[x]]` YAML nested arrays.
+    fn doctor_relations_check(&self) -> DoctorCheck {
+        const MAX_EXAMPLES: usize = 5;
+        let known: std::collections::HashSet<String> =
+            self.index.get_file_hashes().keys().cloned().collect();
+        let mut issues: Vec<String> = Vec::new();
+
+        // Dangling relation edges (field-tagged forward entries with unknown targets).
+        let mut relation_edge_count = 0usize;
+        let mut dangling: Vec<String> = Vec::new();
+        if let Some(graph) = self.index.get_link_graph() {
+            let mut entries: Vec<&links::LinkEntry> = graph
+                .forward
+                .values()
+                .flatten()
+                .filter(|e| e.field.is_some())
+                .collect();
+            entries.sort_by(|a, b| {
+                a.source
+                    .cmp(&b.source)
+                    .then_with(|| a.field.cmp(&b.field))
+                    .then_with(|| a.target.cmp(&b.target))
+            });
+            relation_edge_count = entries.len();
+            for entry in entries {
+                if !known.contains(&entry.target) {
+                    dangling.push(format!(
+                        "{}#{} → {}",
+                        entry.source,
+                        entry.field.as_deref().unwrap_or_default(),
+                        entry.target
+                    ));
+                }
+            }
+        }
+        if !dangling.is_empty() {
+            let total = dangling.len();
+            let mut examples = dangling;
+            examples.truncate(MAX_EXAMPLES);
+            let more = if total > MAX_EXAMPLES {
+                format!(", +{} more", total - MAX_EXAMPLES)
+            } else {
+                String::new()
+            };
+            issues.push(format!(
+                "{total} dangling relation(s): {}{more}",
+                examples.join(", ")
+            ));
+        }
+
+        // Overlay hygiene: declared target folders that prefix no indexed file.
+        if let Ok(Some(overlay)) = schema::Schema::load_overlay(&self.root) {
+            let mut targets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            for field in overlay
+                .fields
+                .values()
+                .chain(overlay.scopes.values().flat_map(|s| s.fields.values()))
+            {
+                if let Some(t) = &field.target {
+                    let t = t.trim().trim_end_matches('/');
+                    if !t.is_empty() {
+                        targets.insert(t.to_string());
+                    }
+                }
+            }
+            let ghosts: Vec<String> = targets
+                .into_iter()
+                .filter(|t| {
+                    let prefix = format!("{t}/");
+                    !known.iter().any(|f| f.starts_with(&prefix))
+                })
+                .collect();
+            if !ghosts.is_empty() {
+                issues.push(format!(
+                    "overlay target folder(s) match no indexed file: {}",
+                    ghosts.join(", ")
+                ));
+            }
+        }
+
+        // Unquoted-[[x]] footgun: a value parsed as a nested single-string array
+        // whose inner string would be link-shaped if the value had been quoted.
+        let mut unquoted: Vec<String> = Vec::new();
+        let mut paths: Vec<String> = known.iter().cloned().collect();
+        paths.sort();
+        'files: for path in &paths {
+            let Some(fm) = self
+                .index
+                .get_file(path)
+                .and_then(|f| f.frontmatter)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            else {
+                continue;
+            };
+            let Some(map) = fm.as_object() else { continue };
+            for (field, value) in map {
+                let serde_json::Value::Array(outer) = value else {
+                    continue;
+                };
+                let [serde_json::Value::Array(inner)] = outer.as_slice() else {
+                    continue;
+                };
+                let [serde_json::Value::String(s)] = inner.as_slice() else {
+                    continue;
+                };
+                if relations::is_link_shaped(&format!("[[{s}]]")) {
+                    unquoted.push(format!("{path}#{field}"));
+                    if unquoted.len() >= MAX_EXAMPLES {
+                        break 'files;
+                    }
+                }
+            }
+        }
+        if !unquoted.is_empty() {
+            issues.push(format!(
+                "unquoted [[..]] value(s) parse as YAML nested lists (quote them to make relations): {}",
+                unquoted.join(", ")
+            ));
+        }
+
+        if issues.is_empty() {
+            let detail = if relation_edge_count == 0 {
+                "no relation links".to_string()
+            } else {
+                format!("{relation_edge_count} relation link(s), all targets resolve")
+            };
+            DoctorCheck {
+                name: "Relations".to_string(),
+                status: CheckStatus::Pass,
+                detail,
+            }
+        } else {
+            DoctorCheck {
+                name: "Relations".to_string(),
+                status: CheckStatus::Warn,
+                detail: issues.join("; "),
+            }
+        }
     }
 }
 
@@ -2934,6 +3267,7 @@ mod collection_unit_tests {
             modified_at: None,
             indexed_at: None,
             state: tree::FileState::Indexed,
+            relations: None,
         }
     }
 

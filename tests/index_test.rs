@@ -39,6 +39,7 @@ fn fake_markdown_file_with_mtime(path: &str, hash: &str, modified_at: u64) -> Ma
         file_size: 100,
         links: Vec::new(),
         modified_at,
+        frontmatter_links: Vec::new(),
     }
 }
 

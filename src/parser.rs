@@ -25,6 +25,25 @@ pub struct MarkdownFile {
     pub links: Vec<RawLink>,
     /// Filesystem modification time as Unix timestamp (seconds since epoch).
     pub modified_at: u64,
+    /// Whole-value link references extracted from frontmatter values.
+    /// Deliberately separate from `links` so the semantic-edge pipeline and
+    /// chunking never see frontmatter references (they have no paragraph context).
+    pub frontmatter_links: Vec<FrontmatterLink>,
+}
+
+/// A whole-value link reference extracted from a frontmatter field.
+#[derive(Debug, Clone, Serialize)]
+pub struct FrontmatterLink {
+    /// The frontmatter field name this reference originates from.
+    pub field: String,
+    /// The literal frontmatter value (or list element).
+    pub raw: String,
+    /// The inner link target (wiki inner before `|` / markdown link target / bare path).
+    pub target: String,
+    /// The display text (alias or link text), falling back to the target.
+    pub text: String,
+    /// Whether this was a `[[wikilink]]`.
+    pub is_wikilink: bool,
 }
 
 /// A raw link extracted from a markdown document.
@@ -68,6 +87,7 @@ pub fn parse_markdown_file(
 
     let content_hash = compute_content_hash(&content);
     let (frontmatter, body) = extract_frontmatter(&content);
+    let frontmatter_links = extract_frontmatter_links(frontmatter.as_ref());
     let headings = extract_headings(body);
     let links = extract_links(body);
 
@@ -80,7 +100,51 @@ pub fn parse_markdown_file(
         file_size,
         links,
         modified_at,
+        frontmatter_links,
     })
+}
+
+/// Extract whole-value link references from frontmatter.
+///
+/// Iterates top-level object entries; `String` values and `String` elements of
+/// `Array` values are classified with the whole-value link-shape predicate
+/// ([`crate::relations::is_link_shaped`]). Nested objects, non-string values,
+/// and non-link strings are skipped. List elements keep their source order.
+pub fn extract_frontmatter_links(
+    frontmatter: Option<&serde_json::Value>,
+) -> Vec<FrontmatterLink> {
+    let Some(serde_json::Value::Object(map)) = frontmatter else {
+        return Vec::new();
+    };
+
+    let mut result = Vec::new();
+    let mut push = |field: &str, raw: &str| {
+        if let Some(parsed) = crate::relations::parse_link_shaped(raw) {
+            result.push(FrontmatterLink {
+                field: field.to_string(),
+                raw: raw.to_string(),
+                target: parsed.target,
+                text: parsed.text,
+                is_wikilink: parsed.is_wikilink,
+            });
+        }
+    };
+
+    for (field, value) in map {
+        match value {
+            serde_json::Value::String(s) => push(field, s),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    if let serde_json::Value::String(s) = item {
+                        push(field, s);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result
 }
 
 /// A heading extracted from a markdown document.
@@ -395,7 +459,7 @@ pub fn extract_links_with_context(content: &str, links: &[RawLink]) -> Vec<LinkC
 }
 
 /// Check if a URL is external (http/https/mailto) or anchor-only (#heading).
-fn is_external_or_anchor(url: &str) -> bool {
+pub(crate) fn is_external_or_anchor(url: &str) -> bool {
     let lower = url.to_lowercase();
     lower.starts_with("http://")
         || lower.starts_with("https://")
@@ -696,6 +760,109 @@ mod tests {
         let content = "Some text.";
         assert_eq!(extract_link_paragraph(content, 0), "");
         assert_eq!(extract_link_paragraph(content, 100), "");
+    }
+
+    // --- extract_frontmatter_links tests ---
+
+    #[test]
+    fn frontmatter_links_wiki_and_alias() {
+        let fm = serde_json::json!({
+            "client": "[[clients/acme]]",
+            "owner": "[[people/jane|Jane]]",
+        });
+        let mut links = extract_frontmatter_links(Some(&fm));
+        links.sort_by(|a, b| a.field.cmp(&b.field));
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].field, "client");
+        assert_eq!(links[0].raw, "[[clients/acme]]");
+        assert_eq!(links[0].target, "clients/acme");
+        assert_eq!(links[0].text, "clients/acme");
+        assert!(links[0].is_wikilink);
+        assert_eq!(links[1].field, "owner");
+        assert_eq!(links[1].target, "people/jane");
+        assert_eq!(links[1].text, "Jane");
+    }
+
+    #[test]
+    fn frontmatter_links_markdown_and_bare() {
+        let fm = serde_json::json!({
+            "spec": "[Spec](docs/spec.md)",
+            "note": "notes/idea.md",
+        });
+        let mut links = extract_frontmatter_links(Some(&fm));
+        links.sort_by(|a, b| a.field.cmp(&b.field));
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].field, "note");
+        assert_eq!(links[0].target, "notes/idea.md");
+        assert!(!links[0].is_wikilink);
+        assert_eq!(links[1].field, "spec");
+        assert_eq!(links[1].target, "docs/spec.md");
+        assert_eq!(links[1].text, "Spec");
+        assert!(!links[1].is_wikilink);
+    }
+
+    #[test]
+    fn frontmatter_links_array_preserves_order_and_skips_non_links() {
+        let fm = serde_json::json!({
+            "clients": ["[[clients/b]]", "todo", "[[clients/a]]", "[[clients/b]]"],
+        });
+        let links = extract_frontmatter_links(Some(&fm));
+        // Source order preserved, duplicates preserved, non-link element skipped.
+        let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(targets, vec!["clients/b", "clients/a", "clients/b"]);
+    }
+
+    #[test]
+    fn frontmatter_links_skips_nested_and_non_string() {
+        let fm = serde_json::json!({
+            "meta": {"inner": "[[clients/acme]]"},
+            "count": 42,
+            "flag": true,
+            "nothing": null,
+            "nested_list": [["clients/acme"]],
+        });
+        assert!(extract_frontmatter_links(Some(&fm)).is_empty());
+    }
+
+    #[test]
+    fn frontmatter_links_whole_value_strictness() {
+        let fm = serde_json::json!({
+            "note": "See [[x]] for details",
+            "url": "[site](https://example.com)",
+        });
+        assert!(extract_frontmatter_links(Some(&fm)).is_empty());
+    }
+
+    #[test]
+    fn frontmatter_links_none_frontmatter() {
+        assert!(extract_frontmatter_links(None).is_empty());
+        let non_object = serde_json::json!("just a string");
+        assert!(extract_frontmatter_links(Some(&non_object)).is_empty());
+    }
+
+    #[test]
+    fn parse_markdown_file_extracts_frontmatter_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "---\nclient: \"[[clients/acme]]\"\ntitle: Invoice\n---\n# Body\nSee [[other]].";
+        std::fs::write(dir.path().join("i1.md"), content).unwrap();
+        let md = parse_markdown_file(dir.path(), Path::new("i1.md")).unwrap();
+        assert_eq!(md.frontmatter_links.len(), 1);
+        assert_eq!(md.frontmatter_links[0].field, "client");
+        assert_eq!(md.frontmatter_links[0].target, "clients/acme");
+        // Body links stay separate.
+        assert_eq!(md.links.len(), 1);
+        assert_eq!(md.links[0].target, "other");
+    }
+
+    #[test]
+    fn unquoted_wikilink_is_yaml_nested_array_not_a_relation() {
+        // `client: [[clients/acme]]` without quotes parses as a nested YAML
+        // sequence — it must NOT produce a frontmatter link (doctor warns instead).
+        let content = "---\nclient: [[clients/acme]]\n---\nBody";
+        let (fm, _) = extract_frontmatter(content);
+        let fm = fm.unwrap();
+        assert!(fm["client"].is_array());
+        assert!(extract_frontmatter_links(Some(&fm)).is_empty());
     }
 
     // --- extract_links_with_context tests ---

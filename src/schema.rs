@@ -16,6 +16,9 @@ pub enum FieldType {
     List,
     Date,
     Mixed,
+    /// A frontmatter reference to another document (wiki link, markdown link,
+    /// or bare `.md` path — whole-value only). Serializes as `"Relation"`.
+    Relation,
 }
 
 /// Intermediate type used during inference to accumulate field information.
@@ -37,12 +40,17 @@ pub struct InferredField {
 pub struct OverlayField {
     /// Human-readable description of the field.
     pub description: Option<String>,
-    /// Type override as a string (e.g. "string", "number", "date").
+    /// Type override as a string (e.g. "string", "number", "relation").
+    /// `type:` is accepted as an alias (live overlays already write it).
+    #[serde(alias = "type")]
     pub field_type: Option<String>,
     /// List of allowed values for this field.
     pub allowed_values: Option<Vec<String>>,
     /// Whether this field is considered required.
     pub required: Option<bool>,
+    /// Target folder for relation fields (the FK's "table"). Accepts `clients`
+    /// or `clients/` on read; emitted slash-less. Implies `field_type: relation`.
+    pub target: Option<String>,
 }
 
 /// A scope's field overlay, defining field annotations for a path prefix.
@@ -81,6 +89,9 @@ pub struct SchemaField {
     pub allowed_values: Option<Vec<String>>,
     /// Whether this field is required (from overlay, defaults to false).
     pub required: bool,
+    /// Overlay-declared FK target folder for relation fields (slash-less).
+    /// Serializes as `null` when absent (always-present JSON key per contract).
+    pub relation_target: Option<String>,
 }
 
 /// A schema tagged with its path scope, persisted in the index.
@@ -118,18 +129,35 @@ fn is_date_string(s: &str) -> bool {
 }
 
 /// Infer a `FieldType` from a single `serde_json::Value`.
+///
+/// Relation rules run ahead of the plain arms: a link-shaped string, or a
+/// non-empty array whose every element is a link-shaped string, classifies as
+/// `Relation`. (Empty arrays classify as `List` — no evidence — so they break
+/// Relation typing via the multi-discriminant Mixed rule.)
 pub(crate) fn infer_field_type(value: &serde_json::Value) -> FieldType {
     match value {
         serde_json::Value::Bool(_) => FieldType::Boolean,
         serde_json::Value::Number(_) => FieldType::Number,
         serde_json::Value::String(s) => {
-            if is_date_string(s) {
+            if crate::relations::is_link_shaped(s) {
+                FieldType::Relation
+            } else if is_date_string(s) {
                 FieldType::Date
             } else {
                 FieldType::String
             }
         }
-        serde_json::Value::Array(_) => FieldType::List,
+        serde_json::Value::Array(items) => {
+            let all_links = !items.is_empty()
+                && items.iter().all(|v| {
+                    matches!(v, serde_json::Value::String(s) if crate::relations::is_link_shaped(s))
+                });
+            if all_links {
+                FieldType::Relation
+            } else {
+                FieldType::List
+            }
+        }
         serde_json::Value::Object(_) => FieldType::String, // treat objects as string
         serde_json::Value::Null => FieldType::String,      // null defaults to string
     }
@@ -152,7 +180,19 @@ fn parse_field_type_str(s: &str) -> Option<FieldType> {
         "list" | "array" => Some(FieldType::List),
         "date" => Some(FieldType::Date),
         "mixed" => Some(FieldType::Mixed),
+        "relation" => Some(FieldType::Relation),
         _ => None,
+    }
+}
+
+/// Normalize an overlay `target:` folder: trim whitespace and a trailing `/`.
+/// Returns `None` for empty results (never emit an empty target).
+fn normalize_target(target: &str) -> Option<String> {
+    let t = target.trim().trim_end_matches('/');
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
     }
 }
 
@@ -261,6 +301,7 @@ impl Schema {
                     sample_values: samples,
                     allowed_values: None,
                     required: false,
+                    relation_target: None,
                 }
             })
             .collect();
@@ -350,6 +391,7 @@ impl Schema {
 
         // Apply overlay
         for (name, ov) in &overlay {
+            let target = ov.target.as_deref().and_then(normalize_target);
             if let Some(field) = merged.get_mut(name) {
                 // Apply overlay to existing inferred field
                 if let Some(desc) = &ov.description {
@@ -359,6 +401,9 @@ impl Schema {
                     if let Some(ft) = parse_field_type_str(type_str) {
                         field.field_type = ft;
                     }
+                } else if target.is_some() {
+                    // A declared target with no explicit type implies Relation.
+                    field.field_type = FieldType::Relation;
                 }
                 if let Some(av) = &ov.allowed_values {
                     field.allowed_values = Some(av.clone());
@@ -366,13 +411,20 @@ impl Schema {
                 if let Some(req) = ov.required {
                     field.required = req;
                 }
+                if target.is_some() {
+                    field.relation_target = target;
+                }
             } else {
                 // Overlay-only field: not seen in any file
                 let field_type = ov
                     .field_type
                     .as_deref()
                     .and_then(parse_field_type_str)
-                    .unwrap_or(FieldType::String);
+                    .unwrap_or(if target.is_some() {
+                        FieldType::Relation
+                    } else {
+                        FieldType::String
+                    });
 
                 merged.insert(
                     name.clone(),
@@ -384,6 +436,7 @@ impl Schema {
                         sample_values: vec![],
                         allowed_values: ov.allowed_values.clone(),
                         required: ov.required.unwrap_or(false),
+                        relation_target: target,
                     },
                 );
             }
@@ -464,6 +517,7 @@ mod tests {
             file_size: 0,
             links: Vec::new(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
         }
     }
 
@@ -628,6 +682,7 @@ fields:
             field_type: None,
             allowed_values: None,
             required: Some(true),
+            target: None,
         });
         let merged = Schema::merge(inferred, Some(overlay));
         assert_eq!(merged.fields[0].description.as_deref(), Some("Doc title"));
@@ -644,6 +699,7 @@ fields:
             field_type: Some("string".to_string()),
             allowed_values: Some(vec!["blog".to_string(), "docs".to_string()]),
             required: Some(false),
+            target: None,
         });
         let merged = Schema::merge(inferred, Some(overlay));
         assert_eq!(merged.fields.len(), 2);
@@ -664,6 +720,7 @@ fields:
             field_type: Some("number".to_string()),
             allowed_values: None,
             required: None,
+            target: None,
         });
         let merged = Schema::merge(inferred, Some(overlay));
         assert_eq!(merged.fields[0].field_type, FieldType::Number);
@@ -698,6 +755,7 @@ fields:
             field_type: None,
             allowed_values: None,
             required: None,
+            target: None,
         }
     }
 
@@ -839,6 +897,7 @@ fields:
             file_size: 0,
             links: Vec::new(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
         }
     }
 
@@ -927,5 +986,191 @@ fields:
         ];
         let scopes = Schema::discover_scopes(&files);
         assert!(scopes.is_empty());
+    }
+
+    // --- relation typing (phase 31) ---
+
+    #[test]
+    fn infer_field_type_relation_values() {
+        assert_eq!(
+            infer_field_type(&serde_json::json!("[[clients/acme]]")),
+            FieldType::Relation
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!("[Acme](clients/acme.md)")),
+            FieldType::Relation
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!("clients/acme.md")),
+            FieldType::Relation
+        );
+        // All-link list → Relation; mixed / empty lists stay List.
+        assert_eq!(
+            infer_field_type(&serde_json::json!(["[[a]]", "[[b]]"])),
+            FieldType::Relation
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!(["[[a]]", "plain"])),
+            FieldType::List
+        );
+        assert_eq!(infer_field_type(&serde_json::json!([])), FieldType::List);
+        // Embedded links are plain strings.
+        assert_eq!(
+            infer_field_type(&serde_json::json!("See [[x]] for details")),
+            FieldType::String
+        );
+    }
+
+    #[test]
+    fn infer_relation_field_all_links() {
+        let files = vec![
+            make_file(serde_json::json!({"client": "[[clients/acme]]"})),
+            make_file(serde_json::json!({"client": "[[clients/globex|Globex]]"})),
+        ];
+        let schema = Schema::infer(&files);
+        assert_eq!(schema.fields[0].field_type, FieldType::Relation);
+        assert_eq!(schema.fields[0].relation_target, None);
+    }
+
+    #[test]
+    fn infer_relation_field_mixed_values_becomes_mixed() {
+        let files = vec![
+            make_file(serde_json::json!({"client": "[[clients/acme]]"})),
+            make_file(serde_json::json!({"client": "just text"})),
+        ];
+        let schema = Schema::infer(&files);
+        assert_eq!(schema.fields[0].field_type, FieldType::Mixed);
+    }
+
+    #[test]
+    fn infer_relation_lists() {
+        let files = vec![
+            make_file(serde_json::json!({"clients": ["[[a]]", "[[b]]"]})),
+            make_file(serde_json::json!({"clients": ["[[c]]"]})),
+        ];
+        let schema = Schema::infer(&files);
+        assert_eq!(schema.fields[0].field_type, FieldType::Relation);
+    }
+
+    #[test]
+    fn infer_relation_broken_by_empty_array() {
+        let files = vec![
+            make_file(serde_json::json!({"clients": ["[[a]]"]})),
+            make_file(serde_json::json!({"clients": []})),
+        ];
+        let schema = Schema::infer(&files);
+        // Relation + List discriminants → Mixed.
+        assert_eq!(schema.fields[0].field_type, FieldType::Mixed);
+    }
+
+    #[test]
+    fn parse_field_type_str_relation() {
+        assert_eq!(parse_field_type_str("relation"), Some(FieldType::Relation));
+        assert_eq!(parse_field_type_str("Relation"), Some(FieldType::Relation));
+    }
+
+    #[test]
+    fn field_type_relation_serializes_pascal_case() {
+        assert_eq!(
+            serde_json::to_string(&FieldType::Relation).unwrap(),
+            "\"Relation\""
+        );
+    }
+
+    #[test]
+    fn merge_overlay_relation_with_target() {
+        let files = vec![make_file(serde_json::json!({"client": "some string"}))];
+        let inferred = Schema::infer(&files);
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "client".to_string(),
+            OverlayField {
+                description: None,
+                field_type: Some("relation".to_string()),
+                allowed_values: None,
+                required: None,
+                target: Some("clients/".to_string()),
+            },
+        );
+        let merged = Schema::merge(inferred, Some(overlay));
+        assert_eq!(merged.fields[0].field_type, FieldType::Relation);
+        // Trailing slash normalized away.
+        assert_eq!(merged.fields[0].relation_target.as_deref(), Some("clients"));
+    }
+
+    #[test]
+    fn merge_target_implies_relation() {
+        let files = vec![make_file(serde_json::json!({"client": "acme"}))];
+        let inferred = Schema::infer(&files);
+        assert_eq!(inferred.fields[0].field_type, FieldType::String);
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "client".to_string(),
+            OverlayField {
+                description: None,
+                field_type: None,
+                allowed_values: None,
+                required: None,
+                target: Some("clients".to_string()),
+            },
+        );
+        let merged = Schema::merge(inferred, Some(overlay));
+        assert_eq!(merged.fields[0].field_type, FieldType::Relation);
+        assert_eq!(merged.fields[0].relation_target.as_deref(), Some("clients"));
+    }
+
+    #[test]
+    fn merge_overlay_only_field_with_target() {
+        let inferred = Schema::infer(&[]);
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "client".to_string(),
+            OverlayField {
+                description: None,
+                field_type: None,
+                allowed_values: None,
+                required: None,
+                target: Some("clients".to_string()),
+            },
+        );
+        let merged = Schema::merge(inferred, Some(overlay));
+        assert_eq!(merged.fields[0].field_type, FieldType::Relation);
+        assert_eq!(merged.fields[0].relation_target.as_deref(), Some("clients"));
+        assert_eq!(merged.fields[0].occurrence_count, 0);
+    }
+
+    #[test]
+    fn load_overlay_accepts_type_alias_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+fields:
+  client:
+    type: relation
+    target: clients/
+"#;
+        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+        let overlay = Schema::load_overlay(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            overlay.fields["client"].field_type.as_deref(),
+            Some("relation")
+        );
+        assert_eq!(overlay.fields["client"].target.as_deref(), Some("clients/"));
+
+        // And through merge, the alias behaves exactly like field_type:.
+        let merged = Schema::merge(
+            Schema::infer(&[]),
+            Some(Schema::resolve_overlay_for_path(&overlay, None)),
+        );
+        assert_eq!(merged.fields[0].field_type, FieldType::Relation);
+        assert_eq!(merged.fields[0].relation_target.as_deref(), Some("clients"));
+    }
+
+    #[test]
+    fn schema_field_relation_target_serializes_null_when_absent() {
+        let files = vec![make_file(serde_json::json!({"title": "Hello"}))];
+        let schema = Schema::infer(&files);
+        let json = serde_json::to_value(&schema.fields[0]).unwrap();
+        assert!(json.as_object().unwrap().contains_key("relation_target"));
+        assert!(json["relation_target"].is_null());
     }
 }

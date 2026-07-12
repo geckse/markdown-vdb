@@ -297,10 +297,17 @@ impl Watcher {
         // Upsert vector index and FTS index.
         self.index.upsert(&file, &chunks, &embeddings)?;
 
-        // Update link graph with links from this file.
-        if !file.links.is_empty() {
+        // Update link graph with body links + frontmatter relations from this
+        // file. Always runs (not gated on the file having links) so removing a
+        // file's last link also removes its stale graph entries.
+        {
+            let overlay = crate::schema::Schema::load_overlay(&self.project_root).unwrap_or(None);
+            let relation_ctx = crate::relations::RelationContext::new(
+                self.index.get_file_hashes().keys().cloned().collect(),
+                overlay,
+            );
             let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0, semantic_edges: None, edge_cluster_state: None });
-            crate::links::update_file_links(&mut graph, &file);
+            crate::links::update_file_links(&mut graph, &file, &relation_ctx);
             self.index.update_link_graph(Some(graph));
         }
 

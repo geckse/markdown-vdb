@@ -317,7 +317,7 @@ async fn bfs_neighbors_integration() {
             mdvdb::parser::parse_markdown_file(root, &PathBuf::from("c.md")).unwrap(),
             mdvdb::parser::parse_markdown_file(root, &PathBuf::from("d.md")).unwrap(),
         ];
-        links::build_link_graph(&files)
+        links::build_link_graph(&files, &mdvdb::relations::RelationContext::empty())
     };
     let backlinks = links::compute_backlinks(&link_graph);
 
@@ -359,7 +359,7 @@ async fn bfs_bidirectional_integration() {
         mdvdb::parser::parse_markdown_file(root, &PathBuf::from("b.md")).unwrap(),
         mdvdb::parser::parse_markdown_file(root, &PathBuf::from("c.md")).unwrap(),
     ];
-    let link_graph = links::build_link_graph(&files);
+    let link_graph = links::build_link_graph(&files, &mdvdb::relations::RelationContext::empty());
     let backlinks = links::compute_backlinks(&link_graph);
 
     let neighbors = links::bfs_neighbors(&link_graph, &backlinks, &["a.md".to_string()], 1);

@@ -179,6 +179,7 @@ mod tests {
             file_size: 1024,
             links: Vec::new(),
             modified_at: 1700000000,
+            frontmatter_links: Vec::new(),
         };
 
         let stored = StoredFile::from(&file);
@@ -203,6 +204,7 @@ mod tests {
             file_size: 0,
             links: Vec::new(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
         };
 
         let stored = StoredFile::from(&file);

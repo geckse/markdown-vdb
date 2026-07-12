@@ -240,6 +240,10 @@ struct SearchArgs {
     /// Graph expansion depth for context (0-3, 0 disables)
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=3))]
     expand: Option<u8>,
+
+    /// Resolve frontmatter relations ([[wiki-link]] values) inline: path, existence, title, target frontmatter
+    #[arg(long)]
+    populate: bool,
 }
 
 #[derive(Parser)]
@@ -337,6 +341,10 @@ struct TreeArgs {
 struct GetArgs {
     /// Path to the markdown file
     file_path: PathBuf,
+
+    /// Resolve frontmatter relations ([[wiki-link]] values) inline: path, existence, title, target frontmatter
+    #[arg(long)]
+    populate: bool,
 }
 
 #[derive(Parser)]
@@ -368,6 +376,10 @@ struct CollectionArgs {
     /// Number of rows to skip (for pagination)
     #[arg(long, default_value = "0")]
     offset: usize,
+
+    /// Resolve frontmatter relations ([[wiki-link]] values) inline: path, existence, title, target frontmatter
+    #[arg(long)]
+    populate: bool,
 }
 
 #[derive(Parser)]
@@ -594,6 +606,9 @@ async fn run() -> anyhow::Result<()> {
             }
             if let Some(expand) = args.expand {
                 query = query.with_expand_graph(expand as usize);
+            }
+            if args.populate {
+                query = query.with_populate(true);
             }
 
             let effective_mode = query.mode;
@@ -1066,7 +1081,11 @@ async fn run() -> anyhow::Result<()> {
         Some(Commands::Get(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let path_str = args.file_path.to_string_lossy();
-            let doc = vdb.get_document(&path_str)?;
+            let doc = if args.populate {
+                vdb.get_document_populated(&path_str)?
+            } else {
+                vdb.get_document(&path_str)?
+            };
 
             if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &doc)?;
@@ -1091,6 +1110,7 @@ async fn run() -> anyhow::Result<()> {
                 filters,
                 limit: args.limit,
                 offset: args.offset,
+                populate: args.populate,
             };
             let resp = vdb.collection(opts)?;
 

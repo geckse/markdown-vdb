@@ -985,6 +985,7 @@ mod tests {
             headings: vec![],
             content_hash: "abc123".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1028,6 +1029,7 @@ mod tests {
             headings: vec![],
             content_hash: "abc123".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1084,6 +1086,7 @@ mod tests {
             headings: vec![],
             content_hash: "abc123".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1163,6 +1166,7 @@ mod tests {
             headings: vec![],
             content_hash: "abc123".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1208,6 +1212,7 @@ mod tests {
             headings: vec![],
             content_hash: "abc123".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1251,6 +1256,7 @@ mod tests {
             headings: vec![],
             content_hash: "abc123".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1303,6 +1309,7 @@ mod tests {
             headings: vec![],
             content_hash: "abc123".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1397,6 +1404,7 @@ mod tests {
             headings: vec![],
             body: "hello".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };
@@ -1458,6 +1466,7 @@ mod tests {
             headings: vec![],
             body: "world".to_string(),
             modified_at: 0,
+            frontmatter_links: Vec::new(),
             file_size: 5,
             links: vec![],
         };

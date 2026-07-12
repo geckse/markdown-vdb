@@ -2176,7 +2176,7 @@ fn test_collection_golden_json_contract() {
     // Columns: name (NOT key), field_type PascalCase, in_schema bool, etc.
     let columns = json["columns"].as_array().unwrap();
     assert!(!columns.is_empty(), "should have columns");
-    let allowed_types = ["String", "Number", "Boolean", "List", "Date", "Mixed"];
+    let allowed_types = ["String", "Number", "Boolean", "List", "Date", "Mixed", "Relation"];
     for col in columns {
         assert!(col["name"].is_string(), "column must have string 'name'");
         assert!(col.get("key").is_none(), "column uses 'name', not 'key'");
@@ -2186,9 +2186,13 @@ fn test_collection_golden_json_contract() {
         assert!(col["sample_values"].is_array());
         assert!(col["in_schema"].is_boolean());
         assert!(col["required"].is_boolean());
-        // description and allowed_values are present (may be null).
+        // description, allowed_values, relation_target are present (may be null).
         assert!(col.get("description").is_some());
         assert!(col.get("allowed_values").is_some());
+        assert!(
+            col.get("relation_target").is_some(),
+            "relation_target must be an always-present key (phase 31)"
+        );
     }
     // The `title` column serializes its type as PascalCase "String".
     let title_col = columns.iter().find(|c| c["name"] == "title").unwrap();
@@ -2571,4 +2575,415 @@ fn test_config_set_writes_yaml() {
     assert!(output.status.success());
     let content = fs::read_to_string(root.join(".markdownvdb").join("config.yaml")).unwrap();
     assert!(content.contains("min_similarity: 0.45"), "yaml: {content}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 31: frontmatter relations — CLI golden JSON contract
+// ---------------------------------------------------------------------------
+
+/// Fixture vault for relation golden tests: clients as the FK "table",
+/// invoices referencing them via wiki links, plus an overlay target.
+fn setup_relations_cli() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".markdownvdb.schema.yml"),
+        "scopes:\n  invoices:\n    fields:\n      client:\n        field_type: relation\n        target: clients/\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("clients")).unwrap();
+    fs::write(
+        root.join("clients/acme.md"),
+        "---\ntitle: Acme Corp\nindustry: tech\n---\n\n# Acme\n\nClient profile.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("clients/globex.md"),
+        "---\ntitle: Globex\n---\n\n# Globex\n\nClient profile.\n",
+    )
+    .unwrap();
+
+    fs::create_dir_all(root.join("invoices")).unwrap();
+    fs::write(
+        root.join("invoices/i1.md"),
+        "---\nclient: \"[[clients/acme]]\"\namount: 100\n---\n\n# Invoice i1\n\nInvoice body about Acme. See [[../clients/acme|Acme]].\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("invoices/i2.md"),
+        "---\ntitle: Invoice i2\nclients:\n  - \"[[clients/acme|A]]\"\n  - not-a-link\n  - \"[[clients/globex]]\"\n  - \"[[clients/acme|A]]\"\n---\n\n# Invoice i2\n\nMulti-client invoice body.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("invoices/dangling.md"),
+        "---\nclient: \"[[clients/ghost]]\"\n---\n\n# Dangling\n\nMissing target.\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .arg("ingest")
+        .current_dir(root)
+        .output()
+        .expect("failed to run ingest");
+    assert!(
+        output.status.success(),
+        "ingest should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    dir
+}
+
+/// Golden test: `get --populate` JSON — pins every RelationValue key name, the
+/// always-present `frontmatter` key, array order/duplicates, and referenced_by.
+#[test]
+fn test_get_populate_golden_json_contract() {
+    let dir = setup_relations_cli();
+
+    let output = mdvdb_bin()
+        .args(["get", "invoices/i2.md", "--populate", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(
+        output.status.success(),
+        "get --populate should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("should be valid JSON");
+
+    // Both populate keys present; relations map keyed by field name.
+    let relations = json["relations"].as_object().expect("relations is an object");
+    assert!(json["referenced_by"].is_array(), "referenced_by is an array");
+    let clients = relations["clients"].as_array().expect("values are arrays");
+
+    // Array order + duplicates preserved; non-link element skipped.
+    assert_eq!(clients.len(), 3);
+    assert_eq!(clients[0]["path"], "clients/acme.md");
+    assert_eq!(clients[1]["path"], "clients/globex.md");
+    assert_eq!(clients[2]["path"], "clients/acme.md");
+
+    // RelationValue key set, exact names.
+    for value in clients {
+        let obj = value.as_object().unwrap();
+        for key in ["raw", "path", "exists", "title", "frontmatter"] {
+            assert!(obj.contains_key(key), "RelationValue missing key '{key}'");
+        }
+    }
+    assert_eq!(clients[0]["raw"], "[[clients/acme|A]]");
+    assert_eq!(clients[0]["exists"], true);
+    assert_eq!(clients[0]["title"], "Acme Corp");
+    assert_eq!(clients[0]["frontmatter"]["industry"], "tech");
+
+    // Raw frontmatter is untouched by populate.
+    assert_eq!(json["frontmatter"]["clients"][0], "[[clients/acme|A]]");
+}
+
+/// Golden test: dangling relations report path + exists:false with null
+/// title/frontmatter (frontmatter key still present).
+#[test]
+fn test_get_populate_dangling_golden_json() {
+    let dir = setup_relations_cli();
+
+    let output = mdvdb_bin()
+        .args(["get", "invoices/dangling.md", "--populate", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let value = &json["relations"]["client"][0];
+    assert_eq!(value["path"], "clients/ghost.md");
+    assert_eq!(value["exists"], false);
+    assert!(value["title"].is_null());
+    assert!(
+        value.as_object().unwrap().contains_key("frontmatter"),
+        "frontmatter key must be present even for missing targets"
+    );
+    assert!(value["frontmatter"].is_null());
+}
+
+/// Golden test: `get` without --populate must not carry the populate keys,
+/// and referenced_by pins its {source, field, title} shape.
+#[test]
+fn test_get_populate_keys_absent_without_flag() {
+    let dir = setup_relations_cli();
+
+    let output = mdvdb_bin()
+        .args(["get", "invoices/i1.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let obj = json.as_object().unwrap();
+    assert!(!obj.contains_key("relations"), "relations absent without --populate");
+    assert!(!obj.contains_key("referenced_by"), "referenced_by absent without --populate");
+
+    // referenced_by shape on the target side.
+    let output = mdvdb_bin()
+        .args(["get", "clients/acme.md", "--populate", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["relations"], serde_json::json!({}), "no link-shaped fields → empty map");
+    let referenced_by = json["referenced_by"].as_array().unwrap();
+    assert!(!referenced_by.is_empty());
+    for entry in referenced_by {
+        let obj = entry.as_object().unwrap();
+        for key in ["source", "field", "title"] {
+            assert!(obj.contains_key(key), "referenced_by missing key '{key}'");
+        }
+    }
+    // Sorted by (source, field); relation backlinks only (no body-link entry).
+    assert_eq!(referenced_by[0]["source"], "invoices/i1.md");
+    assert_eq!(referenced_by[0]["field"], "client");
+    assert_eq!(referenced_by[1]["source"], "invoices/i2.md");
+    assert_eq!(referenced_by[1]["field"], "clients");
+}
+
+/// Golden test: schema + collection columns pin "Relation" PascalCase and the
+/// slash-less relation_target (overlay wrote "clients/").
+#[test]
+fn test_schema_and_columns_relation_golden_json() {
+    let dir = setup_relations_cli();
+
+    let output = mdvdb_bin()
+        .args(["schema", "--path", "invoices", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let fields = json["schema"]["fields"].as_array().unwrap();
+    let client = fields.iter().find(|f| f["name"] == "client").unwrap();
+    assert_eq!(client["field_type"], "Relation", "PascalCase enum value");
+    assert_eq!(client["relation_target"], "clients", "slash-less target");
+    // Non-relation fields carry the key with null.
+    let amount = fields.iter().find(|f| f["name"] == "amount").unwrap();
+    assert!(amount["relation_target"].is_null());
+
+    let output = mdvdb_bin()
+        .args(["collection", "invoices", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let columns = json["columns"].as_array().unwrap();
+    let client_col = columns.iter().find(|c| c["name"] == "client").unwrap();
+    assert_eq!(client_col["field_type"], "Relation");
+    assert_eq!(client_col["relation_target"], "clients");
+}
+
+/// Golden test: collection --populate fills rows[].relations while
+/// rows[].frontmatter stays raw; absent without the flag.
+#[test]
+fn test_collection_populate_golden_json() {
+    let dir = setup_relations_cli();
+
+    let output = mdvdb_bin()
+        .args(["collection", "invoices", "--populate", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = json["rows"].as_array().unwrap();
+    let i1 = rows.iter().find(|r| r["path"] == "invoices/i1.md").unwrap();
+    assert_eq!(i1["frontmatter"]["client"], "[[clients/acme]]", "raw frontmatter untouched");
+    assert_eq!(i1["relations"]["client"][0]["path"], "clients/acme.md");
+    assert_eq!(i1["relations"]["client"][0]["title"], "Acme Corp");
+
+    let output = mdvdb_bin()
+        .args(["collection", "invoices", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for row in json["rows"].as_array().unwrap() {
+        assert!(
+            !row.as_object().unwrap().contains_key("relations"),
+            "relations key absent without --populate"
+        );
+    }
+}
+
+/// Golden test: search --populate fills results[].file.relations.
+#[test]
+fn test_search_populate_golden_json() {
+    let dir = setup_relations_cli();
+
+    let output = mdvdb_bin()
+        .args(["search", "Invoice body about Acme", "--lexical", "--populate", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let results = json["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+    let i1 = results
+        .iter()
+        .find(|r| r["file"]["path"] == "invoices/i1.md")
+        .expect("i1 should match");
+    assert_eq!(i1["file"]["relations"]["client"][0]["path"], "clients/acme.md");
+}
+
+/// Golden test: links/backlinks/graph JSON pin the always-present `field` key
+/// and the `line_number: 0` frontmatter sentinel.
+#[test]
+fn test_links_and_graph_field_golden_json() {
+    let dir = setup_relations_cli();
+
+    // links: body + relation edges to the same target coexist.
+    let output = mdvdb_bin()
+        .args(["links", "invoices/i1.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let outgoing = json["links"]["outgoing"].as_array().unwrap();
+    let to_acme: Vec<&serde_json::Value> = outgoing
+        .iter()
+        .filter(|l| l["entry"]["target"] == "clients/acme.md")
+        .collect();
+    assert_eq!(to_acme.len(), 2, "body + relation edges: {outgoing:?}");
+    let relation = to_acme.iter().find(|l| !l["entry"]["field"].is_null()).unwrap();
+    assert_eq!(relation["entry"]["field"], "client");
+    assert_eq!(relation["entry"]["line_number"], 0, "frontmatter sentinel");
+    let body = to_acme.iter().find(|l| l["entry"]["field"].is_null()).unwrap();
+    assert!(body["entry"]["line_number"].as_u64().unwrap() > 0);
+    for link in outgoing {
+        assert!(
+            link["entry"].as_object().unwrap().contains_key("field"),
+            "LinkEntry.field must be always-present"
+        );
+    }
+
+    // backlinks: relation entries carry their field.
+    let output = mdvdb_bin()
+        .args(["backlinks", "clients/acme.md", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let backlinks = json["backlinks"].as_array().unwrap();
+    assert!(backlinks.iter().any(|l| l["entry"]["field"] == "client"));
+    for link in backlinks {
+        assert!(link["entry"].as_object().unwrap().contains_key("field"));
+    }
+
+    // graph: every edge carries the always-present field key.
+    let output = mdvdb_bin()
+        .args(["graph", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let edges = json["edges"].as_array().unwrap();
+    assert!(!edges.is_empty());
+    for edge in edges {
+        assert!(
+            edge.as_object().unwrap().contains_key("field"),
+            "GraphEdge.field must be always-present, got {edge}"
+        );
+    }
+    assert!(edges.iter().any(|e| e["field"] == "client"));
+}
+
+/// Relation-aware --filter matching on both search and collection.
+#[test]
+fn test_relation_filter_cli() {
+    let dir = setup_relations_cli();
+
+    for filter in ["client=clients/acme", "client=clients/acme.md", "client=[[clients/acme]]"] {
+        let output = mdvdb_bin()
+            .args(["collection", "invoices", "--filter", filter, "--json"])
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run mdvdb");
+        assert!(output.status.success());
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let paths: Vec<&str> = json["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, vec!["invoices/i1.md"], "filter {filter} should match only i1");
+    }
+
+    let output = mdvdb_bin()
+        .args(["search", "Invoice", "--lexical", "--filter", "client=clients/acme", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let paths: Vec<&str> = json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["file"]["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"invoices/i1.md"), "got {paths:?}");
+    assert!(!paths.contains(&"invoices/dangling.md"));
+}
+
+/// Doctor gains the Relations check with a dangling warning.
+#[test]
+fn test_doctor_relations_cli() {
+    let dir = setup_relations_cli();
+
+    let output = mdvdb_bin()
+        .args(["doctor", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let checks = json["checks"].as_array().unwrap();
+    let relations = checks
+        .iter()
+        .find(|c| c["name"] == "Relations")
+        .expect("Relations check present");
+    assert_eq!(relations["status"], "Warn");
+    let detail = relations["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("invoices/dangling.md#client → clients/ghost.md"),
+        "detail: {detail}"
+    );
+}
+
+/// Help text advertises --populate on all three commands.
+#[test]
+fn test_populate_flag_in_help() {
+    for cmd in ["get", "collection", "search"] {
+        let output = mdvdb_bin()
+            .args([cmd, "--help"])
+            .output()
+            .expect("failed to run mdvdb");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("--populate"),
+            "{cmd} --help should mention --populate"
+        );
+    }
 }

@@ -56,6 +56,7 @@ git clone https://github.com/geckse/markdown-vdb-skills.git skills
 - **Pluggable embeddings** — OpenAI, Ollama, or any custom endpoint
 - **Single index file** — portable, memory-mapped, sub-100ms queries
 - **Link graph** — wikilinks and standard markdown links tracked in the index; `links`, `backlinks`, `orphans` commands; `--boost-links` re-ranks search results
+- **Frontmatter relations** — `client: "[[clients/acme]]"` acts as a foreign key: auto-typed `relation` in the schema, first-class link-graph edges, and `--populate` on `get`/`collection`/`search` resolves the referenced doc inline (JOIN-like, plus `referenced_by` reverse lookups)
 - **Time decay** — `--decay` applies exponential recency weighting with configurable half-life
 - **File watching** — automatic re-indexing on changes
 - **Metadata filtering** — combine any search mode with frontmatter filters
@@ -89,6 +90,9 @@ mdvdb search "authentication" --filter status=published --path docs/ --limit 5
 
 # Time-decayed search (favor recent files)
 mdvdb search "auth" --decay --decay-half-life 30
+
+# Resolve frontmatter relations inline (client: "[[clients/acme]]" → title, path, frontmatter)
+mdvdb get invoices/i1.md --populate --json
 
 # Check index health
 mdvdb doctor

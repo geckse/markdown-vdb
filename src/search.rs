@@ -117,6 +117,9 @@ pub struct SearchQuery {
     pub boost_hops: Option<usize>,
     /// Per-query override for graph context expansion depth (None = use config default).
     pub expand_graph: Option<usize>,
+    /// Resolve frontmatter relations on each result file (depth 1). Applied by
+    /// the `MarkdownVdb::search` wrapper as post-processing; the engine ignores it.
+    pub populate: bool,
 }
 
 impl SearchQuery {
@@ -136,6 +139,7 @@ impl SearchQuery {
             decay_include: None,
             boost_hops: None,
             expand_graph: None,
+            populate: false,
         }
     }
 
@@ -210,6 +214,12 @@ impl SearchQuery {
         self.expand_graph = Some(depth);
         self
     }
+
+    /// Enable relation populate: resolve frontmatter relations on result files.
+    pub fn with_populate(mut self, populate: bool) -> Self {
+        self.populate = populate;
+        self
+    }
 }
 
 /// Metadata filter for narrowing search results by frontmatter fields.
@@ -275,6 +285,10 @@ pub struct SearchResultFile {
     pub path_components: Vec<String>,
     /// Filesystem modification time as Unix timestamp, if available.
     pub modified_at: Option<u64>,
+    /// Resolved frontmatter relations (populate only; key absent otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relations:
+        Option<std::collections::BTreeMap<String, Vec<crate::relations::RelationValue>>>,
 }
 
 /// A graph context item representing a chunk from a file linked to a search result.
@@ -796,6 +810,7 @@ fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
                 file_size: file.file_size,
                 path_components: chunk.source_path.split('/').map(String::from).collect(),
                 modified_at,
+                relations: None,
             },
         });
 
@@ -1095,6 +1110,7 @@ fn expand_graph_context(
                     file_size: file.file_size,
                     path_components: path.split('/').map(String::from).collect(),
                     modified_at,
+                    relations: None,
                 },
                 linked_from,
                 hop_distance: hop,
@@ -1238,6 +1254,26 @@ pub(crate) fn evaluate_filters(filters: &[MetadataFilter], frontmatter: Option<&
     filters.iter().all(|filter| evaluate_single_filter(filter, fm))
 }
 
+/// Equality between a frontmatter value and a filter value, aware of relation
+/// syntax. Exact `==` runs first (zero regression for existing filters); when
+/// the frontmatter value is link-shaped, both sides are normalized via
+/// [`crate::relations::relation_key`] so `--filter client=clients/acme`,
+/// `client=clients/acme.md`, and `client=[[clients/acme]]` all match
+/// `"[[clients/acme|Acme]]"`. Purely syntactic — no path resolution happens.
+fn filter_values_equal(field_value: &Value, filter_value: &Value) -> bool {
+    if field_value == filter_value {
+        return true;
+    }
+    if let (Value::String(fv), Value::String(qv)) = (field_value, filter_value) {
+        if let Some(key) = crate::relations::relation_key(fv) {
+            let coerced = crate::relations::relation_key(qv)
+                .unwrap_or_else(|| qv.strip_suffix(".md").unwrap_or(qv).to_string());
+            return key == coerced;
+        }
+    }
+    false
+}
+
 /// Evaluate a single metadata filter against frontmatter.
 fn evaluate_single_filter(filter: &MetadataFilter, frontmatter: &Value) -> bool {
     match filter {
@@ -1247,9 +1283,9 @@ fn evaluate_single_filter(filter: &MetadataFilter, frontmatter: &Value) -> bool 
             };
             // If field is an array, check if it contains the value
             if let Some(arr) = field_value.as_array() {
-                arr.contains(value)
+                arr.iter().any(|v| filter_values_equal(v, value))
             } else {
-                field_value == value
+                filter_values_equal(field_value, value)
             }
         }
         MetadataFilter::In { field, values } => {
@@ -1261,9 +1297,10 @@ fn evaluate_single_filter(filter: &MetadataFilter, frontmatter: &Value) -> bool 
             };
             // If field is an array, check intersection
             if let Some(arr) = field_value.as_array() {
-                arr.iter().any(|v| values.contains(v))
+                arr.iter()
+                    .any(|v| values.iter().any(|q| filter_values_equal(v, q)))
             } else {
-                values.contains(field_value)
+                values.iter().any(|q| filter_values_equal(field_value, q))
             }
         }
         MetadataFilter::Range { field, min, max } => {
@@ -1464,6 +1501,7 @@ mod tests {
                 file_size: 100,
                 path_components: vec!["a.md".into()],
                 modified_at: None,
+                relations: None,
             },
             linked_from: "b.md".into(),
             hop_distance: 1,
@@ -1491,6 +1529,7 @@ mod tests {
                 file_size: 100,
                 path_components: vec!["a.md".into()],
                 modified_at: None,
+                relations: None,
             },
             linked_from: "b.md".into(),
             hop_distance: 1,
@@ -1835,6 +1874,94 @@ mod tests {
             },
         ];
         assert!(!evaluate_filters(&filters_fail, Some(&fm)));
+    }
+
+    // --- relation-aware filter tests (phase 31) ---
+
+    #[test]
+    fn test_equals_relation_filter_variants_match() {
+        let fm = json!({"client": "[[clients/acme|Acme]]"});
+        for filter_value in ["clients/acme", "clients/acme.md", "[[clients/acme]]"] {
+            let filters = vec![MetadataFilter::Equals {
+                field: "client".into(),
+                value: json!(filter_value),
+            }];
+            assert!(
+                evaluate_filters(&filters, Some(&fm)),
+                "filter {filter_value:?} should match a relation value"
+            );
+        }
+    }
+
+    #[test]
+    fn test_equals_relation_filter_rejects_other_target() {
+        let fm = json!({"client": "[[clients/acme|Acme]]"});
+        let filters = vec![MetadataFilter::Equals {
+            field: "client".into(),
+            value: json!("clients/globex"),
+        }];
+        assert!(!evaluate_filters(&filters, Some(&fm)));
+    }
+
+    #[test]
+    fn test_equals_relation_filter_array_field() {
+        let fm = json!({"clients": ["[[clients/acme|A]]", "[[clients/globex]]"]});
+        let filters = vec![MetadataFilter::Equals {
+            field: "clients".into(),
+            value: json!("clients/globex"),
+        }];
+        assert!(evaluate_filters(&filters, Some(&fm)));
+    }
+
+    #[test]
+    fn test_in_relation_filter() {
+        let fm = json!({"client": "[[clients/acme]]"});
+        let filters = vec![MetadataFilter::In {
+            field: "client".into(),
+            values: vec![json!("clients/globex"), json!("clients/acme.md")],
+        }];
+        assert!(evaluate_filters(&filters, Some(&fm)));
+    }
+
+    #[test]
+    fn test_relation_filter_no_regression_for_plain_values() {
+        // Non-link strings never enter the normalized path.
+        let fm = json!({"status": "draft", "n": 5, "tags": ["a", "b"], "date": "2024-01-15"});
+        assert!(evaluate_filters(
+            &[MetadataFilter::Equals { field: "status".into(), value: json!("draft") }],
+            Some(&fm)
+        ));
+        assert!(!evaluate_filters(
+            &[MetadataFilter::Equals { field: "status".into(), value: json!("draft.md") }],
+            Some(&fm)
+        ));
+        assert!(evaluate_filters(
+            &[MetadataFilter::Equals { field: "n".into(), value: json!(5) }],
+            Some(&fm)
+        ));
+        assert!(evaluate_filters(
+            &[MetadataFilter::Equals { field: "tags".into(), value: json!("a") }],
+            Some(&fm)
+        ));
+        assert!(evaluate_filters(
+            &[MetadataFilter::Equals { field: "date".into(), value: json!("2024-01-15") }],
+            Some(&fm)
+        ));
+    }
+
+    #[test]
+    fn test_relation_filter_is_purely_syntactic() {
+        // Documented limitation: [[acme]] under a target overlay matches
+        // client=acme, NOT client=clients/acme (no resolution at filter time).
+        let fm = json!({"client": "[[acme]]"});
+        assert!(evaluate_filters(
+            &[MetadataFilter::Equals { field: "client".into(), value: json!("acme") }],
+            Some(&fm)
+        ));
+        assert!(!evaluate_filters(
+            &[MetadataFilter::Equals { field: "client".into(), value: json!("clients/acme") }],
+            Some(&fm)
+        ));
     }
 
     // --- boost_links field and builder tests ---

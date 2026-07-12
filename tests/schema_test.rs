@@ -37,6 +37,7 @@ fn make_file(path: &str, frontmatter: serde_json::Value) -> MarkdownFile {
         file_size: 100,
         links: Vec::new(),
         modified_at: 0,
+        frontmatter_links: Vec::new(),
     }
 }
 
