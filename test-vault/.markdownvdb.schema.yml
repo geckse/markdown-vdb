@@ -57,3 +57,39 @@ scopes:
         field_type: string
         allowed_values:
           - draft
+
+  # Frontmatter relations (phase 31): folders as tables, wiki links as
+  # foreign keys. `target:` scopes the app's picker and resolves bare
+  # names like [[initech]] against that folder.
+  invoices:
+    fields:
+      client:
+        field_type: relation
+        target: clients
+        description: "The billed client (FK into clients/)"
+      project:
+        field_type: relation
+        target: projects
+        description: "The project this invoice bills"
+      related:
+        field_type: relation
+        description: "Other invoices this one relates to"
+      status:
+        field_type: string
+        allowed_values:
+          - draft
+          - sent
+          - paid
+
+  projects:
+    fields:
+      client:
+        field_type: relation
+        target: clients
+        description: "The client this project belongs to"
+      status:
+        field_type: string
+        allowed_values:
+          - planned
+          - in-progress
+          - done

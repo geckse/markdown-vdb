@@ -2987,3 +2987,17 @@ fn test_populate_flag_in_help() {
         );
     }
 }
+
+/// `--version --json` must emit machine-readable JSON — the app's version
+/// gate (phase 42) parses this to enable relation features.
+#[test]
+fn test_version_json_output() {
+    let output = mdvdb_bin()
+        .args(["--version", "--json"])
+        .output()
+        .expect("failed to run mdvdb");
+    assert!(output.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--version --json must be valid JSON");
+    assert_eq!(json["version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
+}

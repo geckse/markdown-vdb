@@ -523,10 +523,19 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if cli.version {
-        format::print_version();
-        // Show update notice on --version if available
-        if let Ok(Some(msg)) = update_handle.await {
-            eprintln!("{msg}");
+        if cli.json {
+            // Machine-readable version (the Tesseract app gates relation
+            // features on this — see app repo `lib/cli-features.svelte.ts`).
+            println!(
+                "{}",
+                serde_json::json!({ "version": env!("CARGO_PKG_VERSION") })
+            );
+        } else {
+            format::print_version();
+            // Show update notice on --version if available
+            if let Ok(Some(msg)) = update_handle.await {
+                eprintln!("{msg}");
+            }
         }
         return Ok(());
     }
