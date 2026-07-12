@@ -4,7 +4,8 @@ type: agent-memory
 category: longterm
 owner: assistant
 last_updated: "2026-03-18"
-tags: [preferences, identity, core-facts]
+tags: [ preferences, identity, core-facts ]
+date: "2026-08-01"
 ---
 
 # Long-Term Memory

@@ -46,3 +46,14 @@ fields:
   version:
     type: string
     description: "Version number (semver)"
+scopes:
+  notes:
+    fields:
+      category:
+        field_type: string
+        allowed_values:
+          - notes
+      status:
+        field_type: string
+        allowed_values:
+          - draft
