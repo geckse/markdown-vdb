@@ -593,3 +593,77 @@ fn test_get_file_mtimes_returns_all() {
     assert_eq!(mtimes.get("a.md"), Some(&100));
     assert_eq!(mtimes.get("b.md"), Some(&200));
 }
+
+// ---------------------------------------------------------------------------
+// Path normalization (Windows-style separators)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_upsert_normalizes_backslash_paths() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    // Windows-style separators in the source PathBufs.
+    let mut file = fake_markdown_file(r"docs\note.md", "hash1");
+    file.path = PathBuf::from(r"docs\note.md");
+    let chunks = vec![Chunk {
+        id: "docs/note.md#0".to_string(),
+        source_path: PathBuf::from(r"docs\note.md"),
+        heading_hierarchy: vec![],
+        content: "Chunk content".to_string(),
+        start_line: 1,
+        end_line: 2,
+        chunk_index: 0,
+        is_sub_split: false,
+    }];
+    index.upsert(&file, &chunks, &fake_embeddings(1, 8)).unwrap();
+
+    // Stored keys and stored strings must use forward slashes.
+    let stored = index.get_file("docs/note.md");
+    assert!(stored.is_some(), "file must be keyed by slash-separated path");
+    assert_eq!(stored.unwrap().relative_path, "docs/note.md");
+    assert!(index.get_file(r"docs\note.md").is_none());
+
+    let chunk = index.get_chunk("docs/note.md#0").expect("chunk stored");
+    assert_eq!(chunk.source_path, "docs/note.md");
+
+    assert!(index.get_file_hashes().contains_key("docs/note.md"));
+    assert_eq!(index.get_file_mtime("docs/note.md"), Some(0));
+}
+
+// ---------------------------------------------------------------------------
+// Advisory write lock (cross-process safety)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_save_fails_index_busy_while_external_lock_held() {
+    let (dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+
+    // Simulate a second mdvdb process mid-write by holding the advisory lock
+    // on the sibling `<index>.lock` file.
+    let lock_path = path.with_extension("lock");
+    let external = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    external.try_lock().unwrap();
+
+    let err = index.save().expect_err("save must fail while lock is held");
+    let msg = err.to_string();
+    assert!(
+        matches!(&err, Error::IndexBusy { path: busy_path } if *busy_path == path),
+        "expected IndexBusy for the index path, got {err:?}"
+    );
+    assert!(
+        msg.contains("another mdvdb process"),
+        "IndexBusy message should mention another process: {msg}"
+    );
+
+    // Dropping the external handle releases the lock — save succeeds again.
+    drop(external);
+    index.save().unwrap();
+    drop(dir);
+}

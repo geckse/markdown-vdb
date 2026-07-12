@@ -51,7 +51,7 @@ pub fn build_file_tree(root: &Path, config: &Config, index: &Index) -> Result<Fi
 
     let disk_paths: HashSet<String> = disk_files
         .iter()
-        .filter_map(|p| p.to_str().map(|s| s.to_string()))
+        .map(|p| crate::path_util::to_slash(p))
         .collect();
 
     let mut entries: Vec<(String, FileState)> = Vec::new();

@@ -213,7 +213,9 @@ impl Schema {
             format!("{path_prefix}/")
         };
 
-        let filtered = files.iter().filter(|f| f.path.to_string_lossy().starts_with(&prefix));
+        let filtered = files
+            .iter()
+            .filter(|f| crate::path_util::to_slash(&f.path).starts_with(&prefix));
         Self::infer_from_iter(filtered)
     }
 
@@ -224,7 +226,7 @@ impl Schema {
     pub fn discover_scopes(files: &[MarkdownFile]) -> Vec<String> {
         let mut scopes: BTreeMap<String, ()> = BTreeMap::new();
         for file in files {
-            let path_str = file.path.to_string_lossy();
+            let path_str = crate::path_util::to_slash(&file.path);
             if let Some(idx) = path_str.find('/') {
                 let top = &path_str[..idx];
                 scopes.entry(top.to_string()).or_default();

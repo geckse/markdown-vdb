@@ -1,10 +1,9 @@
 ---
 title: Pilot Rollout
-client: "[[initech]]"
+client: "[[clients/initech]]"
 status: planned
 budget: 6000
 ---
-
 # Pilot Rollout
 
 Four-week pilot for Initech. Note: the `client` value above is a bare

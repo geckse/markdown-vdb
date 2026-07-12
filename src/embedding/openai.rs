@@ -9,6 +9,64 @@ use crate::error::Error;
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/embeddings";
 const MAX_RETRIES: u32 = 3;
 
+/// OpenAI rejects requests totalling more than 300k tokens; stay below with a
+/// margin for tokenizer drift.
+const MAX_TOKENS_PER_REQUEST: usize = 280_000;
+/// OpenAI rejects input arrays longer than 2048 entries.
+const MAX_INPUTS_PER_REQUEST: usize = 2_048;
+/// text-embedding-3 models reject single inputs over 8192 tokens; oversized
+/// inputs (e.g. giant link-context paragraphs) are truncated with a margin.
+const MAX_TOKENS_PER_INPUT: usize = 8_000;
+
+/// Sanitize inputs and split them into request-sized groups.
+///
+/// Empty/whitespace-only texts are replaced with a single space (OpenAI
+/// rejects empty strings), inputs over `max_input_tokens` are truncated, and
+/// consecutive inputs are packed greedily so each group stays within
+/// `max_request_tokens` total tokens and `max_inputs` entries. Input order is
+/// preserved across groups.
+fn plan_requests(
+    texts: &[String],
+    max_request_tokens: usize,
+    max_inputs: usize,
+    max_input_tokens: usize,
+) -> Vec<Vec<String>> {
+    let mut groups: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut current_tokens = 0usize;
+
+    for t in texts {
+        let mut text = if t.trim().is_empty() {
+            " ".to_string()
+        } else {
+            t.clone()
+        };
+        let mut tokens = crate::chunker::count_tokens(&text);
+        if tokens > max_input_tokens {
+            warn!(
+                tokens,
+                limit = max_input_tokens,
+                "truncating oversized embedding input"
+            );
+            text = crate::chunker::truncate_to_tokens(&text, max_input_tokens);
+            tokens = max_input_tokens;
+        }
+
+        if !current.is_empty()
+            && (current.len() >= max_inputs || current_tokens + tokens > max_request_tokens)
+        {
+            groups.push(std::mem::take(&mut current));
+            current_tokens = 0;
+        }
+        current.push(text);
+        current_tokens += tokens;
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    groups
+}
+
 /// OpenAI-compatible embedding provider.
 pub struct OpenAIProvider {
     client: reqwest::Client,
@@ -54,28 +112,12 @@ impl OpenAIProvider {
     }
 }
 
-#[async_trait]
-impl EmbeddingProvider for OpenAIProvider {
-    async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
-        if texts.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // OpenAI rejects empty strings in the input array.
-        // Replace any empty/whitespace-only texts with a single space.
-        let sanitized: Vec<String> = texts
-            .iter()
-            .map(|t| {
-                if t.trim().is_empty() {
-                    " ".to_string()
-                } else {
-                    t.clone()
-                }
-            })
-            .collect();
-
+impl OpenAIProvider {
+    /// Send a single embeddings request (with retries) for a pre-planned group
+    /// of inputs that is known to fit OpenAI's per-request limits.
+    async fn send_request(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
         let request_body = EmbeddingRequest {
-            input: &sanitized,
+            input: texts,
             model: &self.model,
             dimensions: self.dimensions,
         };
@@ -169,6 +211,35 @@ impl EmbeddingProvider for OpenAIProvider {
         }
 
         Err(last_error.unwrap_or_else(|| Error::EmbeddingProvider("max retries exceeded".into())))
+    }
+}
+
+#[async_trait]
+impl EmbeddingProvider for OpenAIProvider {
+    async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let groups = plan_requests(
+            texts,
+            MAX_TOKENS_PER_REQUEST,
+            MAX_INPUTS_PER_REQUEST,
+            MAX_TOKENS_PER_INPUT,
+        );
+        if groups.len() > 1 {
+            debug!(
+                inputs = texts.len(),
+                requests = groups.len(),
+                "splitting embedding batch to respect per-request token limit"
+            );
+        }
+
+        let mut embeddings = Vec::with_capacity(texts.len());
+        for group in &groups {
+            embeddings.extend(self.send_request(group).await?);
+        }
+        Ok(embeddings)
     }
 
     fn dimensions(&self) -> usize {
@@ -270,6 +341,98 @@ mod tests {
     fn error_classification_5xx() {
         let err = Error::EmbeddingProvider("server error (503)".into());
         assert!(err.to_string().contains("503"));
+    }
+
+    // --- plan_requests tests ---
+
+    fn owned(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn plan_requests_single_group_when_within_limits() {
+        let texts = owned(&["hello world", "foo bar", "baz"]);
+        let groups = plan_requests(&texts, 1000, 100, 100);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0], texts);
+    }
+
+    #[test]
+    fn plan_requests_sanitizes_empty_inputs() {
+        let texts = owned(&["", "   ", "real text"]);
+        let groups = plan_requests(&texts, 1000, 100, 100);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0][0], " ");
+        assert_eq!(groups[0][1], " ");
+        assert_eq!(groups[0][2], "real text");
+    }
+
+    #[test]
+    fn plan_requests_splits_by_token_budget() {
+        // "word word ... word" — each text is ~10 tokens.
+        let text = "word ".repeat(10).trim().to_string();
+        let tokens = crate::chunker::count_tokens(&text);
+        let texts = vec![text; 5];
+        // Budget fits exactly 2 texts per request.
+        let groups = plan_requests(&texts, tokens * 2, 100, 1000);
+        assert_eq!(groups.len(), 3, "5 texts at 2-per-budget should yield 3 groups");
+        assert_eq!(groups[0].len(), 2);
+        assert_eq!(groups[1].len(), 2);
+        assert_eq!(groups[2].len(), 1);
+    }
+
+    #[test]
+    fn plan_requests_splits_by_input_count() {
+        let texts = owned(&["a", "b", "c", "d", "e"]);
+        let groups = plan_requests(&texts, 100_000, 2, 100);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0], owned(&["a", "b"]));
+        assert_eq!(groups[1], owned(&["c", "d"]));
+        assert_eq!(groups[2], owned(&["e"]));
+    }
+
+    #[test]
+    fn plan_requests_truncates_oversized_input() {
+        let huge = "word ".repeat(500).trim().to_string();
+        let texts = vec![huge.clone(), "small".to_string()];
+        let groups = plan_requests(&texts, 1000, 100, 50);
+        assert_eq!(groups.len(), 1);
+        assert!(crate::chunker::count_tokens(&groups[0][0]) <= 50);
+        assert!(huge.starts_with(&groups[0][0]), "truncation must keep a prefix");
+        assert_eq!(groups[0][1], "small");
+    }
+
+    #[test]
+    fn plan_requests_preserves_order_across_groups() {
+        let texts: Vec<String> = (0..7).map(|i| format!("text number {i}")).collect();
+        let groups = plan_requests(&texts, 100_000, 3, 100);
+        let flat: Vec<String> = groups.into_iter().flatten().collect();
+        assert_eq!(flat, texts, "flattened groups must equal original order");
+    }
+
+    #[test]
+    fn plan_requests_giant_paragraph_scenario_stays_under_limits() {
+        // Regression: 15 link-context "paragraphs" of ~45k tokens each used to
+        // produce a single 675k-token request. Each must now be truncated and
+        // every group must respect the request budget.
+        let paragraph = "word ".repeat(45_000).trim().to_string();
+        let texts = vec![paragraph; 15];
+        let groups = plan_requests(
+            &texts,
+            MAX_TOKENS_PER_REQUEST,
+            MAX_INPUTS_PER_REQUEST,
+            MAX_TOKENS_PER_INPUT,
+        );
+        let total: usize = groups.iter().map(|g| g.len()).sum();
+        assert_eq!(total, 15);
+        for group in &groups {
+            let group_tokens: usize = group.iter().map(|t| crate::chunker::count_tokens(t)).sum();
+            assert!(group_tokens <= MAX_TOKENS_PER_REQUEST);
+            assert!(group.len() <= MAX_INPUTS_PER_REQUEST);
+            for t in group {
+                assert!(crate::chunker::count_tokens(t) <= MAX_TOKENS_PER_INPUT);
+            }
+        }
     }
 
     #[tokio::test]

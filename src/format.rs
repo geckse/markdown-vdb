@@ -12,6 +12,7 @@ use mdvdb::IndexStatus;
 use mdvdb::DocumentInfo;
 use mdvdb::IngestResult;
 use mdvdb::{IngestPreview, PreviewFileStatus};
+use mdvdb::VaultInfo;
 use mdvdb::{CheckStatus, DoctorResult};
 use mdvdb::config::Config;
 use mdvdb::GraphData;
@@ -453,6 +454,11 @@ pub fn print_status(status: &IndexStatus) {
         status.vector_count.to_string().yellow()
     );
     println!(
+        "  {}      {}",
+        "Edges:".cyan(),
+        status.edge_count.to_string().yellow()
+    );
+    println!(
         "  {}  {}",
         "File size:".cyan(),
         format_file_size(status.file_size).yellow()
@@ -474,6 +480,85 @@ pub fn print_status(status: &IndexStatus) {
         "  {} {}",
         "Dimensions:".cyan(),
         status.embedding_config.dimensions.to_string().yellow()
+    );
+    println!();
+}
+
+/// Print vault/folder info with colored formatting to stdout.
+pub fn print_info(info: &VaultInfo) {
+    let title = if info.is_whole_vault {
+        "Vault Info".to_string()
+    } else {
+        format!("Info: {}", info.scope)
+    };
+    println!("\n  {} {}\n", "●".cyan().bold(), title.bold());
+
+    println!(
+        "  {}  {}",
+        "Markdown files:".cyan(),
+        info.file_count.to_string().yellow()
+    );
+    println!(
+        "  {}   {}",
+        "Indexed files:".cyan(),
+        info.indexed_file_count.to_string().yellow()
+    );
+    println!(
+        "  {}          {}",
+        "Chunks:".cyan(),
+        info.chunk_count.to_string().yellow()
+    );
+    println!(
+        "  {}         {} ({} chunk + {} edge)",
+        "Vectors:".cyan(),
+        info.vector_count.to_string().yellow(),
+        info.chunk_count,
+        info.edge_count
+    );
+
+    println!("\n  {}", "Sync:".bold());
+    println!(
+        "    {} new  {} changed  {} unchanged  {} deleted",
+        info.sync.new.to_string().green(),
+        info.sync.changed.to_string().yellow(),
+        info.sync.unchanged.to_string().dimmed(),
+        info.sync.deleted.to_string().red()
+    );
+
+    println!("\n  {}", "Full reindex estimate:".bold());
+    println!(
+        "    {}      {}",
+        "Chunks:".dimmed(),
+        info.reindex_chunks.to_string().yellow()
+    );
+    println!(
+        "    {} {}",
+        "Est. tokens:".dimmed(),
+        info.reindex_estimated_tokens.to_string().yellow()
+    );
+    println!(
+        "    {}   {}",
+        "API calls:".dimmed(),
+        info.reindex_estimated_api_calls.to_string().yellow()
+    );
+
+    println!("\n  {}", "Index:".bold());
+    println!(
+        "    {}       {}",
+        "Size:".dimmed(),
+        format_file_size(info.index_file_size).yellow()
+    );
+    println!(
+        "    {}    {}",
+        "Updated:".dimmed(),
+        format_timestamp(unix_to_system_time(info.last_updated))
+    );
+    println!(
+        "    {}   {} / {} ({} dims)",
+        "Embedding:".dimmed(),
+        info.embedding.provider.bold(),
+        info.embedding.model,
+        info.embedding.dimensions
     );
     println!();
 }

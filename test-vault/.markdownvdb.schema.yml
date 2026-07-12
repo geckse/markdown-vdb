@@ -93,3 +93,9 @@ scopes:
           - planned
           - in-progress
           - done
+  runbooks:
+    fields:
+      category:
+        field_type: string
+        allowed_values:
+          - runbooks

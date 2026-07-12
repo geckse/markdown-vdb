@@ -193,7 +193,7 @@ pub fn resolve_link(source: &str, target: &str) -> String {
     }
 
     // Normalize separators
-    let target = target.replace('\\', "/");
+    let target = crate::path_util::normalize_path_input(target);
 
     // Determine the source directory
     let source_dir = Path::new(source).parent().unwrap_or(Path::new(""));
@@ -205,7 +205,7 @@ pub fn resolve_link(source: &str, target: &str) -> String {
     let normalized = normalize_path(&joined);
 
     // Ensure .md extension
-    let result = normalized.to_string_lossy().replace('\\', "/");
+    let result = crate::path_util::to_slash(&normalized);
     if result.ends_with(".md") {
         result
     } else {
@@ -238,7 +238,7 @@ fn build_entries_for_file(
     file: &MarkdownFile,
     ctx: &crate::relations::RelationContext,
 ) -> (String, Vec<LinkEntry>) {
-    let source = file.path.to_string_lossy().replace('\\', "/");
+    let source = crate::path_util::to_slash(&file.path);
     let mut seen: HashSet<(String, Option<String>)> = HashSet::new();
     let mut entries = Vec::new();
 

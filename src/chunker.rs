@@ -41,6 +41,22 @@ pub fn count_tokens(text: &str) -> usize {
     get_tokenizer().encode_ordinary(text).len()
 }
 
+/// Truncate `text` to at most `max_tokens` tokens (cl100k_base).
+///
+/// Returns the text unchanged when it is already within the limit. Falls back
+/// to a character-based cut if the token slice does not decode cleanly (a
+/// token boundary can split a multi-byte character).
+pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> String {
+    let tokenizer = get_tokenizer();
+    let tokens = tokenizer.encode_ordinary(text);
+    if tokens.len() <= max_tokens {
+        return text.to_string();
+    }
+    tokenizer
+        .decode(tokens[..max_tokens].to_vec())
+        .unwrap_or_else(|_| text.chars().take(max_tokens * 4).collect())
+}
+
 /// A section of content between headings, used internally during chunking.
 struct Section {
     /// Heading hierarchy for this section.
@@ -164,7 +180,7 @@ pub fn chunk_document(
 ) -> crate::Result<Vec<Chunk>> {
     let body_lines: Vec<&str> = file.body.lines().collect();
     let total_lines = body_lines.len();
-    let source_path = file.path.to_string_lossy();
+    let source_path = crate::path_util::to_slash(&file.path);
 
     // Build sections from headings.
     // heading.line_number is 1-based relative to body.
@@ -311,6 +327,34 @@ mod tests {
     fn count_tokens_hello_world() {
         let count = count_tokens("hello world");
         assert!(count > 0);
+    }
+
+    #[test]
+    fn truncate_to_tokens_short_text_unchanged() {
+        let text = "hello world";
+        assert_eq!(truncate_to_tokens(text, 100), text);
+    }
+
+    #[test]
+    fn truncate_to_tokens_exact_limit_unchanged() {
+        let text = "hello world"; // 2 tokens
+        assert_eq!(truncate_to_tokens(text, 2), text);
+    }
+
+    #[test]
+    fn truncate_to_tokens_cuts_long_text() {
+        let text = "word ".repeat(100);
+        let truncated = truncate_to_tokens(&text, 10);
+        assert!(count_tokens(&truncated) <= 10);
+        assert!(text.starts_with(&truncated), "must keep a prefix of the input");
+    }
+
+    #[test]
+    fn truncate_to_tokens_multibyte_content() {
+        let text = "日本語のテキスト ".repeat(50);
+        let truncated = truncate_to_tokens(&text, 20);
+        assert!(count_tokens(&truncated) <= 20);
+        assert!(!truncated.is_empty());
     }
 
     #[test]

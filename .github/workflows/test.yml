@@ -1,0 +1,72 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: windows-latest
+            no_simsimd: true
+            # Define MAP_FAILED — usearch C++ header uses it but doesn't guard for MSVC
+            # (mirrors the x86_64-pc-windows-msvc entry in release-cli.yml)
+            extra_cxxflags: "/DMAP_FAILED=((void*)-1)"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.no_simsimd }}" = "true" ]; then
+            cargo test --no-default-features
+          else
+            cargo test
+          fi
+        shell: bash
+        env:
+          CXXFLAGS: ${{ matrix.extra_cxxflags }}
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # NOTE: `cargo fmt --check` is intentionally NOT enforced yet — the tree is not
+      # rustfmt-clean (e.g. src/clustering/, src/config.rs, tests/cli_test.rs). Run
+      # `cargo fmt` in a dedicated commit, then uncomment:
+      #
+      # - name: Check formatting
+      #   run: cargo fmt --check
+
+      - name: Clippy (zero warnings)
+        run: cargo clippy --all-targets -- -D warnings

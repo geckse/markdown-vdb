@@ -95,6 +95,10 @@ pub struct IndexStatus {
     pub chunk_count: usize,
     /// Total number of vectors in the HNSW index.
     pub vector_count: usize,
+    /// Number of edge vectors (semantic link embeddings) in the HNSW index.
+    /// Edge vectors live only in HNSW, never in `chunks`, so a healthy index
+    /// satisfies `vector_count == chunk_count + edge_count`.
+    pub edge_count: usize,
     /// Unix timestamp of last save.
     pub last_updated: u64,
     /// Size of the index file on disk in bytes.
@@ -103,10 +107,21 @@ pub struct IndexStatus {
     pub embedding_config: EmbeddingConfig,
 }
 
+/// Index-side counts for a path scope, returned by `Index::scoped_counts()`.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct ScopedCounts {
+    /// Indexed files whose path falls within the scope.
+    pub files: usize,
+    /// Chunks belonging to in-scope files.
+    pub chunks: usize,
+    /// Edge vectors whose source file falls within the scope.
+    pub edges: usize,
+}
+
 impl From<&Chunk> for StoredChunk {
     fn from(chunk: &Chunk) -> Self {
         Self {
-            source_path: chunk.source_path.to_string_lossy().into_owned(),
+            source_path: crate::path_util::to_slash(&chunk.source_path),
             heading_hierarchy: chunk.heading_hierarchy.clone(),
             content: chunk.content.clone(),
             start_line: chunk.start_line,
@@ -130,7 +145,7 @@ impl From<&MarkdownFile> for StoredFile {
             .unwrap_or(0);
 
         Self {
-            relative_path: file.path.to_string_lossy().into_owned(),
+            relative_path: crate::path_util::to_slash(&file.path),
             content_hash: file.content_hash.clone(),
             frontmatter,
             file_size: file.file_size,

@@ -593,3 +593,44 @@ async fn neighborhood_serialization() {
     assert_eq!(deserialized.outgoing_depth_count, result.outgoing_depth_count);
     assert_eq!(deserialized.incoming_depth_count, result.incoming_depth_count);
 }
+
+// ---------------------------------------------------------------------------
+// Path normalization (Windows-style separators)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_resolve_link_normalizes_backslash_targets() {
+    assert_eq!(
+        links::resolve_link("docs/a.md", r"sub\b"),
+        "docs/sub/b.md",
+        "backslash separators in targets must normalize to forward slashes"
+    );
+    // Idempotent on already-normalized targets.
+    assert_eq!(links::resolve_link("docs/a.md", "sub/b"), "docs/sub/b.md");
+}
+
+#[tokio::test]
+async fn test_links_query_accepts_backslash_input() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(
+        root.join("docs").join("a.md"),
+        "# A\n\nLink to [B](b.md).\n",
+    )
+    .unwrap();
+    fs::write(root.join("docs").join("b.md"), "# B\n\nContent of B.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Windows-style input path resolves to the slash-separated index key.
+    let result = vdb.links(r"docs\a.md").unwrap();
+    assert_eq!(result.outgoing.len(), 1);
+    assert_eq!(result.outgoing[0].entry.target, "docs/b.md");
+
+    let backlinks = vdb.backlinks(r"docs\b.md").unwrap();
+    assert_eq!(backlinks.len(), 1);
+    assert_eq!(backlinks[0].entry.source, "docs/a.md");
+}

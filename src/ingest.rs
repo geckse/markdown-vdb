@@ -55,7 +55,7 @@ pub async fn ingest_file(
     overlap_tokens: usize,
     batch_size: usize,
 ) -> Result<IngestResult> {
-    let rel_str = relative_path.to_string_lossy().to_string();
+    let rel_str = crate::path_util::to_slash(relative_path);
     debug!(path = %rel_str, "ingesting file");
 
     // 1. Parse the markdown file.
@@ -194,7 +194,7 @@ pub async fn ingest_full(
     // 2. Track which files are currently on disk for stale detection.
     let discovered_set: HashSet<String> = discovered_paths
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| crate::path_util::to_slash(p))
         .collect();
 
     // 3. Ingest each discovered file.

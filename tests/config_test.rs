@@ -602,6 +602,138 @@ fn no_user_config_env_disables_user_config() {
     clear_env();
 }
 
+// ---------------------------------------------------------------------------
+// User-level secrets (~/.mdvdb/.env + legacy ~/.mdvdb/config)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn user_env_file_provides_openai_key() {
+    clear_env();
+    let project = TempDir::new().unwrap();
+    let user_home = TempDir::new().unwrap();
+
+    fs::write(user_home.path().join(".env"), "OPENAI_API_KEY=sk-user\n").unwrap();
+    std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
+
+    let config = Config::load(project.path()).unwrap();
+    assert_eq!(
+        config.openai_api_key.as_deref(),
+        Some("sk-user"),
+        "~/.mdvdb/.env should provide the API key"
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn legacy_user_dotenv_provides_secrets_even_when_yaml_exists() {
+    clear_env();
+    let project = TempDir::new().unwrap();
+    let user_home = TempDir::new().unwrap();
+
+    // Both the migrated YAML and a (re)created legacy dotenv config exist.
+    write_user_yaml(user_home.path(), "embedding:\n  model: from-yaml\n");
+    fs::write(
+        user_home.path().join("config"),
+        "MDVDB_EMBEDDING_MODEL=from-legacy\nOPENAI_API_KEY=sk-legacy\n",
+    )
+    .unwrap();
+    std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
+
+    let config = Config::load(project.path()).unwrap();
+    assert_eq!(
+        config.openai_api_key.as_deref(),
+        Some("sk-legacy"),
+        "legacy ~/.mdvdb/config should still provide secrets"
+    );
+    assert_eq!(
+        config.embedding_model, "from-yaml",
+        "MDVDB_* keys in the legacy dotenv must not override YAML"
+    );
+    assert!(
+        user_home.path().join("config").is_file(),
+        "legacy file must not be migrated away while YAML exists"
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn project_env_wins_over_user_secrets() {
+    clear_env();
+    let project = TempDir::new().unwrap();
+    let user_home = TempDir::new().unwrap();
+
+    fs::write(project.path().join(".env"), "OPENAI_API_KEY=sk-project\n").unwrap();
+    fs::write(user_home.path().join(".env"), "OPENAI_API_KEY=sk-user\n").unwrap();
+    std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
+
+    let config = Config::load(project.path()).unwrap();
+    assert_eq!(
+        config.openai_api_key.as_deref(),
+        Some("sk-project"),
+        "project .env should take priority over user-level secrets"
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn no_user_config_disables_user_secrets() {
+    clear_env();
+    let project = TempDir::new().unwrap();
+    let user_home = TempDir::new().unwrap();
+
+    fs::write(user_home.path().join(".env"), "OPENAI_API_KEY=sk-user\n").unwrap();
+    std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
+
+    let config = Config::load(project.path()).unwrap();
+    assert_eq!(
+        config.openai_api_key, None,
+        "MDVDB_NO_USER_CONFIG should disable user-level secrets"
+    );
+
+    clear_env();
+}
+
+#[test]
+#[serial]
+fn user_dotenv_migration_preserves_api_key() {
+    clear_env();
+    let project = TempDir::new().unwrap();
+    let user_home = TempDir::new().unwrap();
+
+    // Only a legacy dotenv config exists — migration should fire.
+    fs::write(
+        user_home.path().join("config"),
+        "MDVDB_EMBEDDING_MODEL=legacy-model\nOPENAI_API_KEY=sk-migrated\n",
+    )
+    .unwrap();
+    std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
+
+    let config = Config::load(project.path()).unwrap();
+    assert_eq!(
+        config.openai_api_key.as_deref(),
+        Some("sk-migrated"),
+        "API key should be available on the migration run"
+    );
+    assert_eq!(config.embedding_model, "legacy-model");
+    assert!(user_home.path().join("config.yaml").is_file());
+    assert!(user_home.path().join("config.bak").is_file());
+    let env_content = fs::read_to_string(user_home.path().join(".env")).unwrap();
+    assert!(
+        env_content.contains("OPENAI_API_KEY=sk-migrated"),
+        "migration must preserve the key in ~/.mdvdb/.env"
+    );
+
+    clear_env();
+}
+
 #[test]
 #[serial]
 fn full_three_level_cascade() {

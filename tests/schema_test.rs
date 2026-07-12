@@ -357,3 +357,27 @@ fn test_schema_cli_with_path_flag() {
         "should not contain version field"
     );
 }
+
+#[test]
+fn infer_scoped_normalizes_backslash_file_paths() {
+    // Files whose PathBufs carry Windows-style separators must still match
+    // the slash-separated scope prefix.
+    let files = vec![
+        make_file(r"docs\a.md", serde_json::json!({"title": "A", "draft": true})),
+        make_file(r"docs\b.md", serde_json::json!({"title": "B"})),
+        make_file("other/c.md", serde_json::json!({"unrelated": 1})),
+    ];
+
+    let schema = Schema::infer_scoped(&files, "docs");
+    let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"title"), "scoped schema should see docs files: {names:?}");
+    assert!(names.contains(&"draft"));
+    assert!(
+        !names.contains(&"unrelated"),
+        "files outside the scope must not contribute fields"
+    );
+
+    // Scope discovery also sees the normalized top-level directory.
+    let scopes = Schema::discover_scopes(&files);
+    assert!(scopes.contains(&"docs".to_string()), "scopes: {scopes:?}");
+}

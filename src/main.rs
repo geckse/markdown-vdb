@@ -116,6 +116,9 @@ enum Commands {
     /// Show index status and configuration
     Status(StatusArgs),
 
+    /// Show vault or folder stats (files, chunks, tokens, reindex estimate)
+    Info(InfoArgs),
+
     /// Show inferred metadata schema
     Schema(SchemaArgs),
 
@@ -267,6 +270,13 @@ struct IngestArgs {
 
 #[derive(Parser)]
 struct StatusArgs {}
+
+#[derive(Parser)]
+struct InfoArgs {
+    /// Folder path to scope stats to (relative). Defaults to the whole vault.
+    #[arg(default_value = ".")]
+    path: String,
+}
 
 #[derive(Parser)]
 struct SchemaArgs {
@@ -799,6 +809,17 @@ async fn run() -> anyhow::Result<()> {
                 format::print_status(&status);
             }
         }
+        Some(Commands::Info(args)) => {
+            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+            let info = vdb.info(Some(&args.path))?;
+
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &info)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                format::print_info(&info);
+            }
+        }
         Some(Commands::Schema(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
 
@@ -1089,7 +1110,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Get(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let path_str = args.file_path.to_string_lossy();
+            let path_str = mdvdb::path_util::to_slash(&args.file_path);
             let doc = if args.populate {
                 vdb.get_document_populated(&path_str)?
             } else {
@@ -1112,7 +1133,7 @@ async fn run() -> anyhow::Result<()> {
             }
 
             let opts = CollectionQuery {
-                path: args.path,
+                path: mdvdb::path_util::normalize_path_input(&args.path),
                 recursive: args.recursive,
                 sort_by: args.sort,
                 order: args.order,
@@ -1132,7 +1153,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Links(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let path_str = args.file_path.to_string_lossy().to_string();
+            let path_str = mdvdb::path_util::to_slash(&args.file_path);
             let depth = args.depth as usize;
 
             if depth > 1 {
@@ -1159,7 +1180,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Backlinks(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let path_str = args.file_path.to_string_lossy().to_string();
+            let path_str = mdvdb::path_util::to_slash(&args.file_path);
             let result = vdb.backlinks(&path_str)?;
 
             if json {
@@ -1191,7 +1212,7 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Edges(args)) => {
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let file_str = args.file.as_ref().map(|p| p.to_string_lossy().to_string());
+            let file_str = args.file.as_ref().map(|p| mdvdb::path_util::to_slash(p));
             let mut edges = vdb.edges(file_str.as_deref())?;
 
             // Filter by relationship type substring if provided.
@@ -1348,7 +1369,7 @@ async fn run() -> anyhow::Result<()> {
                         "heading_hierarchy": chunk.heading_hierarchy,
                         "chunk_index": chunk.chunk_index,
                         "is_sub_split": chunk.is_sub_split,
-                        "file_path": file_name.to_string_lossy(),
+                        "file_path": mdvdb::path_util::to_slash(file_name),
                         "content_hash": content_hash,
                         "start_char": 0,
                         "end_char": 0,
@@ -1370,7 +1391,7 @@ _mdvdb() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="search ingest status schema clusters tree get collection watch init config doctor links backlinks orphans completions"
+    commands="search ingest status info schema clusters tree get collection watch init config doctor links backlinks orphans completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands --help --version --verbose --root --json --no-color" -- "$cur"))
@@ -1388,6 +1409,9 @@ _mdvdb() {
             ;;
         get)
             COMPREPLY=($(compgen -f -- "$cur"))
+            ;;
+        info)
+            COMPREPLY=($(compgen -d -- "$cur"))
             ;;
         collection|list)
             COMPREPLY=($(compgen -W "--recursive --sort --order --filter --limit --offset --help" -- "$cur"))
@@ -1410,6 +1434,7 @@ _mdvdb() {
         'search:Semantic search across indexed markdown files'
         'ingest:Ingest markdown files into the index'
         'status:Show index status and configuration'
+        'info:Show vault or folder stats'
         'schema:Show inferred metadata schema'
         'clusters:Show document clusters'
         'tree:Show file tree with sync status indicators'
@@ -1466,6 +1491,10 @@ _mdvdb() {
                         '--hops[Number of link hops for graph boosting (1-3)]:hops:' \
                         '--expand[Graph expansion depth for context (0-3)]:depth:'
                     ;;
+                info)
+                    _arguments \
+                        '1:path:_directories'
+                    ;;
                 collection|list)
                     _arguments \
                         '1:path:_directories' \
@@ -1487,6 +1516,7 @@ _mdvdb"#
 complete -c mdvdb -n '__fish_use_subcommand' -a search -d 'Semantic search across indexed markdown files'
 complete -c mdvdb -n '__fish_use_subcommand' -a ingest -d 'Ingest markdown files into the index'
 complete -c mdvdb -n '__fish_use_subcommand' -a status -d 'Show index status and configuration'
+complete -c mdvdb -n '__fish_use_subcommand' -a info -d 'Show vault or folder stats'
 complete -c mdvdb -n '__fish_use_subcommand' -a schema -d 'Show inferred metadata schema'
 complete -c mdvdb -n '__fish_use_subcommand' -a clusters -d 'Show document clusters'
 complete -c mdvdb -n '__fish_use_subcommand' -a tree -d 'Show file tree with sync status indicators'
@@ -1553,6 +1583,7 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
         @{ Name = 'search'; Tooltip = 'Semantic search across indexed markdown files' },
         @{ Name = 'ingest'; Tooltip = 'Ingest markdown files into the index' },
         @{ Name = 'status'; Tooltip = 'Show index status and configuration' },
+        @{ Name = 'info'; Tooltip = 'Show vault or folder stats' },
         @{ Name = 'schema'; Tooltip = 'Show inferred metadata schema' },
         @{ Name = 'clusters'; Tooltip = 'Show document clusters' },
         @{ Name = 'tree'; Tooltip = 'Show file tree with sync status indicators' },

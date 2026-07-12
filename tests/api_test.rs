@@ -237,6 +237,24 @@ fn setup_project_with_links() -> (TempDir, MarkdownVdb) {
     (dir, vdb)
 }
 
+/// Setup the minimal reciprocal wiki-link fixture for edge/doctor regressions.
+fn setup_project_with_wiki_links() -> (TempDir, MarkdownVdb) {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb/config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    fs::write(root.join("alpha.md"), "# Alpha\n\nSee [[beta]].\n").unwrap();
+    fs::write(root.join("beta.md"), "# Beta\n\nSee [[alpha]].\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    (dir, vdb)
+}
+
 #[tokio::test]
 async fn test_links_api() {
     let (_dir, vdb) = setup_project_with_links();
@@ -705,6 +723,155 @@ async fn test_preview_reindex_marks_all_changed() {
             file.path, file.status
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Vault/folder info tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_info_whole_vault() {
+    let (_dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let info = vdb.info(None).unwrap();
+    let status = vdb.status();
+
+    assert_eq!(info.scope, ".");
+    assert!(info.is_whole_vault);
+    assert_eq!(info.file_count, 2);
+    assert_eq!(info.indexed_file_count, 2);
+    assert_eq!(info.chunk_count, status.chunk_count);
+    assert_eq!(info.vector_count, status.vector_count);
+    assert_eq!(
+        info.sync,
+        mdvdb::SyncBreakdown {
+            new: 0,
+            changed: 0,
+            unchanged: 2,
+            deleted: 0,
+        }
+    );
+    assert_eq!(info.embedding.dimensions, DIMS);
+    assert!(info.reindex_estimated_tokens > 0);
+    assert!(info.index_file_size > 0);
+}
+
+#[test]
+fn test_info_before_ingest() {
+    let (_dir, vdb) = setup_project();
+
+    let info = vdb.info(None).unwrap();
+
+    assert_eq!(info.file_count, 2);
+    assert_eq!(info.sync.new, 2);
+    assert_eq!(info.chunk_count, 0);
+    assert_eq!(info.vector_count, 0);
+    assert!(info.reindex_chunks > 0);
+    assert!(info.reindex_estimated_tokens > 0);
+}
+
+#[tokio::test]
+async fn test_info_scoped_folder() {
+    let (dir, vdb) = setup_project();
+    fs::create_dir_all(dir.path().join("blog")).unwrap();
+    fs::write(dir.path().join("blog/a.md"), "# A\n\nBlog alpha.\n").unwrap();
+    fs::write(dir.path().join("blog/b.md"), "# B\n\nBlog beta.\n").unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let plain = vdb.info(Some("blog")).unwrap();
+    let trailing = vdb.info(Some("blog/")).unwrap();
+    let dotted = vdb.info(Some("./blog")).unwrap();
+    let whole = vdb.info(None).unwrap();
+
+    assert_eq!(plain.scope, "blog/");
+    assert!(!plain.is_whole_vault);
+    assert_eq!(plain.file_count, 2);
+    assert_eq!(plain.indexed_file_count, 2);
+    assert!(plain.chunk_count > 0);
+    assert!(plain.chunk_count < whole.chunk_count);
+    for other in [&trailing, &dotted] {
+        assert_eq!(other.scope, plain.scope);
+        assert_eq!(other.file_count, plain.file_count);
+        assert_eq!(other.indexed_file_count, plain.indexed_file_count);
+        assert_eq!(other.chunk_count, plain.chunk_count);
+        assert_eq!(other.vector_count, plain.vector_count);
+        assert_eq!(other.reindex_chunks, plain.reindex_chunks);
+        assert_eq!(
+            other.reindex_estimated_tokens,
+            plain.reindex_estimated_tokens
+        );
+        assert_eq!(other.sync, plain.sync);
+    }
+}
+
+#[tokio::test]
+async fn test_info_detects_changed_and_deleted() {
+    let (dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    fs::write(dir.path().join("hello.md"), "# Hello\n\nChanged content.\n").unwrap();
+    fs::remove_file(dir.path().join("rust.md")).unwrap();
+
+    let info = vdb.info(None).unwrap();
+    assert_eq!(info.sync.changed, 1);
+    assert_eq!(info.sync.deleted, 1);
+    assert_eq!(info.sync.new, 0);
+    assert_eq!(info.sync.unchanged, 0);
+}
+
+#[test]
+fn test_info_empty_scope_returns_zeros() {
+    let (_dir, vdb) = setup_project();
+
+    let info = vdb.info(Some("nope")).unwrap();
+    assert_eq!(info.scope, "nope/");
+    assert_eq!(info.file_count, 0);
+    assert_eq!(info.indexed_file_count, 0);
+    assert_eq!(info.chunk_count, 0);
+    assert_eq!(info.vector_count, 0);
+    assert_eq!(info.edge_count, 0);
+    assert_eq!(info.reindex_chunks, 0);
+    assert_eq!(info.reindex_estimated_tokens, 0);
+    assert_eq!(info.reindex_estimated_api_calls, 0);
+    assert_eq!(info.sync, mdvdb::SyncBreakdown::default());
+}
+
+#[tokio::test]
+async fn test_status_includes_edge_count() {
+    let (_dir, vdb) = setup_project_with_wiki_links();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let status = vdb.status();
+    assert!(
+        status.edge_count > 0,
+        "linked fixture should create edge vectors"
+    );
+    assert_eq!(status.vector_count, status.chunk_count + status.edge_count);
+}
+
+#[tokio::test]
+async fn test_doctor_index_check_passes_with_links() {
+    let (_dir, vdb) = setup_project_with_wiki_links();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    assert!(
+        vdb.status().edge_count > 0,
+        "fixture must reproduce the old mismatch"
+    );
+    let result = vdb.doctor().await.unwrap();
+    let index_check = result
+        .checks
+        .iter()
+        .find(|check| check.name == "Index")
+        .expect("doctor should include the Index check");
+
+    assert_eq!(index_check.status, CheckStatus::Pass);
+    assert!(
+        index_check.detail.contains("edge"),
+        "Index detail should explain edge vectors: {}",
+        index_check.detail
+    );
 }
 
 #[test]
@@ -1180,4 +1347,49 @@ async fn custom_clusters_incremental_ingest() {
     for cluster in &graph.custom_clusters {
         assert!(cluster.member_count <= 2);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Path input normalization (Windows-style separators)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_get_document_accepts_backslash_input() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(
+        root.join("docs").join("guide.md"),
+        "---\ntitle: Guide\n---\n\n# Guide\n\nContent.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    // Windows-style input path is normalized before the index lookup, and the
+    // returned document path is the canonical slash-separated form.
+    let doc = vdb.get_document(r"docs\guide.md").unwrap();
+    assert_eq!(doc.path, "docs/guide.md");
+
+    let populated = vdb.get_document_populated(r"docs\guide.md").unwrap();
+    assert_eq!(populated.path, "docs/guide.md");
+
+    // Collection scope input is normalized the same way.
+    let resp = vdb
+        .collection(mdvdb::CollectionQuery {
+            path: r".\docs".to_string(),
+            recursive: true,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(resp.scope, "docs/");
+    assert_eq!(resp.total_rows, 1);
+    assert_eq!(resp.rows[0].path, "docs/guide.md");
 }

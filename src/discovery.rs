@@ -147,7 +147,7 @@ impl FileDiscovery {
         }
 
         // Check against user-configured ignore patterns
-        let path_str = relative_path.to_string_lossy();
+        let path_str = crate::path_util::to_slash(relative_path);
         for pattern in &self.ignore_patterns {
             let pat = if let Some(stripped) = pattern.strip_prefix('!') {
                 stripped

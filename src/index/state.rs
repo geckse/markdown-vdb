@@ -10,7 +10,9 @@ use tracing::debug;
 use crate::chunker::Chunk;
 use crate::error::{Error, Result};
 use crate::index::storage::{self, WriteOptions};
-use crate::index::types::{EmbeddingConfig, IndexMetadata, IndexStatus, StoredChunk, StoredFile};
+use crate::index::types::{
+    EmbeddingConfig, IndexMetadata, IndexStatus, ScopedCounts, StoredChunk, StoredFile,
+};
 use crate::clustering::{ClusterState, CustomClusterState};
 use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
@@ -202,7 +204,7 @@ impl Index {
         embeddings: &[Vec<f32>],
     ) -> Result<()> {
         let mut state = self.state.write();
-        let relative_path = file.path.to_string_lossy().to_string();
+        let relative_path = crate::path_util::to_slash(&file.path);
 
         debug!(path = %relative_path, chunks = chunks.len(), "upserting file");
 
@@ -362,15 +364,51 @@ impl Index {
     pub fn status(&self) -> IndexStatus {
         let state = self.state.read();
         let file_size = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let edge_count = state
+            .id_to_key
+            .keys()
+            .filter(|id| id.starts_with("edge:"))
+            .count();
 
         IndexStatus {
             document_count: state.metadata.files.len(),
             chunk_count: state.metadata.chunks.len(),
             vector_count: state.hnsw.size(),
+            edge_count,
             last_updated: state.metadata.last_updated,
             file_size,
             embedding_config: state.metadata.embedding_config.clone(),
         }
+    }
+
+    /// Count files, chunks, and edge vectors within a path scope.
+    ///
+    /// `prefix` is a slash-terminated folder prefix (e.g. `"blog/"`); `None`
+    /// counts the whole index. Edge vectors are attributed to their SOURCE
+    /// file, matching `remove_file`'s `"edge:{path}->"` ownership semantics.
+    pub fn scoped_counts(&self, prefix: Option<&str>) -> ScopedCounts {
+        let state = self.state.read();
+
+        let in_scope = |path: &str| prefix.is_none_or(|p| path.starts_with(p));
+
+        let mut counts = ScopedCounts::default();
+        for (path, file) in &state.metadata.files {
+            if in_scope(path) {
+                counts.files += 1;
+                counts.chunks += file.chunk_ids.len();
+            }
+        }
+        for id in state.id_to_key.keys() {
+            // Edge ids are "edge:{source}->{target}@..."; a source path
+            // containing "->" would mis-split here, which we accept.
+            if let Some(rest) = id.strip_prefix("edge:") {
+                let source = rest.split("->").next().unwrap_or(rest);
+                if in_scope(source) {
+                    counts.edges += 1;
+                }
+            }
+        }
+        counts
     }
 
     /// Search for nearest vectors, returning `(chunk_id, cosine_similarity_score)` pairs.
@@ -709,6 +747,10 @@ impl Index {
     ///
     /// Compacts HNSW keys to sequential 0..N matching sorted chunk ID order,
     /// ensuring that after any number of save/load cycles, keys always match.
+    ///
+    /// Takes an exclusive advisory cross-process lock on a sibling
+    /// `<index>.lock` file for the duration of the write critical section;
+    /// a concurrent writer (e.g. `mdvdb watch`) yields [`Error::IndexBusy`].
     pub fn save(&self) -> Result<()> {
         let mut state = self.state.write();
 
@@ -811,7 +853,12 @@ impl Index {
         state.id_to_key = new_id_to_key;
         state.next_key = next;
 
-        storage::write_index(&self.path, &state.metadata, &state.hnsw, &self.write_options)?;
+        // Advisory cross-process lock held ONLY for the write critical section
+        // (dropped at the end of this scope; File drop releases the OS lock).
+        {
+            let _write_lock = acquire_write_lock(&self.path)?;
+            storage::write_index(&self.path, &state.metadata, &state.hnsw, &self.write_options)?;
+        }
         state.dirty = false;
 
         debug!(path = %self.path.display(), "index saved");
@@ -841,6 +888,48 @@ impl Index {
 
         Ok(())
     }
+}
+
+/// Acquire an exclusive advisory lock on the sibling `<index>.lock` file
+/// (the index file itself has no extension, so e.g. `.markdownvdb/index`
+/// locks via `.markdownvdb/index.lock`).
+///
+/// Retries up to 10 times at 200ms intervals, then fails with
+/// [`Error::IndexBusy`]. The lock is released when the returned `File` is
+/// dropped (the OS releases advisory locks on close), so callers hold it
+/// only for the write critical section by scoping the returned handle.
+fn acquire_write_lock(index_path: &Path) -> Result<std::fs::File> {
+    const ATTEMPTS: usize = 10;
+    const RETRY_DELAY_MS: u64 = 200;
+
+    let lock_path = index_path.with_extension("lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)?;
+
+    for attempt in 0..ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                debug!(
+                    lock = %lock_path.display(),
+                    attempt = attempt + 1,
+                    "index write lock busy, retrying"
+                );
+                // No point sleeping after the final failed attempt.
+                if attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS));
+                }
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(Error::Io(e)),
+        }
+    }
+
+    Err(Error::IndexBusy {
+        path: index_path.to_path_buf(),
+    })
 }
 
 /// Test-only helpers for manipulating index state directly.
@@ -968,6 +1057,105 @@ mod tests {
         // Should still have only 1 vector (old removed, new added).
         assert_eq!(state.hnsw.size(), 1);
         assert!(state.id_to_key.contains_key("edge:a.md->b.md@0"));
+    }
+
+    fn mk_file(path: &str) -> MarkdownFile {
+        MarkdownFile {
+            path: PathBuf::from(path),
+            body: "hello".to_string(),
+            frontmatter: None,
+            headings: vec![],
+            content_hash: format!("hash-{path}"),
+            modified_at: 0,
+            frontmatter_links: Vec::new(),
+            file_size: 5,
+            links: vec![],
+        }
+    }
+
+    fn mk_chunk(path: &str, idx: usize) -> Chunk {
+        Chunk {
+            id: format!("{path}#{idx}"),
+            content: "hello".to_string(),
+            source_path: PathBuf::from(path),
+            heading_hierarchy: vec![],
+            chunk_index: idx,
+            start_line: 1,
+            end_line: 1,
+            is_sub_split: false,
+        }
+    }
+
+    #[test]
+    fn status_edge_count_counts_only_edges() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+
+        index
+            .upsert(
+                &mk_file("a.md"),
+                &[mk_chunk("a.md", 0), mk_chunk("a.md", 1)],
+                &[vec![0.1f32; 128], vec![0.2f32; 128]],
+            )
+            .unwrap();
+        index
+            .upsert_edges(&[
+                ("edge:a.md->b.md@0".to_string(), vec![0.9f32; 128]),
+                ("edge:a.md->c.md@fm.client".to_string(), vec![0.8f32; 128]),
+            ])
+            .unwrap();
+
+        let status = index.status();
+        assert_eq!(status.chunk_count, 2);
+        assert_eq!(status.edge_count, 2);
+        assert_eq!(status.vector_count, 4);
+        assert_eq!(
+            status.vector_count,
+            status.chunk_count + status.edge_count
+        );
+    }
+
+    #[test]
+    fn scoped_counts_filters_by_prefix() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+
+        index
+            .upsert(
+                &mk_file("blog/a.md"),
+                &[mk_chunk("blog/a.md", 0), mk_chunk("blog/a.md", 1)],
+                &[vec![0.1f32; 128], vec![0.2f32; 128]],
+            )
+            .unwrap();
+        index
+            .upsert(
+                &mk_file("notes/b.md"),
+                &[mk_chunk("notes/b.md", 0)],
+                &[vec![0.3f32; 128]],
+            )
+            .unwrap();
+        // Edges attributed to their source file.
+        index
+            .upsert_edges(&[
+                ("edge:blog/a.md->notes/b.md@0".to_string(), vec![0.9f32; 128]),
+                ("edge:notes/b.md->blog/a.md@0".to_string(), vec![0.8f32; 128]),
+                ("edge:notes/b.md->blog/a.md@fm.rel".to_string(), vec![0.7f32; 128]),
+            ])
+            .unwrap();
+
+        let blog = index.scoped_counts(Some("blog/"));
+        assert_eq!(blog, ScopedCounts { files: 1, chunks: 2, edges: 1 });
+
+        let notes = index.scoped_counts(Some("notes/"));
+        assert_eq!(notes, ScopedCounts { files: 1, chunks: 1, edges: 2 });
+
+        let all = index.scoped_counts(None);
+        assert_eq!(all, ScopedCounts { files: 2, chunks: 3, edges: 3 });
+
+        let none = index.scoped_counts(Some("missing/"));
+        assert_eq!(none, ScopedCounts::default());
     }
 
     #[test]
@@ -1384,6 +1572,44 @@ mod tests {
 
         let state = index.state.read();
         assert_eq!(state.metadata.embedding_config.model, "test-model");
+    }
+
+    #[test]
+    fn save_creates_sibling_lock_file() {
+        let dir = TempDir::new().unwrap();
+        // Match production: index file has no extension → sibling is "index.lock".
+        let path = dir.path().join("index");
+        let index = Index::create(&path, &test_config()).unwrap();
+
+        index.save().unwrap();
+        assert!(dir.path().join("index.lock").exists());
+        // The lock is released after save; a subsequent save re-acquires it.
+        index.save().unwrap();
+    }
+
+    #[test]
+    fn save_fails_with_index_busy_while_lock_held_then_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("index");
+
+        // Two handles on the same index file.
+        let writer = Index::create(&path, &test_config()).unwrap();
+        let other = Index::open(&path).unwrap();
+
+        // Simulate the other handle being mid-write by holding the advisory
+        // lock (exactly what its save() critical section holds).
+        let held = acquire_write_lock(&path).unwrap();
+
+        let result = writer.save();
+        match result {
+            Err(Error::IndexBusy { path: p }) => assert_eq!(p, path),
+            other => panic!("expected IndexBusy while lock held, got {other:?}"),
+        }
+
+        // Dropping the file handle releases the OS lock; save now succeeds.
+        drop(held);
+        writer.save().unwrap();
+        other.save().unwrap();
     }
 
     /// Regression test: orphaned edge vectors in HNSW cause "Duplicate keys"

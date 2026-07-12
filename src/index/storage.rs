@@ -68,7 +68,9 @@ pub fn create_hnsw(dimensions: usize, quantization: usearch::ScalarKind) -> Resu
     Index::new(&opts).map_err(|e| Error::Serialization(format!("failed to create HNSW index: {e}")))
 }
 
-/// Write an index file atomically: serialize to `.tmp`, fsync, then rename.
+/// Write an index file atomically: serialize to a unique temp file in the same
+/// directory, fsync, then rename over the destination (with retry — see
+/// [`rename_with_retry`]).
 ///
 /// Writes a V2 format header with quantization type and optional zstd compression
 /// of the rkyv metadata region.
@@ -125,16 +127,65 @@ pub fn write_index(
     header[44..48].copy_from_slice(&uncompressed_meta_size.to_le_bytes());
     // bytes 48..64 reserved
 
-    // Write to tmp file, fsync, rename
-    let tmp_path = path.with_extension("tmp");
-    let mut file = fs::File::create(&tmp_path)?;
-    file.write_all(&header)?;
-    file.write_all(&meta_bytes)?;
-    file.write_all(&hnsw_bytes)?;
-    file.sync_all()?;
+    // Write to a unique temp file in the destination directory, fsync, then
+    // rename into place. A unique temp name (vs a fixed `.tmp` sibling) keeps
+    // concurrent writers from clobbering each other's in-progress file.
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = parent.unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".index-")
+        .suffix(".tmp")
+        .tempfile_in(dir)?;
+    tmp.write_all(&header)?;
+    tmp.write_all(&meta_bytes)?;
+    tmp.write_all(&hnsw_bytes)?;
+    tmp.as_file().sync_all()?;
 
-    fs::rename(&tmp_path, path)?;
+    // The rename itself must be inside the retry: on Windows a concurrent
+    // reader's mmap causes transient sharing violations on rename.
+    rename_with_retry(path, tmp, |t| {
+        t.persist(path).map(|_| ()).map_err(|e| (e.error, e.file))
+    })?;
     Ok(())
+}
+
+/// Backoff schedule for [`rename_with_retry`] (exponential, milliseconds).
+const RENAME_BACKOFF_MS: [u64; 5] = [50, 100, 200, 400, 800];
+
+/// Retry a rename-like operation with exponential backoff (5 attempts).
+///
+/// The operation consumes its input and either succeeds or hands the input
+/// back together with the error so the next attempt can reuse it — mirroring
+/// [`tempfile::NamedTempFile::persist`], whose `PersistError` returns the
+/// temp file on failure. Exhausting all attempts yields [`Error::IndexBusy`]
+/// for `dest` (the usual cause is a concurrent reader/writer holding the file).
+fn rename_with_retry<T>(
+    dest: &Path,
+    value: T,
+    mut op: impl FnMut(T) -> std::result::Result<(), (std::io::Error, T)>,
+) -> Result<()> {
+    let mut value = value;
+    for (attempt, backoff_ms) in RENAME_BACKOFF_MS.iter().enumerate() {
+        match op(value) {
+            Ok(()) => return Ok(()),
+            Err((e, recovered)) => {
+                tracing::warn!(
+                    dest = %dest.display(),
+                    attempt = attempt + 1,
+                    error = %e,
+                    "index rename failed, retrying"
+                );
+                value = recovered;
+                // No point sleeping after the final failed attempt.
+                if attempt + 1 < RENAME_BACKOFF_MS.len() {
+                    std::thread::sleep(std::time::Duration::from_millis(*backoff_ms));
+                }
+            }
+        }
+    }
+    Err(Error::IndexBusy {
+        path: dest.to_path_buf(),
+    })
 }
 
 /// Load an index file via memory-mapping. Returns deserialized metadata and HNSW index.
@@ -376,6 +427,101 @@ mod tests {
             !matches!(result, Err(Error::IndexVersionMismatch { .. })),
             "the current version must pass the version gate"
         );
+    }
+
+    #[test]
+    fn write_leaves_no_stray_temp_files() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("index");
+        let meta = test_metadata();
+        let hnsw = create_hnsw(128, usearch::ScalarKind::F16).unwrap();
+        hnsw.reserve(10).unwrap();
+
+        write_index(&path, &meta, &hnsw, &WriteOptions::default()).unwrap();
+
+        let entries: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(entries, vec!["index".to_string()], "temp file must be gone: {entries:?}");
+    }
+
+    #[test]
+    fn concurrent_writes_produce_valid_index() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("index");
+
+        let threads: Vec<_> = (0..8u64)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut meta = test_metadata();
+                    meta.last_updated = 1000 + i;
+                    let hnsw = create_hnsw(128, usearch::ScalarKind::F16).unwrap();
+                    hnsw.reserve(10).unwrap();
+                    write_index(&path, &meta, &hnsw, &WriteOptions::default()).unwrap();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+
+        // Whichever rename won, the file must be complete and loadable —
+        // never a torn mix of two writers.
+        let (loaded_meta, _) = load_index(&path).unwrap();
+        assert!(
+            (1000..1008).contains(&loaded_meta.last_updated),
+            "last_updated must be one of the written values, got {}",
+            loaded_meta.last_updated
+        );
+    }
+
+    #[test]
+    fn rename_with_retry_recovers_after_transient_failures() {
+        let mut attempts = 0u32;
+        let result = rename_with_retry(Path::new("/tmp/dest"), "payload", |v| {
+            attempts += 1;
+            if attempts < 3 {
+                Err((std::io::Error::other("sharing violation"), v))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn rename_with_retry_exhausts_to_index_busy() {
+        let mut attempts = 0u32;
+        let result = rename_with_retry(Path::new("/tmp/dest"), "payload", |v| {
+            attempts += 1;
+            Err((std::io::Error::other("sharing violation"), v))
+        });
+        assert_eq!(attempts, RENAME_BACKOFF_MS.len() as u32);
+        match result {
+            Err(Error::IndexBusy { path }) => {
+                assert_eq!(path, Path::new("/tmp/dest"));
+            }
+            other => panic!("expected IndexBusy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rename_with_retry_value_returned_on_failure_is_reused() {
+        // The recovered value must flow into the next attempt (mirrors
+        // NamedTempFile::persist handing the temp file back on error).
+        let mut seen = Vec::new();
+        let _ = rename_with_retry(Path::new("/tmp/dest"), 7usize, |v| {
+            seen.push(v);
+            if seen.len() >= 2 {
+                Ok(())
+            } else {
+                Err((std::io::Error::other("busy"), v + 1))
+            }
+        });
+        assert_eq!(seen, vec![7, 8]);
     }
 
     #[test]

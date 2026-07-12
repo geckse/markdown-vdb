@@ -178,12 +178,9 @@ pub fn is_link_shaped(s: &str) -> bool {
 /// trailing `.md` stripped. `None` if the value is not link-shaped.
 pub(crate) fn relation_key(s: &str) -> Option<String> {
     let parsed = parse_link_shaped(s)?;
-    let t = parsed
-        .target
-        .split('#')
-        .next()
-        .unwrap_or(&parsed.target)
-        .replace('\\', "/");
+    let t = crate::path_util::normalize_path_input(
+        parsed.target.split('#').next().unwrap_or(&parsed.target),
+    );
     let t = t.trim().trim_start_matches('/');
     let t = t.strip_suffix(".md").unwrap_or(t);
     if t.is_empty() {
@@ -212,7 +209,7 @@ pub fn resolve_relation_target(
 ) -> Option<(String, bool)> {
     let t = target.trim();
     let t = t.split('#').next().unwrap_or(t);
-    let t = t.replace('\\', "/");
+    let t = crate::path_util::normalize_path_input(t);
     let t = t.trim().trim_start_matches('/');
     if t.is_empty() {
         return None;
@@ -221,7 +218,7 @@ pub fn resolve_relation_target(
     if t.contains('/') {
         // Step 1: root-relative, with a source-dir-relative fallback.
         let normalized = crate::links::normalize_path(Path::new(t));
-        let s = normalized.to_string_lossy().replace('\\', "/");
+        let s = crate::path_util::to_slash(&normalized);
         let root_candidate = if s.ends_with(".md") {
             s
         } else {

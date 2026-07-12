@@ -179,10 +179,10 @@ impl Watcher {
     pub async fn handle_event(&self, event: &FileEvent) -> Result<()> {
         let start = Instant::now();
         let (event_type, path_str) = match event {
-            FileEvent::Created(p) => (WatchEventType::Created, p.to_string_lossy().to_string()),
-            FileEvent::Modified(p) => (WatchEventType::Modified, p.to_string_lossy().to_string()),
-            FileEvent::Deleted(p) => (WatchEventType::Deleted, p.to_string_lossy().to_string()),
-            FileEvent::Renamed { to, .. } => (WatchEventType::Renamed, to.to_string_lossy().to_string()),
+            FileEvent::Created(p) => (WatchEventType::Created, crate::path_util::to_slash(p)),
+            FileEvent::Modified(p) => (WatchEventType::Modified, crate::path_util::to_slash(p)),
+            FileEvent::Deleted(p) => (WatchEventType::Deleted, crate::path_util::to_slash(p)),
+            FileEvent::Renamed { to, .. } => (WatchEventType::Renamed, crate::path_util::to_slash(to)),
         };
 
         let result = self.handle_event_inner(event).await;
@@ -215,7 +215,7 @@ impl Watcher {
                 self.process_file(path).await
             }
             FileEvent::Deleted(path) => {
-                let relative = path.to_string_lossy().to_string();
+                let relative = crate::path_util::to_slash(path);
                 info!(path = %relative, "removing deleted file from index");
                 self.index.remove_file(&relative)?;
 
@@ -231,7 +231,7 @@ impl Watcher {
                 Ok(0)
             }
             FileEvent::Renamed { from, to } => {
-                let from_str = from.to_string_lossy().to_string();
+                let from_str = crate::path_util::to_slash(from);
                 debug!(from = %from_str, to = %to.display(), "processing rename event");
                 self.index.remove_file(&from_str)?;
 
@@ -254,7 +254,7 @@ impl Watcher {
         // If the file no longer exists (deleted between event and processing, or the
         // OS sent a Modify event for a removal), treat it as a deletion.
         if !abs_path.is_file() {
-            let relative = relative_path.to_string_lossy().to_string();
+            let relative = crate::path_util::to_slash(relative_path);
             info!(path = %relative, "file no longer exists, removing from index");
             self.index.remove_file(&relative)?;
             self.remove_from_clusters(&relative);
@@ -267,7 +267,7 @@ impl Watcher {
         // Check content hash to skip unchanged files.
         let stored_hash = self
             .index
-            .get_file(&relative_path.to_string_lossy())
+            .get_file(&crate::path_util::to_slash(relative_path))
             .map(|f| f.content_hash.clone());
 
         let file = crate::parser::parse_markdown_file(&self.project_root, relative_path)?;
@@ -315,12 +315,12 @@ impl Watcher {
             .iter()
             .map(|c| FtsChunkData {
                 chunk_id: c.id.clone(),
-                source_path: c.source_path.to_string_lossy().to_string(),
+                source_path: crate::path_util::to_slash(&c.source_path),
                 content: crate::fts::strip_markdown(&c.content),
                 heading_hierarchy: c.heading_hierarchy.join(" > "),
             })
             .collect();
-        let path_str_fts = relative_path.to_string_lossy().to_string();
+        let path_str_fts = crate::path_util::to_slash(relative_path);
         self.fts_index.upsert_chunks(&path_str_fts, &fts_chunks)?;
 
         // Update schema inference with the new/changed file's frontmatter.

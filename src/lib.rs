@@ -8,6 +8,7 @@ pub mod fts;
 pub mod index;
 pub mod logging;
 pub mod parser;
+pub mod path_util;
 pub mod ingest;
 pub mod links;
 pub mod relations;
@@ -40,7 +41,7 @@ pub use watcher::{WatchEventCallback, WatchEventReport, WatchEventType};
 /// Convenience alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -120,6 +121,54 @@ pub struct IngestPreview {
     pub estimated_tokens: usize,
     /// Estimated number of API calls.
     pub estimated_api_calls: usize,
+}
+
+/// Sync-state breakdown of on-disk files vs the index within a scope.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct SyncBreakdown {
+    /// Files on disk that are not yet indexed.
+    pub new: usize,
+    /// Files on disk whose content differs from the indexed version.
+    pub changed: usize,
+    /// Files on disk that match the indexed version.
+    pub unchanged: usize,
+    /// Files in the index that no longer exist on disk.
+    pub deleted: usize,
+}
+
+/// Stats snapshot for the whole vault or a folder scope, returned by
+/// [`MarkdownVdb::info`] and the `mdvdb info` CLI command.
+#[derive(Debug, Clone, Serialize)]
+pub struct VaultInfo {
+    /// Normalized scope: `"."` for the whole vault, else a `"folder/"` prefix.
+    pub scope: String,
+    /// Whether the scope covers the whole vault.
+    pub is_whole_vault: bool,
+    /// Markdown files discovered on disk within the scope.
+    pub file_count: usize,
+    /// Files currently in the index within the scope.
+    pub indexed_file_count: usize,
+    /// Chunks in the index within the scope.
+    pub chunk_count: usize,
+    /// Vectors within the scope. Whole-vault: measured HNSW size; scoped:
+    /// derived as `chunk_count + edge_count` (HNSW has no per-path structure).
+    pub vector_count: usize,
+    /// Edge vectors attributed to in-scope source files.
+    pub edge_count: usize,
+    /// Chunks a full reindex of this scope would produce (computed from disk).
+    pub reindex_chunks: usize,
+    /// Estimated tokens to embed for a full reindex of this scope.
+    pub reindex_estimated_tokens: usize,
+    /// Estimated embedding API calls for a full reindex of this scope.
+    pub reindex_estimated_api_calls: usize,
+    /// Index file size on disk in bytes (whole index file — never scoped).
+    pub index_file_size: u64,
+    /// Embedding provider/model/dimensions snapshot from the index.
+    pub embedding: index::types::EmbeddingConfig,
+    /// Sync-state breakdown of disk files vs the index.
+    pub sync: SyncBreakdown,
+    /// Unix timestamp of the last index save (whole index).
+    pub last_updated: u64,
 }
 
 /// Options controlling the ingestion pipeline.
@@ -916,7 +965,7 @@ impl MarkdownVdb {
         let parse_start = std::time::Instant::now();
         let total_files = discovered.len();
         for (file_idx, path) in discovered.iter().enumerate() {
-            let path_str = path.to_string_lossy().to_string();
+            let path_str = path_util::to_slash(path);
             discovered_paths.insert(path_str.clone());
 
             emit(&IngestPhase::Parsing {
@@ -994,7 +1043,7 @@ impl MarkdownVdb {
                     Ok(full_content) => {
                         let link_contexts =
                             parser::extract_links_with_context(&full_content, &md.links);
-                        let source_str = path.to_string_lossy().to_string();
+                        let source_str = path_util::to_slash(path);
                         for ctx in &link_contexts {
                             let resolved_target =
                                 links::resolve_link(&source_str, &ctx.link.target);
@@ -1097,12 +1146,12 @@ impl MarkdownVdb {
                 .iter()
                 .map(|c| fts::FtsChunkData {
                     chunk_id: c.id.clone(),
-                    source_path: c.source_path.to_string_lossy().to_string(),
+                    source_path: path_util::to_slash(&c.source_path),
                     content: fts::strip_markdown(&c.content),
                     heading_hierarchy: c.heading_hierarchy.join(" > "),
                 })
                 .collect();
-            let path_str_fts = path.to_string_lossy().to_string();
+            let path_str_fts = path_util::to_slash(path);
             self.fts_index.upsert_chunks(&path_str_fts, &fts_chunks)?;
 
             result.files_indexed += 1;
@@ -1114,7 +1163,7 @@ impl MarkdownVdb {
         if self.config.edge_embeddings && !edge_metas.is_empty() {
             // For single-file ingest, remove old edges for the file first.
             if let Some(ref single_file) = options.file {
-                let source_str = single_file.to_string_lossy().to_string();
+                let source_str = path_util::to_slash(single_file);
                 let source_prefix = format!("edge:{}", source_str);
                 // Get existing edge vectors to find ones belonging to this file.
                 let existing_edges = self.index.get_edge_vectors();
@@ -1195,7 +1244,7 @@ impl MarkdownVdb {
             });
                 if let Some(ref single_file) = options.file {
                     // Single-file ingest: remove old edges for the file, then merge new ones.
-                    let source_str = single_file.to_string_lossy().to_string();
+                    let source_str = path_util::to_slash(single_file);
                     let source_prefix = format!("edge:{}->", source_str);
                     if let Some(ref mut existing) = graph.semantic_edges {
                         existing.retain(|id, _| !id.starts_with(&source_prefix));
@@ -1289,7 +1338,7 @@ impl MarkdownVdb {
             let file_hashes = self.index.get_file_hashes();
             for path_str in file_hashes.keys() {
                 // Skip files we already upserted above.
-                if parsed_files.keys().any(|p| p.to_string_lossy() == *path_str) {
+                if parsed_files.keys().any(|p| path_util::to_slash(p) == *path_str) {
                     continue;
                 }
                 if let Some(file_entry) = self.index.get_file(path_str) {
@@ -1424,7 +1473,7 @@ impl MarkdownVdb {
                 if single_fast_path {
                     let single_file = options.file.as_ref().expect("checked above");
                     let mut state = existing.expect("checked above");
-                    let path_str = single_file.to_string_lossy().to_string();
+                    let path_str = path_util::to_slash(single_file);
                     if let Some(vec) = doc_vectors.get(&path_str) {
                         if let Err(e) =
                             clusterer.assign_incremental(&mut state, &path_str, vec, &doc_vectors)
@@ -1491,7 +1540,7 @@ impl MarkdownVdb {
                     // Fast path: definitions unchanged — re-assign just this
                     // document against the stored centroids (no provider call).
                     let mut state = existing.expect("fingerprint matched");
-                    let path_str = single_file.to_string_lossy().to_string();
+                    let path_str = path_util::to_slash(single_file);
                     if let Some(vec) = doc_vectors.get(&path_str) {
                         match clusterer.assign_single_to_custom(&mut state, &path_str, vec) {
                             Ok(()) => {
@@ -1724,7 +1773,7 @@ impl MarkdownVdb {
         let mut files_unchanged: usize = 0;
 
         for path in &discovered {
-            let path_str = path.to_string_lossy().to_string();
+            let path_str = path_util::to_slash(path);
 
             // Parse the file.
             let md = match parser::parse_markdown_file(&self.root, path) {
@@ -1799,6 +1848,112 @@ impl MarkdownVdb {
         })
     }
 
+    /// Return a stats snapshot for the whole vault or a folder scope.
+    ///
+    /// `path` scopes the stats to a folder prefix (recursive, like
+    /// `search --path`); `None` or `"."` covers the whole vault. Like
+    /// [`preview`](Self::preview), this is synchronous and makes no network
+    /// requests: reindex estimates are computed by re-parsing, re-chunking,
+    /// and re-tokenizing in-scope files from disk. A scope matching nothing
+    /// returns zeroed counts rather than an error.
+    pub fn info(&self, path: Option<&str>) -> Result<VaultInfo> {
+        let (scope, _schema_key, is_whole_vault) =
+            normalize_collection_scope(path.unwrap_or("."));
+
+        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+        let discovered = disco.discover()?;
+        let existing_hashes = self.index.get_file_hashes();
+
+        let in_scope = |p: &str| is_whole_vault || p.starts_with(scope.as_str());
+
+        let mut sync = SyncBreakdown::default();
+        let mut file_count: usize = 0;
+        let mut reindex_chunks: usize = 0;
+        let mut reindex_estimated_tokens: usize = 0;
+        let mut seen_on_disk: HashSet<String> = HashSet::new();
+
+        for path in &discovered {
+            let path_str = path_util::to_slash(path);
+            if !in_scope(&path_str) {
+                continue;
+            }
+
+            let md = match parser::parse_markdown_file(&self.root, path) {
+                Ok(md) => md,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to parse during info");
+                    continue;
+                }
+            };
+
+            match existing_hashes.get(&path_str) {
+                Some(existing) if *existing == md.content_hash => sync.unchanged += 1,
+                Some(_) => sync.changed += 1,
+                None => sync.new += 1,
+            }
+            seen_on_disk.insert(path_str);
+            file_count += 1;
+
+            let chunks = match chunker::chunk_document(
+                &md,
+                self.config.chunk_max_tokens,
+                self.config.chunk_overlap_tokens,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "failed to chunk during info");
+                    continue;
+                }
+            };
+
+            // Full-reindex estimate: every in-scope file counts, unchanged or not.
+            reindex_chunks += chunks.len();
+            reindex_estimated_tokens += chunks
+                .iter()
+                .map(|c| chunker::count_tokens(&c.content))
+                .sum::<usize>();
+        }
+
+        sync.deleted = existing_hashes
+            .keys()
+            .filter(|p| in_scope(p) && !seen_on_disk.contains(*p))
+            .count();
+
+        let counts = self
+            .index
+            .scoped_counts(if is_whole_vault { None } else { Some(&scope) });
+        let status = self.index.status();
+        let vector_count = if is_whole_vault {
+            status.vector_count
+        } else {
+            counts.chunks + counts.edges
+        };
+
+        let batch_size = self.config.embedding_batch_size.max(1);
+        let reindex_estimated_api_calls = if reindex_chunks == 0 {
+            0
+        } else {
+            reindex_chunks.div_ceil(batch_size)
+        };
+
+        Ok(VaultInfo {
+            scope,
+            is_whole_vault,
+            file_count,
+            indexed_file_count: counts.files,
+            chunk_count: counts.chunks,
+            vector_count,
+            edge_count: counts.edges,
+            reindex_chunks,
+            reindex_estimated_tokens,
+            reindex_estimated_api_calls,
+            index_file_size: status.file_size,
+            embedding: status.embedding_config,
+            sync,
+            last_updated: status.last_updated,
+        })
+    }
+
     /// Return a status snapshot of the index.
     pub fn status(&self) -> index::types::IndexStatus {
         self.index.status()
@@ -1829,6 +1984,7 @@ impl MarkdownVdb {
     /// If a scoped schema for `path_prefix` is persisted in the index, returns it
     /// directly. Otherwise, discovers and parses files to infer on the fly.
     pub fn schema_scoped(&self, path_prefix: &str) -> Result<schema::ScopedSchema> {
+        let path_prefix = &path_util::normalize_path_input(path_prefix);
         // Check persisted scoped schemas first.
         if let Some(scoped) = self.index.get_scoped_schema(path_prefix) {
             return Ok(scoped);
@@ -2293,7 +2449,8 @@ sources:
         let graph = self.index.get_link_graph().ok_or_else(|| {
             Error::Config("no link graph available; run ingest first".to_string())
         })?;
-        let path = path.strip_prefix("./").unwrap_or(path);
+        let path = path_util::normalize_path_input(path);
+        let path = path.strip_prefix("./").unwrap_or(&path);
         let indexed_files: std::collections::HashSet<String> =
             self.index.get_file_hashes().keys().cloned().collect();
         if !indexed_files.contains(path) {
@@ -2313,7 +2470,8 @@ sources:
         let graph = self.index.get_link_graph().ok_or_else(|| {
             Error::Config("no link graph available; run ingest first".to_string())
         })?;
-        let path = path.strip_prefix("./").unwrap_or(path);
+        let path = path_util::normalize_path_input(path);
+        let path = path.strip_prefix("./").unwrap_or(&path);
         let indexed_files: std::collections::HashSet<String> =
             self.index.get_file_hashes().keys().cloned().collect();
         if !indexed_files.contains(path) {
@@ -2329,10 +2487,11 @@ sources:
         let graph = self.index.get_link_graph().ok_or_else(|| {
             Error::Config("no link graph available; run ingest first".to_string())
         })?;
+        let path = path_util::normalize_path_input(path);
         let indexed_files: std::collections::HashSet<String> =
             self.index.get_file_hashes().keys().cloned().collect();
         let backlink_map = links::compute_backlinks(&graph);
-        let entries = backlink_map.get(path).cloned().unwrap_or_default();
+        let entries = backlink_map.get(&path).cloned().unwrap_or_default();
         Ok(entries
             .into_iter()
             .map(|entry| {
@@ -2370,7 +2529,8 @@ sources:
         };
         match file {
             Some(path) => {
-                let path = path.strip_prefix("./").unwrap_or(path);
+                let path = path_util::normalize_path_input(path);
+                let path = path.strip_prefix("./").unwrap_or(&path);
                 Ok(all_edges
                     .into_iter()
                     .filter(|e| e.source == path || e.target == path)
@@ -2398,6 +2558,7 @@ sources:
 
     /// Get information about an indexed document by its relative path.
     pub fn get_document(&self, relative_path: &str) -> Result<DocumentInfo> {
+        let relative_path = &path_util::normalize_path_input(relative_path);
         let file = self.index.get_file(relative_path).ok_or_else(|| {
             Error::FileNotInIndex {
                 path: PathBuf::from(relative_path),
@@ -2430,6 +2591,7 @@ sources:
     /// to `get_document`; both populate keys are always set (`{}` / `[]` when
     /// empty), never `None`.
     pub fn get_document_populated(&self, relative_path: &str) -> Result<DocumentInfo> {
+        let relative_path = &path_util::normalize_path_input(relative_path);
         let mut doc = self.get_document(relative_path)?;
         let ctx = self.relation_context();
         let empty = serde_json::json!({});
@@ -2632,7 +2794,7 @@ sources:
 
         let disk_paths: std::collections::HashSet<String> = disk_files
             .iter()
-            .filter_map(|p| p.to_str().map(|s| s.to_string()))
+            .map(|p| path_util::to_slash(p))
             .collect();
 
         // Scope + depth filter: prefix match, then (non-recursive) require the
@@ -2966,13 +3128,17 @@ sources:
                 status: CheckStatus::Warn,
                 detail: "empty — run `mdvdb ingest` to index your markdown files".to_string(),
             });
-        } else if status.vector_count == status.chunk_count {
+        } else if status.vector_count == status.chunk_count + status.edge_count {
             checks.push(DoctorCheck {
                 name: "Index".to_string(),
                 status: CheckStatus::Pass,
                 detail: format!(
-                    "{} docs, {} chunks, {} vectors",
-                    status.document_count, status.chunk_count, status.vector_count
+                    "{} docs, {} chunks, {} vectors ({} chunk + {} edge)",
+                    status.document_count,
+                    status.chunk_count,
+                    status.vector_count,
+                    status.chunk_count,
+                    status.edge_count
                 ),
             });
         } else {
@@ -2980,8 +3146,13 @@ sources:
                 name: "Index".to_string(),
                 status: CheckStatus::Warn,
                 detail: format!(
-                    "{} docs, {} chunks, {} vectors (mismatch)",
-                    status.document_count, status.chunk_count, status.vector_count
+                    "{} docs, {} chunks, {} vectors — expected {} chunk + {} edge = {} (mismatch)",
+                    status.document_count,
+                    status.chunk_count,
+                    status.vector_count,
+                    status.chunk_count,
+                    status.edge_count,
+                    status.chunk_count + status.edge_count
                 ),
             });
         }
@@ -3180,7 +3351,8 @@ sources:
 /// `scope` is used for prefix matching and echoed in the response; `schema_key`
 /// (no trailing slash) is the form that matches persisted `scoped_schemas`.
 fn normalize_collection_scope(path: &str) -> (String, String, bool) {
-    let raw = path.trim();
+    let normalized = path_util::normalize_path_input(path);
+    let raw = normalized.trim();
     let raw = raw.strip_prefix("./").unwrap_or(raw);
     let raw = raw.trim_end_matches('/');
 

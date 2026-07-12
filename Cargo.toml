@@ -43,6 +43,7 @@ regex = "1"
 indicatif = "0.17"
 dirs = "6"
 tantivy = "0.22"
+tempfile = "3"
 zstd = "0.13"
 semver = "1"
 # clap_complete = "4" # TODO: re-enable when available offline
@@ -52,7 +53,6 @@ default = ["simd"]
 simd = ["usearch/simsimd"]
 
 [dev-dependencies]
-tempfile = "3"
 serial_test = "3"
 # assert_cmd = "2" # TODO: re-enable when available offline
 # predicates = "3" # TODO: re-enable when available offline

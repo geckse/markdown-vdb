@@ -54,6 +54,9 @@ pub enum Error {
     #[error("index version {version} is outdated. Run `mdvdb ingest --reindex` to rebuild.")]
     IndexVersionMismatch { version: u32 },
 
+    #[error("another mdvdb process is writing this index (e.g. `mdvdb watch`) — stop it or retry shortly: {}", path.display())]
+    IndexBusy { path: PathBuf },
+
     #[error("semantic edge error: {0}")]
     SemanticEdge(String),
 }
@@ -181,6 +184,16 @@ mod tests {
             err.to_string(),
             "index version 1 is outdated. Run `mdvdb ingest --reindex` to rebuild."
         );
+    }
+
+    #[test]
+    fn index_busy_variant_formats() {
+        let err = Error::IndexBusy {
+            path: PathBuf::from("/tmp/.markdownvdb/index"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("another mdvdb process"));
+        assert!(s.contains("/tmp/.markdownvdb/index"));
     }
 
     #[test]

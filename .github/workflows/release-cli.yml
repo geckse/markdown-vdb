@@ -60,13 +60,19 @@ jobs:
         env:
           CXXFLAGS: ${{ matrix.extra_cxxflags }}
 
+      # Raw binary names (mdvdb-<target> / mdvdb-<target>.exe) are a CONTRACT with
+      # the desktop app's in-app installer: app/src/main/cli-install.ts getAssetName().
+      # Do NOT rename them without updating the app.
       - name: Package (Unix)
         if: runner.os != 'Windows'
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           ARCHIVE=mdvdb-${VERSION}-${{ matrix.target }}.tar.gz
           tar -czf "$ARCHIVE" -C target/${{ matrix.target }}/release mdvdb
+          RAW_BINARY=mdvdb-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/mdvdb "$RAW_BINARY"
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "RAW_BINARY=$RAW_BINARY" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -74,10 +80,16 @@ jobs:
           $VERSION = "$env:GITHUB_REF" -replace 'refs/tags/', ''
           $ARCHIVE = "mdvdb-${VERSION}-${{ matrix.target }}.zip"
           Compress-Archive -Path "target/${{ matrix.target }}/release/mdvdb.exe" -DestinationPath $ARCHIVE
+          $RAW_BINARY = "mdvdb-${{ matrix.target }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/mdvdb.exe" $RAW_BINARY
           echo "ARCHIVE=$ARCHIVE" >> $env:GITHUB_ENV
+          echo "RAW_BINARY=$RAW_BINARY" >> $env:GITHUB_ENV
         shell: pwsh
 
-      - name: Upload release asset
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ARCHIVE }}
+          generate_release_notes: true
+          files: |
+            ${{ env.ARCHIVE }}
+            ${{ env.RAW_BINARY }}

@@ -202,3 +202,38 @@ fn test_fts_multiple_files() {
     assert!(!py_results.is_empty(), "should find python doc");
     assert_eq!(py_results[0].chunk_id, "python.md#0");
 }
+
+#[test]
+fn test_fts_second_writer_returns_index_busy() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("fts");
+
+    // First writer holds the Tantivy writer lock for the directory.
+    let _first = FtsIndex::open_or_create(&path).unwrap();
+
+    // A second writer on the same directory must surface IndexBusy.
+    let second = FtsIndex::open_or_create(&path);
+    match second {
+        Err(mdvdb::error::Error::IndexBusy { path: busy_path }) => {
+            assert_eq!(busy_path, path);
+            let msg = mdvdb::error::Error::IndexBusy { path: busy_path }.to_string();
+            assert!(
+                msg.contains("another mdvdb process"),
+                "IndexBusy message should mention another process: {msg}"
+            );
+        }
+        Ok(_) => panic!("second writer should not acquire the lock"),
+        Err(other) => panic!("expected IndexBusy, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_fts_readonly_open_does_not_conflict_with_writer() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("fts");
+
+    let _writer = FtsIndex::open_or_create(&path).unwrap();
+    // Read-only opens acquire no writer lock and must keep working.
+    let readonly = FtsIndex::open_readonly(&path);
+    assert!(readonly.is_ok(), "read-only open must not hit the writer lock");
+}

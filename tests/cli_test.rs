@@ -1282,6 +1282,89 @@ fn test_cli_ingest_preview_json() {
 }
 
 #[test]
+fn test_cli_info_human() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .arg("info")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb info");
+
+    assert!(
+        output.status.success(),
+        "info should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Markdown files:"), "got: {stdout}");
+    assert!(stdout.contains("Indexed files:"), "got: {stdout}");
+    assert!(stdout.contains("Full reindex estimate:"), "got: {stdout}");
+}
+
+#[test]
+fn test_cli_info_json() {
+    let dir = setup_and_ingest();
+    let output = mdvdb_bin()
+        .args(["info", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb info --json");
+
+    assert!(
+        output.status.success(),
+        "info --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["scope"], ".");
+    assert_eq!(json["file_count"], 2);
+    assert!(json["chunk_count"].as_u64().unwrap() > 0);
+    assert_eq!(json["sync"]["new"], 0);
+    assert_eq!(json["embedding"]["provider"], "Mock");
+    assert!(json["reindex_estimated_tokens"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_cli_info_scoped_json() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(
+        root.join(".markdownvdb/config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    fs::write(root.join("root.md"), "# Root\n\nOutside.\n").unwrap();
+    fs::write(root.join("sub/a.md"), "# A\n\nInside A.\n").unwrap();
+    fs::write(root.join("sub/b.md"), "# B\n\nInside B.\n").unwrap();
+
+    let ingest = mdvdb_bin().arg("ingest").current_dir(root).output().unwrap();
+    assert!(
+        ingest.status.success(),
+        "ingest should succeed, stderr: {}",
+        String::from_utf8_lossy(&ingest.stderr)
+    );
+
+    let output = mdvdb_bin()
+        .args(["info", "sub", "--json"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run scoped mdvdb info");
+    assert!(
+        output.status.success(),
+        "scoped info should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["scope"], "sub/");
+    assert_eq!(json["is_whole_vault"], false);
+    assert_eq!(json["file_count"], 2);
+    assert_eq!(json["indexed_file_count"], 2);
+    assert_eq!(json["sync"]["unchanged"], 2);
+}
+
+#[test]
 fn test_cli_global_json_flag() {
     let dir = setup_and_ingest();
     let output = mdvdb_bin()

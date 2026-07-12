@@ -417,7 +417,9 @@ impl Config {
     /// Load configuration with priority: shell env > project YAML > user YAML > defaults.
     ///
     /// Pipeline:
-    /// 1. Load `.env` for secrets (OPENAI_API_KEY, OLLAMA_HOST) via dotenvy
+    /// 1. Load secrets (OPENAI_API_KEY, OLLAMA_HOST) via dotenvy, in priority
+    ///    order: shell env > `<root>/.env` > `<root>/.markdownvdb/.env` >
+    ///    `~/.mdvdb/.env` > legacy `~/.mdvdb/config`
     /// 2. Detect & auto-migrate project config to YAML
     /// 3. Detect & auto-migrate user config to YAML
     /// 4. Load user YAML as serde_yaml::Value (or empty Mapping)
@@ -440,9 +442,21 @@ impl Config {
             .collect();
 
         let _ = dotenvy::from_path(project_root.join(".env"));
+        let _ = dotenvy::from_path(project_root.join(".markdownvdb").join(".env"));
 
-        // Remove MDVDB_* vars introduced by .env (not present before).
-        // These should be configured via YAML, not .env.
+        // User-level secrets: `~/.mdvdb/.env`, plus the legacy dotenv config
+        // (`~/.mdvdb/config`) so a global OPENAI_API_KEY keeps working even
+        // after the YAML migration. dotenvy never overrides existing vars,
+        // so earlier sources win.
+        if std::env::var("MDVDB_NO_USER_CONFIG").is_err() {
+            if let Some(user_dir) = Self::user_config_dir() {
+                let _ = dotenvy::from_path(user_dir.join(".env"));
+                let _ = dotenvy::from_path(user_dir.join("config"));
+            }
+        }
+
+        // Remove MDVDB_* vars introduced by the dotenv files above (not
+        // present before). These should be configured via YAML, not .env.
         for (k, _) in std::env::vars() {
             if k.starts_with("MDVDB_") && !pre_env_mdvdb_vars.contains(&k) {
                 std::env::remove_var(&k);
@@ -974,7 +988,8 @@ pub fn apply_env_overrides(yaml: &mut YamlConfig) {
 /// Migrate a dotenv-style config file to YAML format.
 ///
 /// Reads the dotenv file line by line, maps `MDVDB_*` keys to `YamlConfig` fields,
-/// writes the YAML file atomically, and renames the old file to `.bak`.
+/// writes the YAML file atomically, preserves non-MDVDB keys (secrets like
+/// `OPENAI_API_KEY`) in a sibling `.env` file, and renames the old file to `.bak`.
 pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<(), Error> {
     use std::fs;
 
@@ -983,6 +998,7 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
     })?;
 
     let mut yaml = YamlConfig::default();
+    let mut preserved: Vec<(String, String)> = Vec::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
@@ -1094,11 +1110,48 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
             "MDVDB_IGNORE_PATTERNS" => {
                 yaml.sources.ignore = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
             }
-            _ => {} // Ignore non-MDVDB keys
+            _ => {
+                // Non-MDVDB keys (e.g. OPENAI_API_KEY) are secrets — they
+                // have no YAML home, so preserve them in a sibling .env.
+                preserved.push((key.to_string(), trimmed.to_string()));
+            }
         }
     }
 
     write_yaml_config(yaml_path, &yaml)?;
+
+    // Write preserved secrets to `.env` next to the YAML file (appending
+    // only keys not already present). This must succeed before the dotenv
+    // file is renamed away, or the secrets would be lost.
+    if !preserved.is_empty() {
+        if let Some(dir) = yaml_path.parent() {
+            let env_path = dir.join(".env");
+            let existing = fs::read_to_string(&env_path).unwrap_or_default();
+            let existing_keys: std::collections::HashSet<&str> = existing
+                .lines()
+                .filter_map(|l| l.trim().split_once('=').map(|(k, _)| k.trim()))
+                .collect();
+            let mut out = existing.clone();
+            for (key, line) in &preserved {
+                if existing_keys.contains(key.as_str()) {
+                    continue;
+                }
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            if out != existing {
+                fs::write(&env_path, out).map_err(|e| {
+                    Error::Config(format!(
+                        "failed to preserve secrets in '{}': {e}",
+                        env_path.display()
+                    ))
+                })?;
+            }
+        }
+    }
 
     // Rename old dotenv file to .bak
     let bak_path = dotenv_path.with_extension("bak");
@@ -1937,6 +1990,57 @@ MDVDB_SEARCH_DEFAULT_LIMIT=5\n\
         let cfg: YamlConfig = serde_yaml::from_str(&content).unwrap();
         assert_eq!(cfg.embedding.provider, "ollama");
         assert_eq!(cfg.search.limit, 5);
+    }
+
+    #[test]
+    fn migrate_dotenv_preserves_secrets_in_env_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dotenv = tmp.path().join("config");
+        let yaml_path = tmp.path().join("config.yaml");
+
+        std::fs::write(&dotenv, "\
+MDVDB_EMBEDDING_PROVIDER=openai\n\
+OPENAI_API_KEY=sk-preserved\n\
+OLLAMA_HOST=http://example:11434\n\
+").unwrap();
+
+        migrate_dotenv_to_yaml(&dotenv, &yaml_path).unwrap();
+
+        let env_content = std::fs::read_to_string(tmp.path().join(".env")).unwrap();
+        assert!(env_content.contains("OPENAI_API_KEY=sk-preserved"));
+        assert!(env_content.contains("OLLAMA_HOST=http://example:11434"));
+        assert!(!env_content.contains("MDVDB_EMBEDDING_PROVIDER"));
+        assert!(tmp.path().join("config.bak").exists());
+    }
+
+    #[test]
+    fn migrate_dotenv_does_not_duplicate_existing_env_keys() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dotenv = tmp.path().join("config");
+        let yaml_path = tmp.path().join("config.yaml");
+        let env_path = tmp.path().join(".env");
+
+        std::fs::write(&env_path, "OPENAI_API_KEY=sk-existing\n").unwrap();
+        std::fs::write(&dotenv, "OPENAI_API_KEY=sk-from-dotenv\nMY_SECRET=abc\n").unwrap();
+
+        migrate_dotenv_to_yaml(&dotenv, &yaml_path).unwrap();
+
+        let env_content = std::fs::read_to_string(&env_path).unwrap();
+        assert!(env_content.contains("OPENAI_API_KEY=sk-existing"), "existing key must win");
+        assert!(!env_content.contains("sk-from-dotenv"));
+        assert!(env_content.contains("MY_SECRET=abc"), "new key must be appended");
+    }
+
+    #[test]
+    fn migrate_dotenv_no_secrets_writes_no_env_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dotenv = tmp.path().join("config");
+        let yaml_path = tmp.path().join("config.yaml");
+
+        std::fs::write(&dotenv, "MDVDB_EMBEDDING_PROVIDER=openai\n").unwrap();
+        migrate_dotenv_to_yaml(&dotenv, &yaml_path).unwrap();
+
+        assert!(!tmp.path().join(".env").exists());
     }
 
     #[test]

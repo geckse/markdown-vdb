@@ -173,3 +173,27 @@ fn various_max_tokens() {
         chunks_1024.len()
     );
 }
+
+#[test]
+fn chunk_ids_normalize_backslash_paths() {
+    use std::path::PathBuf;
+
+    // Windows-style separators in the file path must not leak into chunk IDs.
+    let file = mdvdb::parser::MarkdownFile {
+        path: PathBuf::from(r"docs\sub\note.md"),
+        frontmatter: None,
+        headings: vec![],
+        body: "Some plain content for a single chunk.".to_string(),
+        content_hash: "abc".to_string(),
+        file_size: 38,
+        links: Vec::new(),
+        modified_at: 0,
+        frontmatter_links: Vec::new(),
+    };
+
+    let chunks = chunk_document(&file, 512, 0).unwrap();
+    assert!(!chunks.is_empty(), "should produce at least one chunk");
+    for (i, chunk) in chunks.iter().enumerate() {
+        assert_eq!(chunk.id, format!("docs/sub/note.md#{i}"));
+    }
+}

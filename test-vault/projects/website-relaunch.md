@@ -1,6 +1,6 @@
 ---
 title: Website Relaunch
-client: "[[clients/acme-corp]]"
+client: "[[clients/globex]]"
 status: in-progress
 deadline: 2026-09-30
 budget: 24000

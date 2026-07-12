@@ -61,7 +61,14 @@ impl FtsIndex {
 
         let writer = index
             .writer(50_000_000) // 50MB heap
-            .map_err(|e| Error::Fts(e.to_string()))?;
+            .map_err(|e| match e {
+                // Another process (e.g. `mdvdb watch`) holds the Tantivy
+                // writer lock for this directory.
+                tantivy::TantivyError::LockFailure(..) => Error::IndexBusy {
+                    path: path.to_path_buf(),
+                },
+                other => Error::Fts(other.to_string()),
+            })?;
 
         Ok(Self {
             index,
