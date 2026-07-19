@@ -1621,7 +1621,109 @@ fn test_graph_document_json_output() {
     for edge in edges {
         assert!(edge["source"].is_string(), "edge should have 'source'");
         assert!(edge["target"].is_string(), "edge should have 'target'");
+        assert!(
+            edge.get("context_index").is_none(),
+            "default graph JSON contract must not change"
+        );
     }
+    assert!(
+        json.get("format").is_none() && json.get("contexts").is_none(),
+        "compact wire fields must be opt-in"
+    );
+}
+
+#[test]
+fn test_graph_compact_json_interns_contexts_and_preserves_data() {
+    let dir = setup_and_ingest_with_links();
+
+    let regular_output = mdvdb_bin()
+        .args(["graph", "--level", "document", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run regular graph JSON command");
+    assert!(regular_output.status.success());
+
+    let compact_output = mdvdb_bin()
+        .args(["graph", "--level", "document", "--compact", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run compact graph JSON command");
+    assert!(
+        compact_output.status.success(),
+        "graph --compact --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&compact_output.stderr)
+    );
+
+    let regular: serde_json::Value =
+        serde_json::from_slice(&regular_output.stdout).expect("regular graph JSON should parse");
+    let compact: serde_json::Value =
+        serde_json::from_slice(&compact_output.stdout).expect("compact graph JSON should parse");
+
+    assert_eq!(compact["format"], "mdvdb.graph.compact");
+    assert_eq!(compact["version"], 1);
+    assert_eq!(compact["level"], "document");
+    assert_eq!(compact["nodes"].as_array().unwrap().len(), regular["nodes"].as_array().unwrap().len());
+    assert_eq!(compact["edges"].as_array().unwrap().len(), regular["edges"].as_array().unwrap().len());
+
+    let contexts = compact["contexts"]
+        .as_array()
+        .expect("compact response needs a context table");
+    assert!(!contexts.is_empty(), "semantic contexts should be retained");
+
+    for compact_edge in compact["edges"].as_array().unwrap() {
+        assert!(
+            compact_edge.get("context_text").is_none(),
+            "full contexts must not be repeated on compact edges"
+        );
+        assert!(
+            compact_edge.get("field").is_some(),
+            "field must remain an always-present edge key"
+        );
+
+        let regular_edge = regular["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|edge| {
+                edge["source"] == compact_edge["source"]
+                    && edge["target"] == compact_edge["target"]
+                    && edge["field"] == compact_edge["field"]
+            })
+            .expect("compact edge must match a regular edge");
+
+        match compact_edge.get("context_index") {
+            Some(index) => {
+                let index = index.as_u64().unwrap() as usize;
+                assert_eq!(contexts[index], regular_edge["context_text"]);
+            }
+            None => assert!(
+                regular_edge.get("context_text").is_none(),
+                "an absent context index must match an absent regular context"
+            ),
+        }
+    }
+
+    let compact_stdout = String::from_utf8_lossy(&compact_output.stdout);
+    assert_eq!(
+        compact_stdout.trim_end().lines().count(),
+        1,
+        "compact wire JSON should not include pretty-print whitespace"
+    );
+}
+
+#[test]
+fn test_graph_compact_requires_json() {
+    let dir = setup_and_ingest_with_links();
+
+    let output = mdvdb_bin()
+        .args(["graph", "--compact"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(!output.status.success(), "--compact without --json must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--json"), "error should explain the requirement: {stderr}");
 }
 
 #[test]

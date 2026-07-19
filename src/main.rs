@@ -433,6 +433,10 @@ struct GraphArgs {
     /// Restrict graph to files under this path prefix
     #[arg(long)]
     path: Option<String>,
+
+    /// Emit the versioned app wire format with response-level interned contexts
+    #[arg(long, visible_alias = "intern-contexts", requires = "json")]
+    compact: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -1244,12 +1248,23 @@ async fn run() -> anyhow::Result<()> {
                 GraphLevelArg::Document => GraphLevel::Document,
                 GraphLevelArg::Chunk => GraphLevel::Chunk,
             };
-            let data = vdb.graph(level, args.path.as_deref())?;
 
             if json {
-                serde_json::to_writer_pretty(std::io::stdout(), &data)?;
+                if args.compact {
+                    // The compact contract is also serialized without JSON
+                    // indentation to minimize bytes copied across the app's
+                    // process boundary.
+                    let data = vdb.graph_compact(level, args.path.as_deref())?;
+                    serde_json::to_writer(std::io::stdout(), &data)?;
+                } else {
+                    // Preserve the existing public CLI JSON byte shape and
+                    // pretty-printing unless compact output is explicitly set.
+                    let data = vdb.graph(level, args.path.as_deref())?;
+                    serde_json::to_writer_pretty(std::io::stdout(), &data)?;
+                }
                 writeln!(std::io::stdout())?;
             } else {
+                let data = vdb.graph(level, args.path.as_deref())?;
                 format::print_graph_summary(&data);
             }
         }

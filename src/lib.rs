@@ -554,6 +554,133 @@ pub struct GraphData {
     pub custom_clusters: Vec<GraphCluster>,
 }
 
+/// Wire-efficient graph response for visualization clients.
+///
+/// Unlike [`GraphData`], edge contexts are interned once in [`contexts`](Self::contexts)
+/// and referenced by [`CompactGraphEdge::context_index`]. This preserves every
+/// full context while avoiding repeated strings in the serialized response.
+/// Consumers should reject unsupported [`version`](Self::version) values before
+/// interpreting the rest of the payload.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompactGraphData {
+    /// Stable discriminator for this response shape.
+    pub format: String,
+    /// Version of the compact graph wire contract.
+    pub version: u32,
+    /// All indexed files or chunks as graph nodes.
+    pub nodes: Vec<GraphNode>,
+    /// Graph connections whose contexts reference `contexts` by index.
+    pub edges: Vec<CompactGraphEdge>,
+    /// Deduplicated, full edge contexts. Indices are zero-based.
+    pub contexts: Vec<String>,
+    /// Cluster groupings with labels.
+    pub clusters: Vec<GraphCluster>,
+    /// The level of detail for this graph.
+    pub level: String,
+    /// Edge clusters (semantic relationship groupings), if available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_clusters: Vec<GraphCluster>,
+    /// User-defined custom clusters, if available.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub custom_clusters: Vec<GraphCluster>,
+}
+
+/// An edge in the compact graph wire contract.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompactGraphEdge {
+    /// Source node id.
+    pub source: String,
+    /// Target node id.
+    pub target: String,
+    /// Optional edge weight (e.g. cosine similarity).
+    pub weight: Option<f64>,
+    /// Semantic edge relationship type (cluster label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relationship_type: Option<String>,
+    /// Semantic edge strength (cosine similarity between edge and target embeddings).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f64>,
+    /// Index into [`CompactGraphData::contexts`] for the full paragraph context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_index: Option<usize>,
+    /// Edge cluster assignment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_cluster_id: Option<usize>,
+    /// Originating frontmatter field for relation edges. Always serialized so
+    /// this remains compatible with the required edge-field contract.
+    pub field: Option<String>,
+}
+
+/// Stable format discriminator for [`CompactGraphData`].
+pub const COMPACT_GRAPH_FORMAT: &str = "mdvdb.graph.compact";
+/// Current [`CompactGraphData`] wire-contract version.
+pub const COMPACT_GRAPH_VERSION: u32 = 1;
+
+impl From<GraphData> for CompactGraphData {
+    fn from(data: GraphData) -> Self {
+        let GraphData {
+            nodes,
+            edges,
+            clusters,
+            level,
+            edge_clusters,
+            custom_clusters,
+        } = data;
+
+        // Own each unique context exactly once while building the index. Move
+        // the map keys into index order after all edges have been converted.
+        let mut context_indices: HashMap<String, usize> = HashMap::new();
+        let edges = edges
+            .into_iter()
+            .map(|edge| {
+                let context_index = edge.context_text.map(|context| {
+                    if let Some(index) = context_indices.get(&context) {
+                        *index
+                    } else {
+                        let index = context_indices.len();
+                        context_indices.insert(context, index);
+                        index
+                    }
+                });
+                CompactGraphEdge {
+                    source: edge.source,
+                    target: edge.target,
+                    weight: edge.weight,
+                    relationship_type: edge.relationship_type,
+                    strength: edge.strength,
+                    context_index,
+                    edge_cluster_id: edge.edge_cluster_id,
+                    field: edge.field,
+                }
+            })
+            .collect();
+
+        let mut contexts = vec![String::new(); context_indices.len()];
+        for (context, index) in context_indices {
+            contexts[index] = context;
+        }
+
+        Self {
+            format: COMPACT_GRAPH_FORMAT.to_string(),
+            version: COMPACT_GRAPH_VERSION,
+            nodes,
+            edges,
+            contexts,
+            clusters,
+            level,
+            edge_clusters,
+            custom_clusters,
+        }
+    }
+}
+
+struct DocumentGraphScaffold {
+    indexed_paths: HashSet<String>,
+    nodes: Vec<GraphNode>,
+    clusters: Vec<GraphCluster>,
+    custom_clusters: Vec<GraphCluster>,
+}
+
 /// Map each document path to its topic memberships `(id, score)`, sorted by
 /// score descending (ties → lower id). The first entry is the primary topic.
 fn topic_membership_map(
@@ -603,6 +730,27 @@ fn graph_cluster_from_topic(cluster: &clustering::CustomClusterInfo) -> GraphClu
         threshold: cluster.threshold,
         parent_id: None,
     }
+}
+
+fn graph_edge_clusters(link_graph: Option<&links::LinkGraph>) -> Vec<GraphCluster> {
+    link_graph
+        .and_then(|graph| graph.edge_cluster_state.as_ref())
+        .map(|state| {
+            state
+                .clusters
+                .iter()
+                .map(|cluster| GraphCluster {
+                    id: cluster.id,
+                    label: cluster.label.clone(),
+                    keywords: cluster.keywords.clone(),
+                    member_count: cluster.members.len(),
+                    description: None,
+                    threshold: None,
+                    parent_id: None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Primary library API handle for markdown-vdb.
@@ -2170,11 +2318,9 @@ sources:
             .unwrap_or_default())
     }
 
-    /// Return graph data combining indexed files, link edges, and cluster membership.
-    pub fn graph_data(&self, path_filter: Option<&str>) -> Result<GraphData> {
-        // 1. Get all indexed file paths
+    fn document_graph_scaffold(&self, path_filter: Option<&str>) -> DocumentGraphScaffold {
         let file_hashes = self.index.get_file_hashes();
-        let indexed_paths: std::collections::HashSet<String> = file_hashes
+        let indexed_paths: HashSet<String> = file_hashes
             .keys()
             .filter(|p| match path_filter {
                 Some(prefix) => p.starts_with(prefix),
@@ -2183,7 +2329,6 @@ sources:
             .cloned()
             .collect();
 
-        // 2. Build path → cluster_id map from ClusterState
         let cluster_state = self.index.get_clusters();
         let mut path_to_cluster: HashMap<String, usize> = HashMap::new();
         let mut clusters = Vec::new();
@@ -2196,7 +2341,6 @@ sources:
             }
         }
 
-        // 2b. Build path → topic memberships map (multi-label, score-sorted)
         let custom_cluster_state = self.index.get_custom_clusters();
         let path_to_topics = topic_membership_map(custom_cluster_state.as_ref());
         let custom_clusters = custom_cluster_state
@@ -2210,7 +2354,6 @@ sources:
             })
             .unwrap_or_default();
 
-        // 3. Build nodes
         let nodes: Vec<GraphNode> = indexed_paths
             .iter()
             .map(|path| {
@@ -2233,54 +2376,144 @@ sources:
             })
             .collect();
 
-        // 4. Build edges from LinkGraph, filtering to indexed files only
-        let mut edges = Vec::new();
-        if let Some(link_graph) = self.index.get_link_graph() {
-            for (source, entries) in &link_graph.forward {
-                if !indexed_paths.contains(source) {
-                    continue;
+        DocumentGraphScaffold {
+            indexed_paths,
+            nodes,
+            clusters,
+            custom_clusters,
+        }
+    }
+
+    /// Return graph data combining indexed files, link edges, and cluster membership.
+    pub fn graph_data(&self, path_filter: Option<&str>) -> Result<GraphData> {
+        let DocumentGraphScaffold {
+            indexed_paths,
+            nodes,
+            clusters,
+            custom_clusters,
+        } = self.document_graph_scaffold(path_filter);
+
+        // Project the stored graph while borrowing it under one read lock. The
+        // previous implementation cloned the complete semantic graph twice,
+        // including every context string, before building this response.
+        let (edges, edge_clusters) = self.index.with_link_graph(|link_graph| {
+            let mut edges = Vec::new();
+            if let Some(link_graph) = link_graph {
+                for (source, entries) in &link_graph.forward {
+                    if !indexed_paths.contains(source) {
+                        continue;
+                    }
+                    for entry in entries {
+                        if indexed_paths.contains(&entry.target) {
+                            // Look up semantic edge metadata if available (relation
+                            // edges use field-qualified ids and never carry semantic data).
+                            let edge_id = links::entry_edge_id(entry);
+                            let semantic = link_graph
+                                .semantic_edges
+                                .as_ref()
+                                .and_then(|se| se.get(&edge_id));
+                            edges.push(GraphEdge {
+                                source: source.clone(),
+                                target: entry.target.clone(),
+                                weight: None,
+                                relationship_type: semantic
+                                    .and_then(|s| s.relationship_type.clone()),
+                                strength: semantic.and_then(|s| s.strength),
+                                context_text: semantic.map(|s| s.context_text.clone()),
+                                edge_cluster_id: semantic.and_then(|s| s.cluster_id),
+                                field: entry.field.clone(),
+                            });
+                        }
+                    }
                 }
-                for entry in entries {
-                    if indexed_paths.contains(&entry.target) {
-                        // Look up semantic edge metadata if available (relation
-                        // edges use field-qualified ids and never carry semantic data).
+            }
+
+            let edge_clusters = graph_edge_clusters(link_graph);
+
+            (edges, edge_clusters)
+        });
+
+        Ok(GraphData {
+            nodes,
+            edges,
+            clusters,
+            level: "document".to_string(),
+            edge_clusters,
+            custom_clusters,
+        })
+    }
+
+    /// Return the versioned compact graph wire response used by visualization
+    /// clients. Full edge contexts are deduplicated into a response-level
+    /// string table and are never cloned once per rendered edge.
+    pub fn graph_data_compact(&self, path_filter: Option<&str>) -> Result<CompactGraphData> {
+        let DocumentGraphScaffold {
+            indexed_paths,
+            nodes,
+            clusters,
+            custom_clusters,
+        } = self.document_graph_scaffold(path_filter);
+
+        let (edges, contexts, edge_clusters) = self.index.with_link_graph(|link_graph| {
+            let mut edges = Vec::new();
+            let mut contexts = Vec::new();
+
+            if let Some(link_graph) = link_graph {
+                // The keys borrow the already-stored semantic contexts, while
+                // the response table owns one copy of each distinct string.
+                let mut context_indices: HashMap<&str, usize> = HashMap::new();
+
+                for (source, entries) in &link_graph.forward {
+                    if !indexed_paths.contains(source) {
+                        continue;
+                    }
+                    for entry in entries {
+                        if !indexed_paths.contains(&entry.target) {
+                            continue;
+                        }
+
                         let edge_id = links::entry_edge_id(entry);
-                        let semantic = link_graph.semantic_edges.as_ref()
-                            .and_then(|se| se.get(&edge_id));
-                        edges.push(GraphEdge {
+                        let semantic = link_graph
+                            .semantic_edges
+                            .as_ref()
+                            .and_then(|semantic_edges| semantic_edges.get(&edge_id));
+                        let context_index = semantic.map(|semantic_edge| {
+                            let context = semantic_edge.context_text.as_str();
+                            if let Some(index) = context_indices.get(context) {
+                                *index
+                            } else {
+                                let index = contexts.len();
+                                contexts.push(context.to_string());
+                                context_indices.insert(context, index);
+                                index
+                            }
+                        });
+
+                        edges.push(CompactGraphEdge {
                             source: source.clone(),
                             target: entry.target.clone(),
                             weight: None,
-                            relationship_type: semantic.and_then(|s| s.relationship_type.clone()),
-                            strength: semantic.and_then(|s| s.strength),
-                            context_text: semantic.map(|s| s.context_text.clone()),
-                            edge_cluster_id: semantic.and_then(|s| s.cluster_id),
+                            relationship_type: semantic
+                                .and_then(|edge| edge.relationship_type.clone()),
+                            strength: semantic.and_then(|edge| edge.strength),
+                            context_index,
+                            edge_cluster_id: semantic.and_then(|edge| edge.cluster_id),
                             field: entry.field.clone(),
                         });
                     }
                 }
             }
-        }
 
-        // Build edge clusters from EdgeClusterState if available
-        let edge_clusters = self.index.get_link_graph()
-            .and_then(|lg| lg.edge_cluster_state)
-            .map(|ecs| {
-                ecs.clusters.iter().map(|c| GraphCluster {
-                    id: c.id,
-                    label: c.label.clone(),
-                    keywords: c.keywords.clone(),
-                    member_count: c.members.len(),
-                    description: None,
-                    threshold: None,
-                    parent_id: None,
-                }).collect()
-            })
-            .unwrap_or_default();
+            let edge_clusters = graph_edge_clusters(link_graph);
+            (edges, contexts, edge_clusters)
+        });
 
-        Ok(GraphData {
+        Ok(CompactGraphData {
+            format: COMPACT_GRAPH_FORMAT.to_string(),
+            version: COMPACT_GRAPH_VERSION,
             nodes,
             edges,
+            contexts,
             clusters,
             level: "document".to_string(),
             edge_clusters,
@@ -2295,13 +2528,18 @@ sources:
     pub fn graph_data_chunks(&self, k: usize, path_filter: Option<&str>) -> Result<GraphData> {
         use std::collections::HashSet;
 
-        let chunk_vectors: Vec<_> = self.index.get_chunk_vectors()
+        let mut chunk_vectors: Vec<_> = self
+            .index
+            .get_chunk_vectors()
             .into_iter()
             .filter(|cv| match path_filter {
                 Some(prefix) => cv.source_path.starts_with(prefix),
                 None => true,
             })
             .collect();
+        // Stable order keeps both the parallel result batches and serialized
+        // graph output deterministic across HashMap insertion orders.
+        chunk_vectors.sort_unstable_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
         if chunk_vectors.is_empty() {
             return Ok(GraphData {
                 nodes: Vec::new(),
@@ -2349,8 +2587,6 @@ sources:
                 } else {
                     Some(cv.heading_hierarchy.join(" > "))
                 };
-                let content_len = self.index.get_chunk(&cv.chunk_id)
-                    .map(|c| c.content.len() as f64);
                 let topics = path_to_topics.get(&cv.source_path);
                 GraphNode {
                     id: cv.chunk_id.clone(),
@@ -2365,26 +2601,37 @@ sources:
                     custom_cluster_scores: topics
                         .map(|t| t.iter().map(|(_, s)| *s).collect())
                         .unwrap_or_default(),
-                    size: content_len,
+                    size: Some(cv.content_len as f64),
                 }
             })
             .collect();
 
-        // Build lookup from chunk_id to source_path for filtering
-        let chunk_source: HashMap<String, &str> = chunk_vectors
+        // Borrowed id lookup keeps scoped-neighbor checks and edge deduplication
+        // numeric, avoiding path-sized String clones in the hot graph loop.
+        let chunk_indices: HashMap<&str, usize> = chunk_vectors
             .iter()
-            .map(|cv| (cv.chunk_id.clone(), cv.source_path.as_str()))
+            .enumerate()
+            .map(|(index, cv)| (cv.chunk_id.as_str(), index))
             .collect();
 
         // Build edges: for each chunk, search kNN and keep top-k cross-file
         let search_k = k + 20;
-        let mut seen_edges: HashSet<(String, String)> = HashSet::new();
+        let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
         let mut edges = Vec::new();
+        let queries: Vec<&[f32]> = chunk_vectors
+            .iter()
+            .map(|chunk| chunk.vector.as_slice())
+            .collect();
+        let neighbor_batch = self.index.search_vectors_batch(&queries, search_k)?;
 
-        for cv in &chunk_vectors {
-            let results = self.index.search_vectors(&cv.vector, search_k)?;
+        for (source_index, (cv, results)) in chunk_vectors
+            .iter()
+            .zip(neighbor_batch.matches)
+            .enumerate()
+        {
             let mut cross_file_count = 0;
-            for (neighbor_id, score) in &results {
+            for (neighbor_id_index, score) in results {
+                let neighbor_id = &neighbor_batch.ids[neighbor_id_index];
                 if cross_file_count >= k {
                     break;
                 }
@@ -2392,17 +2639,21 @@ sources:
                 if neighbor_id == &cv.chunk_id {
                     continue;
                 }
+                // The batch search covers the full index. A scoped graph may
+                // therefore see neighbors outside its node set; omit them so
+                // every serialized edge remains a closed-topology reference.
+                let Some(&target_index) = chunk_indices.get(neighbor_id.as_str()) else {
+                    continue;
+                };
                 // Skip intra-file
-                if let Some(&neighbor_path) = chunk_source.get(neighbor_id) {
-                    if neighbor_path == cv.source_path {
-                        continue;
-                    }
+                if chunk_vectors[target_index].source_path == cv.source_path {
+                    continue;
                 }
                 // Deduplicate bidirectional edges
-                let edge_key = if cv.chunk_id < *neighbor_id {
-                    (cv.chunk_id.clone(), neighbor_id.clone())
+                let edge_key = if source_index < target_index {
+                    (source_index, target_index)
                 } else {
-                    (neighbor_id.clone(), cv.chunk_id.clone())
+                    (target_index, source_index)
                 };
                 if seen_edges.contains(&edge_key) {
                     cross_file_count += 1;
@@ -2412,7 +2663,7 @@ sources:
                 edges.push(GraphEdge {
                     source: cv.chunk_id.clone(),
                     target: neighbor_id.clone(),
-                    weight: Some(*score),
+                    weight: Some(score),
                     relationship_type: None,
                     strength: None,
                     context_text: None,
@@ -2441,6 +2692,22 @@ sources:
         match level {
             GraphLevel::Document => self.graph_data(path_filter),
             GraphLevel::Chunk => self.graph_data_chunks(5, path_filter),
+        }
+    }
+
+    /// Return graph data using the versioned compact visualization contract.
+    ///
+    /// Document graphs are projected directly from the borrowed link graph so
+    /// repeated semantic contexts are never materialized per edge. Chunk graph
+    /// edges have no contexts and are converted without changing their data.
+    pub fn graph_compact(
+        &self,
+        level: GraphLevel,
+        path_filter: Option<&str>,
+    ) -> Result<CompactGraphData> {
+        match level {
+            GraphLevel::Document => self.graph_data_compact(path_filter),
+            GraphLevel::Chunk => Ok(self.graph_data_chunks(5, path_filter)?.into()),
         }
     }
 

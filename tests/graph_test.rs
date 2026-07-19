@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use mdvdb::config::{Config, EmbeddingProviderType};
-use mdvdb::{GraphLevel, IngestOptions, MarkdownVdb};
+use mdvdb::{
+    GraphLevel, IngestOptions, MarkdownVdb, COMPACT_GRAPH_FORMAT, COMPACT_GRAPH_VERSION,
+};
 use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
@@ -236,6 +238,26 @@ async fn test_chunk_graph_cross_file_edges() {
 }
 
 #[tokio::test]
+async fn test_chunk_graph_nodes_have_stable_id_order() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::write(root.join("z.md"), "# Zeta\n\nZeta content.\n").unwrap();
+    fs::write(root.join("a.md"), "# Alpha\n\nAlpha content.\n").unwrap();
+    fs::write(root.join("m.md"), "# Middle\n\nMiddle content.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let graph = vdb.graph(GraphLevel::Chunk, None).unwrap();
+    let ids: Vec<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+
+    assert_eq!(ids, sorted);
+}
+
+#[tokio::test]
 async fn test_chunk_graph_no_intra_file_edges() {
     let dir = setup_dir();
     let root = dir.path();
@@ -409,6 +431,21 @@ async fn test_graph_dispatcher() {
             node.id
         );
     }
+
+    let compact_chunk_graph = vdb.graph_compact(GraphLevel::Chunk, None).unwrap();
+    assert_eq!(compact_chunk_graph.format, COMPACT_GRAPH_FORMAT);
+    assert_eq!(compact_chunk_graph.version, COMPACT_GRAPH_VERSION);
+    assert_eq!(compact_chunk_graph.level, "chunk");
+    assert!(
+        compact_chunk_graph.contexts.is_empty(),
+        "similarity edges do not carry paragraph contexts"
+    );
+    assert!(
+        compact_chunk_graph
+            .edges
+            .iter()
+            .all(|edge| edge.context_index.is_none())
+    );
 }
 
 #[tokio::test]
@@ -445,6 +482,95 @@ async fn test_graph_data_backward_compat() {
             "document edge should have no weight"
         );
     }
+}
+
+#[tokio::test]
+async fn test_compact_document_graph_interns_full_contexts_losslessly() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    // Both links share one paragraph, so their semantic edge contexts are
+    // byte-for-byte identical and should occupy one string-table entry.
+    fs::write(
+        root.join("a.md"),
+        "# A\n\nThe same paragraph links to [B](b.md) and [C](c.md) for details.\n",
+    )
+    .unwrap();
+    fs::write(root.join("b.md"), "# B\n\nContent.\n").unwrap();
+    fs::write(root.join("c.md"), "# C\n\nContent.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let regular = vdb.graph_data(None).unwrap();
+    let compact = vdb.graph_data_compact(None).unwrap();
+
+    assert_eq!(compact.format, COMPACT_GRAPH_FORMAT);
+    assert_eq!(compact.version, COMPACT_GRAPH_VERSION);
+    assert_eq!(compact.nodes.len(), regular.nodes.len());
+    assert_eq!(compact.edges.len(), regular.edges.len());
+    assert_eq!(compact.contexts.len(), 1, "shared context should be interned once");
+
+    for edge in &compact.edges {
+        let regular_edge = regular
+            .edges
+            .iter()
+            .find(|candidate| {
+                candidate.source == edge.source
+                    && candidate.target == edge.target
+                    && candidate.field == edge.field
+            })
+            .expect("compact edge must have a regular-contract counterpart");
+        let reconstructed = edge.context_index.map(|index| {
+            compact
+                .contexts
+                .get(index)
+                .expect("context index must reference the response string table")
+        });
+        assert_eq!(reconstructed, regular_edge.context_text.as_ref());
+    }
+
+    let serialized = serde_json::to_value(&compact).unwrap();
+    for edge in serialized["edges"].as_array().unwrap() {
+        assert!(
+            edge.get("context_text").is_none(),
+            "compact edges must not repeat full context strings"
+        );
+        assert!(
+            edge["context_index"].is_u64(),
+            "semantic edge should reference the context table"
+        );
+        assert!(edge.get("field").is_some(), "field remains always-present");
+    }
+}
+
+#[tokio::test]
+async fn test_compact_document_graph_only_interns_contexts_in_filtered_topology() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(
+        root.join("docs/a.md"),
+        "# A\n\nIncluded context links to [B](b.md).\n",
+    )
+    .unwrap();
+    fs::write(root.join("docs/b.md"), "# B\n\nContent.\n").unwrap();
+    fs::write(
+        root.join("outside.md"),
+        "# Outside\n\nExcluded context links to [A](docs/a.md).\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let compact = vdb.graph_data_compact(Some("docs/")).unwrap();
+
+    assert_eq!(compact.edges.len(), 1);
+    assert_eq!(compact.contexts.len(), 1);
+    assert!(compact.contexts[0].contains("Included context"));
+    assert!(!compact.contexts[0].contains("Excluded context"));
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +720,11 @@ async fn test_chunk_graph_path_filter() {
             node.id, node.path
         );
     }
+    let node_ids: std::collections::HashSet<&str> =
+        graph.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert!(graph.edges.iter().all(|edge| {
+        node_ids.contains(edge.source.as_str()) && node_ids.contains(edge.target.as_str())
+    }));
 }
 
 #[tokio::test]

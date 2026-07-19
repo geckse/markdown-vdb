@@ -1456,6 +1456,7 @@ dependencies = [
  "pulldown-cmark",
  "rand 0.8.5",
  "rand_xoshiro",
+ "rayon",
  "regex",
  "reqwest",
  "rkyv",

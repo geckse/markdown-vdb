@@ -34,6 +34,7 @@ linfa-clustering = "0.7"
 leiden-rs = { version = "0.8.1", default-features = false }
 rand = "0.8"
 rand_xoshiro = "0.6"
+rayon = "1"
 tiktoken-rs = "0.6"
 ignore = "0.4"
 async-trait = "0.1"

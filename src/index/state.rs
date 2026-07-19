@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use parking_lot::RwLock;
+use rayon::prelude::*;
 use usearch::Index as HnswIndex;
 
 use tracing::debug;
@@ -29,8 +30,66 @@ pub struct ChunkVectorInfo {
     pub heading_hierarchy: Vec<String>,
     /// 0-based index of this chunk within the file.
     pub chunk_index: usize,
+    /// Chunk content length in bytes, used to size graph nodes without cloning
+    /// the complete stored chunk for every node.
+    pub content_len: usize,
     /// The embedding vector for this chunk.
     pub vector: Vec<f32>,
+}
+
+/// Interned output from a batch of chunk-vector searches.
+///
+/// Neighbor ids are owned once in `ids`; every match refers to that table by
+/// index. This keeps large chunk graphs from allocating the same path-sized
+/// string for every query result.
+pub(crate) struct VectorSearchBatch {
+    pub(crate) ids: Vec<String>,
+    pub(crate) matches: Vec<Vec<(usize, f64)>>,
+}
+
+fn collect_vector_search_indices(
+    hnsw: &HnswIndex,
+    key_to_id_index: &HashMap<u64, usize>,
+    query: &[f32],
+    limit: usize,
+) -> Result<Vec<(usize, f64)>> {
+    // Over-fetch by 2x to compensate for semantic-edge vectors that are
+    // present in the shared HNSW index but excluded from chunk searches.
+    let results = hnsw
+        .search(query, limit * 2)
+        .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
+
+    let mut output = Vec::with_capacity(results.keys.len());
+    for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
+        if let Some(id_index) = key_to_id_index.get(key) {
+            output.push((*id_index, 1.0 - *distance as f64));
+        }
+    }
+
+    output.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    output.truncate(limit);
+    Ok(output)
+}
+
+fn chunk_id_projection(state: &IndexState) -> (Vec<&str>, HashMap<u64, usize>) {
+    // Key order is stable after index compaction and avoids making the string
+    // table depend on HashMap iteration order. Edge ids are omitted up front.
+    let mut keyed_ids: Vec<(u64, &str)> = state
+        .id_to_key
+        .iter()
+        .filter(|(id, _)| !id.starts_with("edge:"))
+        .map(|(id, key)| (*key, id.as_str()))
+        .collect();
+    keyed_ids.sort_unstable_by_key(|(key, _)| *key);
+
+    let mut ids = Vec::with_capacity(keyed_ids.len());
+    let mut key_to_id_index = HashMap::with_capacity(keyed_ids.len());
+    for (key, id) in keyed_ids {
+        let index = ids.len();
+        ids.push(id);
+        key_to_id_index.insert(key, index);
+    }
+    (ids, key_to_id_index)
 }
 
 /// Internal mutable state protected by the RwLock.
@@ -424,34 +483,44 @@ impl Index {
             return Ok(Vec::new());
         }
 
-        // Over-fetch by 2x to compensate for edge vectors that will be filtered out.
-        let over_fetch = limit * 2;
-        let results = state
-            .hnsw
-            .search(query, over_fetch)
-            .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
+        let (ids, key_to_id_index) = chunk_id_projection(&state);
+        collect_vector_search_indices(&state.hnsw, &key_to_id_index, query, limit).map(|matches| {
+            matches
+                .into_iter()
+                .map(|(id_index, score)| (ids[id_index].to_string(), score))
+                .collect()
+        })
+    }
 
-        // Build reverse lookup: key → chunk_id.
-        let key_to_id: HashMap<u64, &String> =
-            state.id_to_key.iter().map(|(id, key)| (*key, id)).collect();
+    /// Search many chunk vectors while holding one index snapshot.
+    ///
+    /// Chunk graph construction issues one nearest-neighbor query per node.
+    /// Reusing the key-to-id projection avoids rebuilding an O(n) hash map for
+    /// every query, and independent HNSW reads run concurrently. Results stay
+    /// in query order and otherwise match [`search_vectors`](Self::search_vectors).
+    pub(crate) fn search_vectors_batch(
+        &self,
+        queries: &[&[f32]],
+        limit: usize,
+    ) -> Result<VectorSearchBatch> {
+        let state = self.state.read();
 
-        let mut output = Vec::with_capacity(results.keys.len());
-        for (key, distance) in results.keys.iter().zip(results.distances.iter()) {
-            if let Some(chunk_id) = key_to_id.get(key) {
-                // Post-filter out edge vectors.
-                if chunk_id.starts_with("edge:") {
-                    continue;
-                }
-                let score = 1.0 - *distance as f64;
-                output.push(((*chunk_id).clone(), score));
-            }
+        if state.hnsw.size() == 0 {
+            return Ok(VectorSearchBatch {
+                ids: Vec::new(),
+                matches: vec![Vec::new(); queries.len()],
+            });
         }
 
-        // Sort by score descending.
-        output.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        output.truncate(limit);
+        let (ids, key_to_id_index) = chunk_id_projection(&state);
 
-        Ok(output)
+        let matches = queries
+            .par_iter()
+            .map(|query| collect_vector_search_indices(&state.hnsw, &key_to_id_index, query, limit))
+            .collect::<Result<Vec<_>>>()?;
+        let ids = ids.into_iter().map(str::to_string).collect();
+
+        Ok(VectorSearchBatch { ids, matches })
     }
 
     /// Get a stored chunk by its ID.
@@ -583,6 +652,7 @@ impl Index {
                         source_path: chunk.source_path.clone(),
                         heading_hierarchy: chunk.heading_hierarchy.clone(),
                         chunk_index: chunk.chunk_index,
+                        content_len: chunk.content.len(),
                         vector: buf,
                     });
                 }
@@ -641,6 +711,18 @@ impl Index {
     pub fn get_link_graph(&self) -> Option<LinkGraph> {
         let state = self.state.read();
         state.metadata.link_graph.clone()
+    }
+
+    /// Read the current link graph without cloning it.
+    ///
+    /// The callback runs while the index read lock is held, so it must not call
+    /// methods that acquire the index write lock. This is intended for
+    /// read-only projections such as the graph visualization payload, where a
+    /// semantic link graph can contain many megabytes of repeated context
+    /// strings and cloning the whole value would be unnecessarily expensive.
+    pub(crate) fn with_link_graph<T>(&self, callback: impl FnOnce(Option<&LinkGraph>) -> T) -> T {
+        let state = self.state.read();
+        callback(state.metadata.link_graph.as_ref())
     }
 
     /// Update (or clear) the link graph.
@@ -1384,6 +1466,76 @@ mod tests {
         }
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "test.md#0");
+    }
+
+    #[test]
+    fn batch_vector_search_matches_individual_queries() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+
+        let mut first = vec![0.0f32; 128];
+        first[0] = 1.0;
+        let mut second = vec![0.0f32; 128];
+        second[1] = 1.0;
+        let mut third = vec![0.0f32; 128];
+        third[0] = 0.8;
+        third[1] = 0.2;
+
+        index
+            .upsert(&mk_file("a.md"), &[mk_chunk("a.md", 0)], &[first.clone()])
+            .unwrap();
+        index
+            .upsert(&mk_file("b.md"), &[mk_chunk("b.md", 0)], &[second.clone()])
+            .unwrap();
+        index
+            .upsert(&mk_file("c.md"), &[mk_chunk("c.md", 0)], &[third.clone()])
+            .unwrap();
+        index
+            .upsert_edges(&[("edge:a.md->b.md@0".to_string(), first.clone())])
+            .unwrap();
+
+        let expected = vec![
+            index.search_vectors(&first, 3).unwrap(),
+            index.search_vectors(&second, 3).unwrap(),
+            index.search_vectors(&third, 3).unwrap(),
+        ];
+        let queries = vec![first.as_slice(), second.as_slice(), third.as_slice()];
+        let batch = index.search_vectors_batch(&queries, 3).unwrap();
+        let actual: Vec<Vec<(String, f64)>> = batch
+            .matches
+            .into_iter()
+            .map(|matches| {
+                matches
+                    .into_iter()
+                    .map(|(id_index, score)| (batch.ids[id_index].clone(), score))
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(actual, expected);
+        assert!(actual
+            .iter()
+            .flatten()
+            .all(|(id, _)| !id.starts_with("edge:")));
+    }
+
+    #[test]
+    fn chunk_vector_snapshot_includes_content_length() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+        let file = mk_file("sized.md");
+        let mut chunk = mk_chunk("sized.md", 0);
+        chunk.content = "a chunk with known bytes".to_string();
+
+        index
+            .upsert(&file, std::slice::from_ref(&chunk), &[vec![1.0f32; 128]])
+            .unwrap();
+
+        let vectors = index.get_chunk_vectors();
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].content_len, chunk.content.len());
     }
 
     #[test]
