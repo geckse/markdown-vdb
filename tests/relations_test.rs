@@ -100,6 +100,8 @@ scopes:
       client:
         field_type: relation
         target: clients
+      ambiguous_file:
+        field_type: file
 "#,
     )
     .unwrap();
@@ -119,7 +121,7 @@ scopes:
     fs::create_dir_all(root.join("invoices/sub")).unwrap();
     fs::write(
         root.join("invoices/i1.md"),
-        "---\nclient: \"[[clients/acme]]\"\ncontact: \"[[clients/globex#Contacts|Globex Contact]]\"\nattachment: \"[[sub/note]]\"\namount: 100\n---\n\n# Invoice i1\n\nInvoice for Acme. See [[../clients/acme|Acme]].\n",
+        "---\nclient: \"[[clients/acme]]\"\ncontact: \"[[clients/globex#Contacts|Globex Contact]]\"\nattachment: \"[[sub/note]]\"\nfiles:\n  - \"[[assets/mockup.png]]\"\n  - \"[Spec](documents/spec.pdf)\"\nambiguous_file: \"[[assets/LICENSE]]\"\namount: 100\n---\n\n# Invoice i1\n\nInvoice for Acme. See [[../clients/acme|Acme]].\n",
     )
     .unwrap();
     fs::write(
@@ -246,6 +248,7 @@ fn test_get_populated_relations_and_contract_shape() {
 
     // Non-link fields (amount) produce no key.
     assert!(!relations.contains_key("amount"));
+    assert!(!relations.contains_key("files"));
 
     // The JSON shape: frontmatter is an ALWAYS-present key on every value.
     let json = serde_json::to_value(&doc).unwrap();
@@ -451,6 +454,7 @@ fn test_graph_edges_carry_field() {
     }
     // At least one relation edge with a concrete field, and the body edge null.
     assert!(edges.iter().any(|e| e["field"] == "client"));
+    assert!(!edges.iter().any(|e| e["field"] == "ambiguous_file"));
     assert!(edges
         .iter()
         .any(|e| e["source"] == "invoices/i1.md" && e["field"].is_null()));
@@ -479,6 +483,12 @@ fn test_scoped_schema_relation_field() {
     assert_eq!(note.field_type, FieldType::Relation);
     let contact = scoped.schema.get_field("contact").unwrap();
     assert_eq!(contact.field_type, FieldType::Relation);
+    let files = scoped.schema.get_field("files").unwrap();
+    assert_eq!(files.field_type, FieldType::File);
+    assert_eq!(files.relation_target, None);
+    let ambiguous_file = scoped.schema.get_field("ambiguous_file").unwrap();
+    assert_eq!(ambiguous_file.field_type, FieldType::File);
+    assert_eq!(ambiguous_file.relation_target, None);
 
     // A list mixing link and non-link elements stays List (no Relation typing);
     // populate still resolves its link-shaped elements (value-driven).

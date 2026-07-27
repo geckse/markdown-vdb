@@ -2109,22 +2109,28 @@ impl MarkdownVdb {
 
     /// Return the metadata schema, either from the index or inferred from discovered files.
     pub fn schema(&self) -> Result<schema::Schema> {
-        // Return stored schema if available.
-        if let Some(s) = self.index.get_schema() {
-            return Ok(s);
-        }
-
-        // Otherwise infer from discovered files.
-        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
-        let files = disco.discover()?;
-        let mut parsed = Vec::new();
-        for path in &files {
-            match parser::parse_markdown_file(&self.root, path) {
-                Ok(md) => parsed.push(md),
-                Err(_) => continue,
+        let base = if let Some(stored) = self.index.get_schema() {
+            stored
+        } else {
+            let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+            let files = disco.discover()?;
+            let mut parsed = Vec::new();
+            for path in &files {
+                match parser::parse_markdown_file(&self.root, path) {
+                    Ok(md) => parsed.push(md),
+                    Err(_) => continue,
+                }
             }
+            schema::Schema::infer(&parsed)
         }
-        Ok(schema::Schema::infer(&parsed))
+        .reclassify_legacy_file_fields();
+
+        // Overlay edits are live configuration and must override a persisted
+        // schema immediately; requiring an ingest here makes app surfaces
+        // disagree until the index happens to be rebuilt.
+        let overlay = schema::Schema::load_overlay(&self.root)?;
+        let global_fields = overlay.map(|value| value.fields);
+        Ok(schema::Schema::merge(base, global_fields))
     }
 
     /// Return the inferred schema for files matching a path prefix.
@@ -2133,25 +2139,30 @@ impl MarkdownVdb {
     /// directly. Otherwise, discovers and parses files to infer on the fly.
     pub fn schema_scoped(&self, path_prefix: &str) -> Result<schema::ScopedSchema> {
         let path_prefix = &path_util::normalize_path_input(path_prefix);
-        // Check persisted scoped schemas first.
-        if let Some(scoped) = self.index.get_scoped_schema(path_prefix) {
-            return Ok(scoped);
-        }
-
-        // Infer from discovered files.
-        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
-        let files = disco.discover()?;
-        let mut parsed = Vec::new();
-        for path in &files {
-            match parser::parse_markdown_file(&self.root, path) {
-                Ok(md) => parsed.push(md),
-                Err(_) => continue,
+        let base = if let Some(scoped) = self.index.get_scoped_schema(path_prefix) {
+            scoped.schema
+        } else {
+            let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+            let files = disco.discover()?;
+            let mut parsed = Vec::new();
+            for path in &files {
+                match parser::parse_markdown_file(&self.root, path) {
+                    Ok(md) => parsed.push(md),
+                    Err(_) => continue,
+                }
             }
+            schema::Schema::infer_scoped(&parsed, path_prefix)
         }
-        let inferred = schema::Schema::infer_scoped(&parsed, path_prefix);
+        .reclassify_legacy_file_fields();
+
+        let overlay = schema::Schema::load_overlay(&self.root)?;
+        let overlay_fields = overlay
+            .as_ref()
+            .map(|value| schema::Schema::resolve_overlay_for_path(value, Some(path_prefix)));
+        let merged = schema::Schema::merge(base, overlay_fields);
         Ok(schema::ScopedSchema {
             scope: path_prefix.to_string(),
-            schema: inferred,
+            schema: merged,
         })
     }
 
@@ -2892,6 +2903,9 @@ sources:
             std::collections::BTreeMap::new();
 
         for fm_link in parser::extract_frontmatter_links(Some(frontmatter)) {
+            if ctx.is_file_field(source, &fm_link.field) {
+                continue;
+            }
             let target_folder = ctx.target_for(source, &fm_link.field);
             let resolved = relations::resolve_relation_target(
                 source,

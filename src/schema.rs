@@ -19,6 +19,8 @@ pub enum FieldType {
     /// A frontmatter reference to another document (wiki link, markdown link,
     /// or bare `.md` path — whole-value only). Serializes as `"Relation"`.
     Relation,
+    /// A frontmatter reference to a collection-local, non-Markdown file.
+    File,
 }
 
 /// Intermediate type used during inference to accumulate field information.
@@ -130,17 +132,20 @@ fn is_date_string(s: &str) -> bool {
 
 /// Infer a `FieldType` from a single `serde_json::Value`.
 ///
-/// Relation rules run ahead of the plain arms: a link-shaped string, or a
-/// non-empty array whose every element is a link-shaped string, classifies as
-/// `Relation`. (Empty arrays classify as `List` — no evidence — so they break
-/// Relation typing via the multi-discriminant Mixed rule.)
+/// Link rules run ahead of the plain arms: Markdown targets classify as
+/// `Relation`, while targets with an explicit non-Markdown extension classify
+/// as `File`. Homogeneous arrays retain that type; arrays mixing both classify
+/// as `Mixed`. Empty arrays remain `List` because they carry no type evidence.
 pub(crate) fn infer_field_type(value: &serde_json::Value) -> FieldType {
     match value {
         serde_json::Value::Bool(_) => FieldType::Boolean,
         serde_json::Value::Number(_) => FieldType::Number,
         serde_json::Value::String(s) => {
-            if crate::relations::is_link_shaped(s) {
-                FieldType::Relation
+            if let Some(kind) = crate::relations::link_kind(s) {
+                match kind {
+                    crate::relations::FrontmatterLinkKind::Relation => FieldType::Relation,
+                    crate::relations::FrontmatterLinkKind::File => FieldType::File,
+                }
             } else if is_date_string(s) {
                 FieldType::Date
             } else {
@@ -148,14 +153,33 @@ pub(crate) fn infer_field_type(value: &serde_json::Value) -> FieldType {
             }
         }
         serde_json::Value::Array(items) => {
-            let all_links = !items.is_empty()
-                && items.iter().all(|v| {
-                    matches!(v, serde_json::Value::String(s) if crate::relations::is_link_shaped(s))
-                });
-            if all_links {
-                FieldType::Relation
-            } else {
-                FieldType::List
+            if items.is_empty() {
+                return FieldType::List;
+            }
+            let kinds: Option<Vec<_>> = items
+                .iter()
+                .map(|value| match value {
+                    serde_json::Value::String(s) => crate::relations::link_kind(s),
+                    _ => None,
+                })
+                .collect();
+            match kinds {
+                Some(kinds)
+                    if kinds
+                        .iter()
+                        .all(|kind| *kind == crate::relations::FrontmatterLinkKind::Relation) =>
+                {
+                    FieldType::Relation
+                }
+                Some(kinds)
+                    if kinds
+                        .iter()
+                        .all(|kind| *kind == crate::relations::FrontmatterLinkKind::File) =>
+                {
+                    FieldType::File
+                }
+                Some(_) => FieldType::Mixed,
+                None => FieldType::List,
             }
         }
         serde_json::Value::Object(_) => FieldType::String, // treat objects as string
@@ -181,6 +205,7 @@ fn parse_field_type_str(s: &str) -> Option<FieldType> {
         "date" => Some(FieldType::Date),
         "mixed" => Some(FieldType::Mixed),
         "relation" => Some(FieldType::Relation),
+        "file" => Some(FieldType::File),
         _ => None,
     }
 }
@@ -413,9 +438,11 @@ impl Schema {
                 if let Some(req) = ov.required {
                     field.required = req;
                 }
-                if target.is_some() {
-                    field.relation_target = target;
-                }
+                field.relation_target = if field.field_type == FieldType::Relation {
+                    target
+                } else {
+                    None
+                };
             } else {
                 // Overlay-only field: not seen in any file
                 let field_type = ov
@@ -427,6 +454,11 @@ impl Schema {
                     } else {
                         FieldType::String
                     });
+                let relation_target = if field_type == FieldType::Relation {
+                    target
+                } else {
+                    None
+                };
 
                 merged.insert(
                     name.clone(),
@@ -438,7 +470,7 @@ impl Schema {
                         sample_values: vec![],
                         allowed_values: ov.allowed_values.clone(),
                         required: ov.required.unwrap_or(false),
-                        relation_target: target,
+                        relation_target,
                     },
                 );
             }
@@ -452,6 +484,30 @@ impl Schema {
             fields,
             last_updated: inferred.last_updated,
         }
+    }
+
+    /// Upgrade persisted schemas written before non-Markdown wiki links had a
+    /// dedicated `File` type. Old indexes may store these fields as
+    /// `Relation`; their retained samples are enough to safely distinguish
+    /// homogeneous File-link fields. Explicit live overlays are applied after
+    /// this migration and therefore remain authoritative.
+    pub(crate) fn reclassify_legacy_file_fields(mut self) -> Self {
+        for field in &mut self.fields {
+            if field.field_type != FieldType::Relation || field.sample_values.is_empty() {
+                continue;
+            }
+
+            let all_file_samples = field.sample_values.iter().all(|sample| {
+                let value = serde_json::from_str::<serde_json::Value>(sample)
+                    .unwrap_or_else(|_| serde_json::Value::String(sample.clone()));
+                infer_field_type(&value) == FieldType::File
+            });
+            if all_file_samples {
+                field.field_type = FieldType::File;
+                field.relation_target = None;
+            }
+        }
+        self
     }
 
     /// Look up a field by name.
@@ -1006,7 +1062,7 @@ fields:
             infer_field_type(&serde_json::json!("clients/acme.md")),
             FieldType::Relation
         );
-        // All-link list → Relation; mixed / empty lists stay List.
+        // All-document-link list → Relation; non-link / empty lists stay List.
         assert_eq!(
             infer_field_type(&serde_json::json!(["[[a]]", "[[b]]"])),
             FieldType::Relation
@@ -1020,6 +1076,103 @@ fields:
         assert_eq!(
             infer_field_type(&serde_json::json!("See [[x]] for details")),
             FieldType::String
+        );
+    }
+
+    #[test]
+    fn infer_field_type_file_values() {
+        assert_eq!(
+            infer_field_type(&serde_json::json!("[[assets/mockup.png]]")),
+            FieldType::File
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!("[Spec](documents/spec.pdf)")),
+            FieldType::File
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!([
+                "[[assets/mockup.png]]",
+                "[[documents/spec.pdf]]"
+            ])),
+            FieldType::File
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!([
+                "[[assets/mockup.png]]",
+                "[[clients/acme]]"
+            ])),
+            FieldType::Mixed
+        );
+        // Plain dotted strings are not automatically treated as files.
+        assert_eq!(
+            infer_field_type(&serde_json::json!("release-1.2.3")),
+            FieldType::String
+        );
+    }
+
+    #[test]
+    fn overlay_pins_file_and_ignores_relation_target() {
+        let inferred = Schema::infer(&[make_file(serde_json::json!({
+            "attachments": []
+        }))]);
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "attachments".to_string(),
+            OverlayField {
+                description: None,
+                field_type: Some("file".to_string()),
+                allowed_values: None,
+                required: None,
+                target: Some("assets".to_string()),
+            },
+        );
+        let merged = Schema::merge(inferred, Some(overlay));
+        assert_eq!(merged.fields[0].field_type, FieldType::File);
+        assert_eq!(merged.fields[0].relation_target, None);
+        assert_eq!(serde_json::to_string(&FieldType::File).unwrap(), "\"File\"");
+    }
+
+    #[test]
+    fn reclassifies_legacy_relation_samples_as_files() {
+        let mut schema = Schema::infer(&[make_file(serde_json::json!({
+            "attachments": [
+                "[[assets/mockup.png]]",
+                "[[documents/spec.pdf]]"
+            ]
+        }))]);
+        schema.fields[0].field_type = FieldType::Relation;
+
+        let migrated = schema.reclassify_legacy_file_fields();
+
+        assert_eq!(migrated.fields[0].field_type, FieldType::File);
+        assert_eq!(migrated.fields[0].relation_target, None);
+    }
+
+    #[test]
+    fn explicit_relation_overlay_wins_after_legacy_file_reclassification() {
+        let mut schema = Schema::infer(&[make_file(serde_json::json!({
+            "attachments": ["[[assets/mockup.png]]"]
+        }))]);
+        schema.fields[0].field_type = FieldType::Relation;
+        let migrated = schema.reclassify_legacy_file_fields();
+        let mut overlay = HashMap::new();
+        overlay.insert(
+            "attachments".to_string(),
+            OverlayField {
+                description: None,
+                field_type: Some("relation".to_string()),
+                allowed_values: None,
+                required: None,
+                target: Some("documents".to_string()),
+            },
+        );
+
+        let merged = Schema::merge(migrated, Some(overlay));
+
+        assert_eq!(merged.fields[0].field_type, FieldType::Relation);
+        assert_eq!(
+            merged.fields[0].relation_target.as_deref(),
+            Some("documents")
         );
     }
 
@@ -1069,6 +1222,8 @@ fields:
     fn parse_field_type_str_relation() {
         assert_eq!(parse_field_type_str("relation"), Some(FieldType::Relation));
         assert_eq!(parse_field_type_str("Relation"), Some(FieldType::Relation));
+        assert_eq!(parse_field_type_str("file"), Some(FieldType::File));
+        assert_eq!(parse_field_type_str("File"), Some(FieldType::File));
     }
 
     #[test]

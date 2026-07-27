@@ -120,6 +120,11 @@ pub fn extract_frontmatter_links(
     let mut result = Vec::new();
     let mut push = |field: &str, raw: &str| {
         if let Some(parsed) = crate::relations::parse_link_shaped(raw) {
+            if crate::relations::parsed_link_kind(&parsed)
+                == crate::relations::FrontmatterLinkKind::File
+            {
+                return;
+            }
             result.push(FrontmatterLink {
                 field: field.to_string(),
                 raw: raw.to_string(),
@@ -343,7 +348,11 @@ pub fn extract_links(content: &str) -> Vec<RawLink> {
         };
         let target = target.trim();
         let text = text.trim();
-        if !target.is_empty() && !is_external_or_anchor(target) {
+        if !target.is_empty()
+            && !is_external_or_anchor(target)
+            && crate::relations::target_link_kind(target)
+                == crate::relations::FrontmatterLinkKind::Relation
+        {
             links.push(RawLink {
                 target: target.to_string(),
                 text: text.to_string(),
@@ -362,7 +371,10 @@ pub fn extract_links(content: &str) -> Vec<RawLink> {
         match event {
             Event::Start(Tag::Link { dest_url, .. }) => {
                 let url = dest_url.to_string();
-                if !is_external_or_anchor(&url) {
+                if !is_external_or_anchor(&url)
+                    && crate::relations::target_link_kind(&url)
+                        == crate::relations::FrontmatterLinkKind::Relation
+                {
                     current_link = Some((url, range.start));
                     link_text.clear();
                 }
@@ -638,6 +650,15 @@ mod tests {
     }
 
     #[test]
+    fn extract_links_excludes_non_markdown_files_from_graph() {
+        let content =
+            "[spec](assets/spec.pdf), [[images/mockup.png]], and [[notes/design.md]]";
+        let links = extract_links(content);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, "notes/design.md");
+    }
+
+    #[test]
     fn extract_links_filters_anchors() {
         let content = "[section](#heading) and [file](other.md#section)";
         let links = extract_links(content);
@@ -799,6 +820,18 @@ mod tests {
         assert_eq!(links[1].target, "docs/spec.md");
         assert_eq!(links[1].text, "Spec");
         assert!(!links[1].is_wikilink);
+    }
+
+    #[test]
+    fn frontmatter_file_links_are_not_document_relations() {
+        let fm = serde_json::json!({
+            "attachments": ["[[assets/mockup.png]]", "[Spec](documents/spec.pdf)"],
+            "client": "[[clients/acme]]",
+        });
+        let links = extract_frontmatter_links(Some(&fm));
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].field, "client");
+        assert_eq!(links[0].target, "clients/acme");
     }
 
     #[test]

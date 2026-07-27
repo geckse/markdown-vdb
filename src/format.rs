@@ -688,6 +688,7 @@ pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
                 Some(target) => format!("relation → {target}"),
                 None => "relation".to_string(),
             },
+            FieldType::File => "file".to_string(),
         };
 
         // Occurrence bar: 20-char width, proportional to total_docs
@@ -775,6 +776,7 @@ pub fn print_collection(resp: &CollectionResponse) {
                     Some(target) => format!("relation → {target}"),
                     None => "relation".to_string(),
                 },
+                FieldType::File => "file".to_string(),
             };
             let required_tag = if col.required {
                 format!(" {}", "[required]".yellow())

@@ -30,7 +30,7 @@ fn setup_and_ingest() -> TempDir {
 
     fs::write(
         root.join("hello.md"),
-        "---\ntitle: Hello World\nstatus: published\n---\n\n# Hello\n\nThis is a test document about greetings.\n",
+        "---\ntitle: Hello World\nstatus: published\nattachments:\n  - \"[[assets/mockup.png]]\"\n---\n\n# Hello\n\nThis is a test document about greetings.\n",
     )
     .unwrap();
 
@@ -265,6 +265,12 @@ fn test_schema_json_output() {
     let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"title"), "schema should contain 'title', got: {names:?}");
     assert!(names.contains(&"status"), "schema should contain 'status', got: {names:?}");
+    let attachments = fields
+        .iter()
+        .find(|field| field["name"] == "attachments")
+        .expect("schema should contain attachments");
+    assert_eq!(attachments["field_type"], "File");
+    assert!(attachments["relation_target"].is_null());
 }
 
 #[test]

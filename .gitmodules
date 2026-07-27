@@ -10,3 +10,6 @@
 [submodule "app"]
 	path = app
 	url = https://github.com/geckse/tesseract-md-app.git
+[submodule "tesseract-skills"]
+	path = tesseract-skills
+	url = https://github.com/geckse/tesseract-md-skills.git

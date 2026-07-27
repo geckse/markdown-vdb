@@ -48,6 +48,17 @@ pub struct ParsedLink {
     pub is_wikilink: bool,
 }
 
+/// Semantic kind of a whole-value frontmatter link.
+///
+/// Targets with explicit non-Markdown extensions are physical files.
+/// Markdown extensions and extensionless targets remain document relations;
+/// extensionless files can be pinned with `field_type: file`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontmatterLinkKind {
+    Relation,
+    File,
+}
+
 /// Context for resolving frontmatter relation targets (graph build + populate).
 pub struct RelationContext {
     /// The set of known file paths (relative, forward slashes) used for `exists`.
@@ -56,6 +67,8 @@ pub struct RelationContext {
     pub overlay: Option<OverlaySchema>,
     /// Per-directory cache of field name → overlay-declared target folder (slash-less).
     target_cache: Mutex<HashMap<String, HashMap<String, String>>>,
+    /// Per-directory cache of fields explicitly pinned as `field_type: file`.
+    file_field_cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl RelationContext {
@@ -65,6 +78,7 @@ impl RelationContext {
             known_files,
             overlay,
             target_cache: Mutex::new(HashMap::new()),
+            file_field_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -95,6 +109,37 @@ impl RelationContext {
                 .collect()
         });
         targets.get(field).cloned()
+    }
+
+    /// Whether `(source file, field)` is explicitly pinned as a File field.
+    ///
+    /// Value classification handles targets with extensions. This overlay-aware
+    /// check covers ambiguous and extensionless physical filenames so they also
+    /// stay out of relation population and the Markdown link graph.
+    pub fn is_file_field(&self, source: &str, field: &str) -> bool {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return false;
+        };
+        let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        let mut cache = self.file_field_cache.lock();
+        let fields = cache.entry(dir.to_string()).or_insert_with(|| {
+            let prefix = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{dir}/")
+            };
+            Schema::resolve_overlay_for_path(overlay, Some(&prefix))
+                .into_iter()
+                .filter_map(|(name, field)| {
+                    field
+                        .field_type
+                        .as_deref()
+                        .filter(|kind| kind.eq_ignore_ascii_case("file"))
+                        .map(|_| name)
+                })
+                .collect()
+        });
+        fields.contains(field)
     }
 }
 
@@ -172,6 +217,30 @@ pub fn parse_link_shaped(s: &str) -> Option<ParsedLink> {
 /// parser extraction, and filter normalization all call this).
 pub fn is_link_shaped(s: &str) -> bool {
     parse_link_shaped(s).is_some()
+}
+
+/// Classify a parsed frontmatter link. Fragments are not part of the path.
+pub fn parsed_link_kind(parsed: &ParsedLink) -> FrontmatterLinkKind {
+    target_link_kind(&parsed.target)
+}
+
+/// Classify an internal link target by its explicit filename extension.
+pub fn target_link_kind(target: &str) -> FrontmatterLinkKind {
+    let target = target.split('#').next().unwrap_or(target);
+    let extension = Path::new(target)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+
+    match extension.as_deref() {
+        Some("md" | "markdown") | None => FrontmatterLinkKind::Relation,
+        Some(_) => FrontmatterLinkKind::File,
+    }
+}
+
+/// Parse and classify a whole-value frontmatter link.
+pub fn link_kind(s: &str) -> Option<FrontmatterLinkKind> {
+    parse_link_shaped(s).map(|parsed| parsed_link_kind(&parsed))
 }
 
 /// Filter normalization: inner link target, `#fragment` stripped, `\` → `/`,
@@ -295,6 +364,30 @@ mod tests {
         let p = parse_link_shaped("clients/acme.md").unwrap();
         assert_eq!(p.target, "clients/acme.md");
         assert!(!p.is_wikilink);
+    }
+
+    #[test]
+    fn classifies_document_and_file_links() {
+        assert_eq!(
+            link_kind("[[clients/acme]]"),
+            Some(FrontmatterLinkKind::Relation)
+        );
+        assert_eq!(
+            link_kind("[[clients/acme.markdown]]"),
+            Some(FrontmatterLinkKind::Relation)
+        );
+        assert_eq!(
+            link_kind("[[assets/mockup.png]]"),
+            Some(FrontmatterLinkKind::File)
+        );
+        assert_eq!(
+            link_kind("[Spec](documents/spec.PDF#page=2)"),
+            Some(FrontmatterLinkKind::File)
+        );
+        assert_eq!(
+            link_kind("[[LICENSE]]"),
+            Some(FrontmatterLinkKind::Relation)
+        );
     }
 
     #[test]

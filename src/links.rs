@@ -264,6 +264,9 @@ fn build_entries_for_file(
     }
 
     for fm_link in &file.frontmatter_links {
+        if ctx.is_file_field(&source, &fm_link.field) {
+            continue;
+        }
         let target_folder = ctx.target_for(&source, &fm_link.field);
         let Some((resolved, _exists)) = crate::relations::resolve_relation_target(
             &source,

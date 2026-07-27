@@ -56,7 +56,8 @@ fn schema_roundtrip_in_index() {
                 "tags": ["rust", "testing"],
                 "draft": true,
                 "priority": 1,
-                "created": "2025-01-15"
+                "created": "2025-01-15",
+                "attachments": ["[[assets/mockup.png]]"]
             }),
         ),
         make_file(
@@ -88,6 +89,10 @@ fn schema_roundtrip_in_index() {
     assert!(schema.get_field("tags").is_some());
     assert!(schema.get_field("draft").is_some());
     assert!(schema.get_field("priority").is_some());
+    assert_eq!(
+        schema.get_field("attachments").unwrap().field_type,
+        mdvdb::FieldType::File
+    );
 
     // Check occurrence counts
     let title_field = schema.get_field("title").unwrap();
@@ -303,6 +308,64 @@ async fn test_schema_scoped_persisted_after_ingest() {
     assert!(
         scoped.schema.get_field("version").is_none(),
         "blog scope should not include docs-only fields"
+    );
+}
+
+#[tokio::test]
+async fn live_file_overlay_overrides_a_persisted_relation_without_reingest() {
+    let dir = setup_scoped_dir();
+    let root = dir.path();
+    fs::write(
+        root.join("blog/assets.md"),
+        "---\nattachments:\n  - \"[[assets/mockup.png]]\"\n  - \"[[documents/spec.pdf]]\"\n---\n\n# Assets\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".markdownvdb.schema.yml"),
+        "scopes:\n  blog:\n    fields:\n      attachments:\n        field_type: relation\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    assert_eq!(
+        vdb.schema_scoped("blog")
+            .unwrap()
+            .schema
+            .get_field("attachments")
+            .unwrap()
+            .field_type,
+        mdvdb::FieldType::Relation
+    );
+
+    // The schema file is live configuration: changing its explicit type must
+    // be visible without another ingest.
+    fs::write(
+        root.join(".markdownvdb.schema.yml"),
+        "scopes:\n  blog:\n    fields:\n      attachments:\n        field_type: file\n",
+    )
+    .unwrap();
+    assert_eq!(
+        vdb.schema_scoped("blog")
+            .unwrap()
+            .schema
+            .get_field("attachments")
+            .unwrap()
+            .field_type,
+        mdvdb::FieldType::File
+    );
+
+    // Removing the overlay also recovers old persisted Relation schemas from
+    // their non-Markdown link samples.
+    fs::remove_file(root.join(".markdownvdb.schema.yml")).unwrap();
+    assert_eq!(
+        vdb.schema_scoped("blog")
+            .unwrap()
+            .schema
+            .get_field("attachments")
+            .unwrap()
+            .field_type,
+        mdvdb::FieldType::File
     );
 }
 
