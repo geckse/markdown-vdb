@@ -110,9 +110,7 @@ pub fn parse_markdown_file(
 /// `Array` values are classified with the whole-value link-shape predicate
 /// ([`crate::relations::is_link_shaped`]). Nested objects, non-string values,
 /// and non-link strings are skipped. List elements keep their source order.
-pub fn extract_frontmatter_links(
-    frontmatter: Option<&serde_json::Value>,
-) -> Vec<FrontmatterLink> {
+pub fn extract_frontmatter_links(frontmatter: Option<&serde_json::Value>) -> Vec<FrontmatterLink> {
     let Some(serde_json::Value::Object(map)) = frontmatter else {
         return Vec::new();
     };
@@ -231,7 +229,12 @@ pub fn extract_frontmatter(content: &str) -> (Option<serde_json::Value>, &str) {
 
     match serde_yaml::from_str::<serde_yaml::Value>(yaml_trimmed) {
         Ok(yaml_val) => {
-            let json_val = yaml_to_json(yaml_val);
+            let float_count = count_yaml_float_numbers(&yaml_val);
+            let mut float_lexemes = yaml_float_lexemes(yaml_trimmed)
+                .filter(|lexemes| lexemes.len() == float_count)
+                .unwrap_or_default()
+                .into();
+            let json_val = yaml_to_json(yaml_val, &mut float_lexemes);
             (Some(json_val), body)
         }
         Err(e) => {
@@ -241,40 +244,170 @@ pub fn extract_frontmatter(content: &str) -> (Option<serde_json::Value>, &str) {
     }
 }
 
+/// Collect plain floating-point scalar tokens before serde_yaml normalizes
+/// them through `f64`. libyaml is already serde_yaml's parser backend; its
+/// event API exposes the original UTF-8 scalar bytes.
+fn yaml_float_lexemes(source: &str) -> Option<Vec<String>> {
+    use std::mem::MaybeUninit;
+    use std::slice;
+    use unsafe_libyaml::{
+        yaml_event_delete, yaml_event_t, yaml_parser_delete, yaml_parser_initialize,
+        yaml_parser_parse, yaml_parser_set_input_string, yaml_parser_t, YAML_ALIAS_EVENT,
+        YAML_PLAIN_SCALAR_STYLE, YAML_SCALAR_EVENT, YAML_STREAM_END_EVENT,
+    };
+
+    let mut lexemes = Vec::new();
+    let mut parser = MaybeUninit::<yaml_parser_t>::uninit();
+    let parser = parser.as_mut_ptr();
+
+    // SAFETY: libyaml initializes `parser` before it is read. `source` remains
+    // alive until `yaml_parser_delete`, and every successfully produced event
+    // is deleted exactly once.
+    unsafe {
+        if yaml_parser_initialize(parser).fail {
+            return None;
+        }
+        yaml_parser_set_input_string(parser, source.as_ptr(), source.len() as u64);
+
+        let mut event = MaybeUninit::<yaml_event_t>::uninit();
+        let event = event.as_mut_ptr();
+        loop {
+            if yaml_parser_parse(parser, event).fail {
+                yaml_parser_delete(parser);
+                return None;
+            }
+            let event_type = (*event).type_;
+
+            // Aliases duplicate values in serde_yaml's resolved tree without
+            // duplicating scalar events, so positional pairing is ambiguous.
+            if event_type == YAML_ALIAS_EVENT {
+                yaml_event_delete(event);
+                yaml_parser_delete(parser);
+                return None;
+            }
+
+            if event_type == YAML_SCALAR_EVENT {
+                let scalar = (*event).data.scalar;
+                if scalar.style == YAML_PLAIN_SCALAR_STYLE {
+                    let bytes = slice::from_raw_parts(scalar.value, scalar.length as usize);
+                    if let Ok(raw) = std::str::from_utf8(bytes) {
+                        if matches!(
+                            serde_yaml::from_str::<serde_yaml::Value>(raw),
+                            Ok(serde_yaml::Value::Number(number))
+                                if number.as_i64().is_none() && number.as_u64().is_none()
+                        ) {
+                            lexemes.push(raw.to_string());
+                        }
+                    }
+                }
+            }
+
+            yaml_event_delete(event);
+            if event_type == YAML_STREAM_END_EVENT {
+                break;
+            }
+        }
+        yaml_parser_delete(parser);
+    }
+    Some(lexemes)
+}
+
+fn count_yaml_float_numbers(value: &serde_yaml::Value) -> usize {
+    match value {
+        serde_yaml::Value::Number(number)
+            if number.as_i64().is_none() && number.as_u64().is_none() =>
+        {
+            1
+        }
+        serde_yaml::Value::Sequence(values) => {
+            values.iter().map(count_yaml_float_numbers).sum()
+        }
+        serde_yaml::Value::Mapping(values) => values
+            .iter()
+            .map(|(key, value)| {
+                count_yaml_float_numbers(key) + count_yaml_float_numbers(value)
+            })
+            .sum(),
+        serde_yaml::Value::Tagged(tagged) => count_yaml_float_numbers(&tagged.value),
+        _ => 0,
+    }
+}
+
+fn json_number_from_yaml_lexeme(raw: &str) -> Option<serde_json::Number> {
+    use std::str::FromStr;
+
+    let mut token = raw.replace('_', "");
+    if token.starts_with('+') {
+        token.remove(0);
+    }
+    let sign_len = usize::from(token.starts_with('-'));
+    if token[sign_len..].starts_with('.') {
+        token.insert(sign_len, '0');
+    }
+    let exponent = token.find(['e', 'E']).unwrap_or(token.len());
+    if token[..exponent].ends_with('.') {
+        token.insert(exponent, '0');
+    }
+    serde_json::Number::from_str(&token).ok()
+}
+
 /// Convert a serde_yaml::Value to serde_json::Value.
-fn yaml_to_json(val: serde_yaml::Value) -> serde_json::Value {
+fn yaml_to_json(
+    val: serde_yaml::Value,
+    float_lexemes: &mut std::collections::VecDeque<String>,
+) -> serde_json::Value {
     match val {
         serde_yaml::Value::Null => serde_json::Value::Null,
         serde_yaml::Value::Bool(b) => serde_json::Value::Bool(b),
         serde_yaml::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 serde_json::Value::Number(i.into())
-            } else if let Some(f) = n.as_f64() {
-                serde_json::Number::from_f64(f)
+            } else if let Some(u) = n.as_u64() {
+                serde_json::Value::Number(u.into())
+            } else {
+                // Preserve the source token instead of the serde_yaml f64.
+                // serde_json's arbitrary_precision feature retains it for the
+                // decimal formula runtime.
+                float_lexemes
+                    .pop_front()
+                    .as_deref()
+                    .and_then(json_number_from_yaml_lexeme)
+                    .or_else(|| {
+                        use std::str::FromStr;
+                        serde_json::Number::from_str(&n.to_string()).ok()
+                    })
                     .map(serde_json::Value::Number)
                     .unwrap_or(serde_json::Value::Null)
-            } else {
-                serde_json::Value::Null
             }
         }
         serde_yaml::Value::String(s) => serde_json::Value::String(s),
-        serde_yaml::Value::Sequence(seq) => {
-            serde_json::Value::Array(seq.into_iter().map(yaml_to_json).collect())
-        }
+        serde_yaml::Value::Sequence(seq) => serde_json::Value::Array(
+            seq.into_iter()
+                .map(|value| yaml_to_json(value, float_lexemes))
+                .collect(),
+        ),
         serde_yaml::Value::Mapping(map) => {
             let obj = map
                 .into_iter()
                 .filter_map(|(k, v)| {
                     let key = match k {
                         serde_yaml::Value::String(s) => s,
-                        other => serde_yaml::to_string(&other).ok()?.trim().to_string(),
+                        other => {
+                            // Consume any float lexemes belonging to complex
+                            // mapping keys before visiting the value.
+                            let float_key_count = count_yaml_float_numbers(&other);
+                            for _ in 0..float_key_count {
+                                float_lexemes.pop_front();
+                            }
+                            serde_yaml::to_string(&other).ok()?.trim().to_string()
+                        }
                     };
-                    Some((key, yaml_to_json(v)))
+                    Some((key, yaml_to_json(v, float_lexemes)))
                 })
                 .collect();
             serde_json::Value::Object(obj)
         }
-        serde_yaml::Value::Tagged(tagged) => yaml_to_json(tagged.value),
+        serde_yaml::Value::Tagged(tagged) => yaml_to_json(tagged.value, float_lexemes),
     }
 }
 
@@ -422,9 +555,7 @@ pub fn extract_link_paragraph(content: &str, line_number: usize) -> String {
     }
     let idx = line_number - 1; // convert to 0-based
 
-    let is_boundary = |line: &str| -> bool {
-        line.trim().is_empty() || line.starts_with('#')
-    };
+    let is_boundary = |line: &str| -> bool { line.trim().is_empty() || line.starts_with('#') };
 
     // Walk backward
     let mut start = idx;
@@ -539,6 +670,46 @@ mod tests {
         let (fm, _) = extract_frontmatter(content);
         let fm = fm.unwrap();
         assert_eq!(fm["count"], 42);
+        assert_eq!(fm["pi"].to_string(), "3.14");
+    }
+
+    #[test]
+    fn extract_frontmatter_preserves_decimal_token() {
+        let content = "---\nprice: 0.1000000000000000000000000001\n---\n";
+        let (fm, _) = extract_frontmatter(content);
+        assert_eq!(
+            fm.unwrap()["price"].to_string(),
+            "0.1000000000000000000000000001"
+        );
+    }
+
+    #[test]
+    fn extract_frontmatter_preserves_nested_decimal_tokens_in_source_order() {
+        let content = concat!(
+            "---\n",
+            "amounts: [0.1000000000000000000000000001, {tax: 2.5000000000000000000000000001}]\n",
+            "quoted: \"0.1000000000000000000000000001\"\n",
+            "scientific: 1.234567890123456789e+5\n",
+            "float_key: {0.3333333333333333333333333333: 9.876543210987654321}\n",
+            "---\n"
+        );
+        let (fm, _) = extract_frontmatter(content);
+        let fm = fm.unwrap();
+        assert_eq!(
+            fm["amounts"][0].to_string(),
+            "0.1000000000000000000000000001"
+        );
+        assert_eq!(
+            fm["amounts"][1]["tax"].to_string(),
+            "2.5000000000000000000000000001"
+        );
+        assert_eq!(
+            fm["quoted"],
+            serde_json::Value::String("0.1000000000000000000000000001".to_string())
+        );
+        assert_eq!(fm["scientific"].to_string(), "1.234567890123456789e+5");
+        let keyed_value = fm["float_key"].as_object().unwrap().values().next().unwrap();
+        assert_eq!(keyed_value.to_string(), "9.876543210987654321");
     }
 
     #[test]
@@ -643,7 +814,8 @@ mod tests {
 
     #[test]
     fn extract_links_filters_external() {
-        let content = "[Google](https://google.com) and [local](notes.md) and [mail](mailto:x@y.com)";
+        let content =
+            "[Google](https://google.com) and [local](notes.md) and [mail](mailto:x@y.com)";
         let links = extract_links(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "notes.md");
@@ -651,8 +823,7 @@ mod tests {
 
     #[test]
     fn extract_links_excludes_non_markdown_files_from_graph() {
-        let content =
-            "[spec](assets/spec.pdf), [[images/mockup.png]], and [[notes/design.md]]";
+        let content = "[spec](assets/spec.pdf), [[images/mockup.png]], and [[notes/design.md]]";
         let links = extract_links(content);
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, "notes/design.md");
@@ -727,7 +898,10 @@ mod tests {
     fn extract_link_paragraph_basic() {
         let content = "Some intro text.\n\nThis paragraph has a [link](other.md) in it.\nIt continues on this line.\n\nAnother paragraph.";
         let para = extract_link_paragraph(content, 3);
-        assert_eq!(para, "This paragraph has a [link](other.md) in it.\nIt continues on this line.");
+        assert_eq!(
+            para,
+            "This paragraph has a [link](other.md) in it.\nIt continues on this line."
+        );
     }
 
     #[test]
@@ -876,7 +1050,8 @@ mod tests {
     #[test]
     fn parse_markdown_file_extracts_frontmatter_links() {
         let dir = tempfile::tempdir().unwrap();
-        let content = "---\nclient: \"[[clients/acme]]\"\ntitle: Invoice\n---\n# Body\nSee [[other]].";
+        let content =
+            "---\nclient: \"[[clients/acme]]\"\ntitle: Invoice\n---\n# Body\nSee [[other]].";
         std::fs::write(dir.path().join("i1.md"), content).unwrap();
         let md = parse_markdown_file(dir.path(), Path::new("i1.md")).unwrap();
         assert_eq!(md.frontmatter_links.len(), 1);

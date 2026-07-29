@@ -20,7 +20,7 @@ pub struct Chunk {
 }
 
 /// Result of a batch embedding operation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct EmbeddingResult {
     /// Map from chunk ID to its embedding vector.
     pub embeddings: HashMap<String, Vec<f32>>,

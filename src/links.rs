@@ -264,7 +264,9 @@ fn build_entries_for_file(
     }
 
     for fm_link in &file.frontmatter_links {
-        if ctx.is_file_field(&source, &fm_link.field) {
+        if ctx.is_file_field(&source, &fm_link.field)
+            || ctx.is_formula_field(&source, &fm_link.field)
+        {
             continue;
         }
         let target_folder = ctx.target_for(&source, &fm_link.field);
@@ -1092,6 +1094,8 @@ mod tests {
                 allowed_values: None,
                 required: None,
                 target: Some("clients".to_string()),
+                formula: None,
+                result_type: None,
             },
         );
         let mut scopes = std::collections::HashMap::new();
@@ -1115,6 +1119,42 @@ mod tests {
         let entries = &graph.forward["invoices/i1.md"];
         assert_eq!(entries[0].target, "clients/acme.md");
         assert_eq!(entries[0].field.as_deref(), Some("client"));
+    }
+
+    #[test]
+    fn materialized_formula_link_value_does_not_create_relation_edge() {
+        use crate::schema::{OverlayField, OverlaySchema, ScopeOverlay};
+        let overlay = OverlaySchema {
+            fields: std::collections::HashMap::new(),
+            scopes: std::collections::HashMap::from([(
+                "invoices".to_string(),
+                ScopeOverlay {
+                    fields: std::collections::HashMap::from([(
+                        "lookup".to_string(),
+                        OverlayField {
+                            description: None,
+                            field_type: Some("formula".to_string()),
+                            allowed_values: None,
+                            required: None,
+                            target: None,
+                            formula: Some("'[[clients/acme]]'".to_string()),
+                            result_type: Some("string".to_string()),
+                        },
+                    )]),
+                },
+            )]),
+        };
+        let ctx = crate::relations::RelationContext::new(
+            ["clients/acme.md".to_string()].into_iter().collect(),
+            Some(overlay),
+        );
+        let files = vec![make_file_with_fm_links(
+            "invoices/i1.md",
+            vec![],
+            vec![make_fm_link("lookup", "clients/acme")],
+        )];
+
+        assert!(build_link_graph(&files, &ctx).forward.is_empty());
     }
 
     #[test]

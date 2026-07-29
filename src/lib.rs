@@ -4,13 +4,16 @@ pub mod config;
 pub mod discovery;
 pub mod embedding;
 pub mod error;
+pub mod formula;
+pub mod frontmatter_write;
 pub mod fts;
 pub mod index;
-pub mod logging;
-pub mod parser;
-pub mod path_util;
 pub mod ingest;
 pub mod links;
+pub mod logging;
+pub mod modules;
+pub mod parser;
+pub mod path_util;
 pub mod relations;
 pub mod schema;
 pub mod search;
@@ -21,12 +24,23 @@ pub use error::Error;
 
 // Re-export key public types for convenience.
 pub use config::{Config, VectorQuantization};
-pub use index::types::IndexStatus;
-pub use schema::{FieldType, Schema, SchemaField, ScopedSchema};
-pub use search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse, SearchResult, SearchResultChunk, SearchResultFile, SearchTimings, SortOrder};
+pub use index::types::{ComputedFieldDiagnostic, ComputedFieldEntry, IndexStatus};
+pub use modules::{ModuleDescriptor, ModuleDiagnostic, ModuleEvent, ModuleReport};
+pub use schema::{FieldType, FormulaResultType, Schema, SchemaField, ScopedSchema};
+pub use search::{
+    EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse,
+    SearchResult, SearchResultChunk, SearchResultFile, SearchTimings, SortOrder,
+};
 // Additional re-exports for library consumers.
-pub use clustering::{ClusterInfo, ClusterState, CustomClusterDef, CustomClusterInfo, CustomClusterState};
-pub use config::{encode_custom_clusters as config_encode_custom_clusters, parse_custom_clusters_value as config_parse_custom_clusters, update_config_value as config_update_value, write_yaml_config as config_write_yaml, update_yaml_config_value as config_update_yaml_value};
+pub use clustering::{
+    ClusterInfo, ClusterState, CustomClusterDef, CustomClusterInfo, CustomClusterState,
+};
+pub use config::{
+    encode_custom_clusters as config_encode_custom_clusters,
+    parse_custom_clusters_value as config_parse_custom_clusters,
+    update_config_value as config_update_value,
+    update_yaml_config_value as config_update_yaml_value, write_yaml_config as config_write_yaml,
+};
 pub use links::{
     EdgeClusterInfo, EdgeClusterState, LinkEntry, LinkGraph, LinkQueryResult, LinkState,
     NeighborhoodNode, NeighborhoodResult, OrphanFile, ResolvedLink, SemanticEdge,
@@ -56,15 +70,35 @@ use crate::index::state::Index;
 use crate::index::storage::WriteOptions;
 use crate::index::types::EmbeddingConfig;
 
+fn without_formula_overlay_fields(
+    mut fields: HashMap<String, schema::OverlayField>,
+) -> HashMap<String, schema::OverlayField> {
+    fields.retain(|_, field| {
+        !field
+            .field_type
+            .as_deref()
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("formula"))
+    });
+    fields
+}
+
 /// Phase of the ingestion pipeline, reported via progress callbacks.
 #[derive(Debug, Clone, Serialize)]
 pub enum IngestPhase {
     /// Discovering markdown files on disk.
     Discovering,
     /// Parsing a file. `current` and `total` are 1-based counts, `path` is relative.
-    Parsing { current: usize, total: usize, path: String },
+    Parsing {
+        current: usize,
+        total: usize,
+        path: String,
+    },
     /// Skipping an unchanged file.
-    Skipped { current: usize, total: usize, path: String },
+    Skipped {
+        current: usize,
+        total: usize,
+        path: String,
+    },
     /// Embedding a batch of chunks.
     Embedding { batch: usize, total_batches: usize },
     /// Saving the index to disk.
@@ -229,6 +263,8 @@ pub struct IngestResult {
     pub files_failed: usize,
     /// Errors encountered during ingestion.
     pub errors: Vec<IngestError>,
+    /// Reports from always-on derived-data modules.
+    pub module_reports: Vec<modules::ModuleReport>,
     /// Wall-clock duration of the ingestion in seconds.
     pub duration_secs: f64,
     /// Per-phase timing breakdown (always populated; CLI decides whether to display).
@@ -256,6 +292,11 @@ pub struct DocumentInfo {
     pub content_hash: String,
     /// Frontmatter metadata, if present.
     pub frontmatter: Option<serde_json::Value>,
+    /// Successful Formula values mirrored for module provenance/diagnostics.
+    /// `frontmatter` is the authoritative materialized source.
+    pub computed_fields: serde_json::Map<String, serde_json::Value>,
+    /// Calculation errors keyed by computed field name.
+    pub computed_field_errors: std::collections::BTreeMap<String, ComputedFieldDiagnostic>,
     /// Number of chunks for this document.
     pub chunk_count: usize,
     /// File size in bytes.
@@ -349,6 +390,10 @@ pub struct CollectionColumn {
     /// Overlay-declared FK target folder for relation columns (slash-less).
     /// Always-present JSON key (`null` when unscoped), mirroring `SchemaField`.
     pub relation_target: Option<String>,
+    /// Formula source for formula columns; `null` for ordinary frontmatter.
+    pub formula: Option<String>,
+    /// Declared output type for formula columns.
+    pub result_type: Option<schema::FormulaResultType>,
 }
 
 /// One table row = one Markdown document.
@@ -362,6 +407,11 @@ pub struct CollectionRow {
     pub title_source: TitleSource,
     /// Full frontmatter as a JSON object. Always an object (`{}` if none), never null.
     pub frontmatter: serde_json::Value,
+    /// Successful Formula values mirrored for module provenance/diagnostics.
+    /// `frontmatter` is the authoritative materialized source.
+    pub computed_fields: serde_json::Map<String, serde_json::Value>,
+    /// Calculation errors keyed by computed field name.
+    pub computed_field_errors: std::collections::BTreeMap<String, ComputedFieldDiagnostic>,
     /// SHA-256 content hash from the index. None for files not in the index (state == New).
     pub content_hash: Option<String>,
     /// File size in bytes.
@@ -839,14 +889,19 @@ impl MarkdownVdb {
             quantization: config.vector_quantization.clone(),
             compress_metadata: config.index_compression,
         };
-        let index = Arc::new(Index::open_or_create_with_options(
+        let (index, rebuilt_index) = Index::open_or_create_with_options_report(
             &index_path,
             &embedding_config,
             write_options,
-        )?);
+        )?;
+        let index = Arc::new(index);
 
         let fts_path = index_dir.join("fts");
         let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
+        if rebuilt_index {
+            fts_index.delete_all()?;
+            fts_index.commit()?;
+        }
 
         Self::finish_open(root, config, embedding_config, index, fts_index)
     }
@@ -887,20 +942,14 @@ impl MarkdownVdb {
         };
 
         let index_dir = root.join(".markdownvdb");
-        if !index_dir.exists() {
-            std::fs::create_dir_all(&index_dir)?;
-        }
-
         let index_path = index_dir.join("index");
         let write_options = WriteOptions {
             quantization: config.vector_quantization.clone(),
             compress_metadata: config.index_compression,
         };
-        let index = Arc::new(Index::open_or_create_with_options(
-            &index_path,
-            &embedding_config,
-            write_options,
-        )?);
+        // Read-only commands must never delete/recreate an incompatible index.
+        // A mutating open/ingest performs the automatic rebuild instead.
+        let index = Arc::new(Index::open_with_options(&index_path, write_options)?);
 
         let fts_path = index_dir.join("fts");
         let fts_index = Arc::new(FtsIndex::open_readonly(&fts_path)?);
@@ -965,6 +1014,95 @@ impl MarkdownVdb {
         Arc::clone(&self.index)
     }
 
+    /// List compiled-in modules. This is read-only and never runs hooks.
+    pub fn module_descriptors(&self) -> Vec<modules::ModuleDescriptor> {
+        modules::ModuleRunner::builtins().descriptors()
+    }
+
+    /// Run one compiled-in module and atomically persist its derived state.
+    pub fn run_module(&self, module: &str, scope: Option<&str>) -> Result<modules::ModuleReport> {
+        // Manual runs are a watcher-off catch-up surface. Refresh indexed source
+        // snapshots from Markdown first without touching vectors; a changed body
+        // remains detectable through `embedding_body_hash` and will be embedded
+        // by the next ingest/watch event.
+        if module == formula::FORMULA_MODULE_ID {
+            let prefix = modules::normalize_module_scope(scope);
+            for (path, stored) in self.index.get_all_files() {
+                if prefix
+                    .as_ref()
+                    .is_some_and(|prefix| !path.starts_with(prefix))
+                {
+                    continue;
+                }
+                let relative = Path::new(&path);
+                let Ok(file) = parser::parse_markdown_file(&self.root, relative) else {
+                    continue;
+                };
+                if file.content_hash != stored.content_hash {
+                    self.index.refresh_source_metadata(&file)?;
+                }
+            }
+        }
+
+        let event = modules::ModuleEvent::ManualRun {
+            scope: scope.map(str::to_string),
+        };
+        let report = modules::ModuleRunner::builtins()
+            .run_one(module, &self.root, &self.index, &event)
+            .ok_or_else(|| Error::Config(format!("unknown module `{module}`")))?;
+        self.index.save()?;
+        Ok(report)
+    }
+
+    /// Return cached diagnostics for a module without executing formulas.
+    pub fn module_status(
+        &self,
+        module: &str,
+        scope: Option<&str>,
+    ) -> Result<Vec<modules::ModuleDiagnostic>> {
+        if !modules::ModuleRunner::builtins()
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == module)
+        {
+            return Err(Error::Config(format!("unknown module `{module}`")));
+        }
+
+        let prefix = modules::normalize_module_scope(scope);
+        let mut diagnostics = Vec::new();
+        for (path, file) in self.index.get_all_files() {
+            if prefix
+                .as_ref()
+                .is_some_and(|prefix| !path.starts_with(prefix))
+            {
+                continue;
+            }
+            for entry in file.computed_fields.values() {
+                if entry.module != module {
+                    continue;
+                }
+                if let Some(diagnostic) = &entry.diagnostic {
+                    diagnostics.push(modules::ModuleDiagnostic {
+                        path: Some(path.clone()),
+                        module: diagnostic.module.clone(),
+                        field: diagnostic.field.clone(),
+                        code: diagnostic.code.clone(),
+                        message: diagnostic.message.clone(),
+                        span_start: diagnostic.span_start,
+                        span_end: diagnostic.span_end,
+                    });
+                }
+            }
+        }
+        diagnostics.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then_with(|| left.field.cmp(&right.field))
+                .then_with(|| left.code.cmp(&right.code))
+        });
+        Ok(diagnostics)
+    }
+
     /// Lazily initialize and return the embedding provider.
     /// Fails if the provider cannot be created (e.g., missing API key).
     fn ensure_provider(&self) -> Result<Arc<dyn EmbeddingProvider>> {
@@ -1013,9 +1151,7 @@ impl MarkdownVdb {
         };
 
         // Helper: check if cancellation has been requested.
-        let is_cancelled = || {
-            options.cancel.as_ref().is_some_and(|c| c.is_cancelled())
-        };
+        let is_cancelled = || options.cancel.as_ref().is_some_and(|c| c.is_cancelled());
 
         emit(&IngestPhase::Discovering);
 
@@ -1045,10 +1181,17 @@ impl MarkdownVdb {
             self.index.save()?;
             self.fts_index.commit()?;
             return Ok(IngestResult {
-                files_indexed: 0, files_skipped: 0, files_removed: 0,
-                chunks_created: 0, api_calls: 0, files_failed: 0,
-                errors: Vec::new(), duration_secs: start_time.elapsed().as_secs_f64(),
-                timings: None, cancelled: true,
+                files_indexed: 0,
+                files_skipped: 0,
+                files_removed: 0,
+                chunks_created: 0,
+                api_calls: 0,
+                files_failed: 0,
+                errors: Vec::new(),
+                module_reports: Vec::new(),
+                duration_secs: start_time.elapsed().as_secs_f64(),
+                timings: None,
+                cancelled: true,
             });
         }
 
@@ -1073,6 +1216,7 @@ impl MarkdownVdb {
 
         // Get existing hashes from index for skip detection.
         let existing_hashes = self.index.get_file_hashes();
+        let existing_files = self.index.get_all_files();
         let existing_paths: std::collections::HashSet<String> =
             existing_hashes.keys().cloned().collect();
 
@@ -1084,6 +1228,7 @@ impl MarkdownVdb {
             api_calls: 0,
             files_failed: 0,
             errors: Vec::new(),
+            module_reports: Vec::new(),
             duration_secs: 0.0,
             timings: None,
             cancelled: false,
@@ -1094,10 +1239,9 @@ impl MarkdownVdb {
         let mut current_hashes: HashMap<PathBuf, String> = HashMap::new();
         let mut parsed_files: HashMap<PathBuf, (parser::MarkdownFile, Vec<chunker::Chunk>)> =
             HashMap::new();
+        let mut metadata_only_files: HashMap<PathBuf, parser::MarkdownFile> = HashMap::new();
         let mut discovered_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        // Track full file contents for edge paragraph extraction.
-        let mut file_full_contents: HashMap<PathBuf, String> = HashMap::new();
         // Track edge batch chunks (edge ID -> paragraph content).
         let mut edge_batch_chunks: Vec<embedding::batch::Chunk> = Vec::new();
         // Track edge metadata for building SemanticEdge entries after embedding.
@@ -1136,10 +1280,15 @@ impl MarkdownVdb {
                 }
             };
 
-            // Check content hash for skip (unless --full).
+            // A Formula write-back changes only frontmatter. Track the body
+            // represented by vectors separately so incremental catch-up never
+            // spends embedding tokens on that source-only change.
             if !options.full {
-                if let Some(existing) = existing_hashes.get(&path_str) {
-                    if *existing == md.content_hash {
+                if let Some(existing) = existing_files.get(&path_str) {
+                    let body_hash = parser::compute_content_hash(&md.body);
+                    let source_unchanged = existing.content_hash == md.content_hash;
+                    let embedding_unchanged = existing.embedding_body_hash == body_hash;
+                    if source_unchanged && embedding_unchanged {
                         debug!(path = %path.display(), "unchanged, skipping");
                         emit(&IngestPhase::Skipped {
                             current: file_idx + 1,
@@ -1150,26 +1299,38 @@ impl MarkdownVdb {
                         current_hashes.insert(path.clone(), md.content_hash.clone());
                         continue;
                     }
+                    if embedding_unchanged {
+                        debug!(path = %path.display(), "frontmatter-only change, refreshing metadata");
+                        current_hashes.insert(path.clone(), md.content_hash.clone());
+                        self.index.refresh_source_metadata(&md)?;
+                        metadata_only_files.insert(path.clone(), md);
+                        result.files_indexed += 1;
+                        continue;
+                    }
                 }
             }
 
             current_hashes.insert(path.clone(), md.content_hash.clone());
 
             // Chunk the document.
-            let chunks = match chunker::chunk_document(
-                &md,
-                self.config.chunk_max_tokens,
-                self.config.chunk_overlap_tokens,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "failed to chunk");
-                    result.files_failed += 1;
-                    result.errors.push(IngestError {
-                        path: path_str,
-                        message: e.to_string(),
-                    });
-                    continue;
+            let chunks = if md.body.trim().is_empty() {
+                Vec::new()
+            } else {
+                match chunker::chunk_document(
+                    &md,
+                    self.config.chunk_max_tokens,
+                    self.config.chunk_overlap_tokens,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(path = %path.display(), error = %e, "failed to chunk");
+                        result.files_failed += 1;
+                        result.errors.push(IngestError {
+                            path: path_str,
+                            message: e.to_string(),
+                        });
+                        continue;
+                    }
                 }
             };
 
@@ -1184,42 +1345,31 @@ impl MarkdownVdb {
 
             // Extract edge contexts if edge embeddings are enabled.
             if self.config.edge_embeddings && !md.links.is_empty() {
-                // Read full file content (needed for paragraph extraction since
-                // RawLink.line_number is file-relative including frontmatter).
-                let full_path = self.root.join(path);
-                match std::fs::read_to_string(&full_path) {
-                    Ok(full_content) => {
-                        let link_contexts =
-                            parser::extract_links_with_context(&full_content, &md.links);
-                        let source_str = path_util::to_slash(path);
-                        for ctx in &link_contexts {
-                            let resolved_target =
-                                links::resolve_link(&source_str, &ctx.link.target);
-                            if resolved_target.is_empty() {
-                                continue;
-                            }
-                            let edge_id = format!(
-                                "edge:{}->{}@{}",
-                                source_str, resolved_target, ctx.link.line_number
-                            );
-                            edge_batch_chunks.push(embedding::batch::Chunk {
-                                id: edge_id.clone(),
-                                source_path: path.clone(),
-                                content: ctx.paragraph.clone(),
-                            });
-                            edge_metas.push(EdgeMeta {
-                                edge_id,
-                                source: source_str.clone(),
-                                target: resolved_target,
-                                context_text: ctx.paragraph.clone(),
-                                line_number: ctx.link.line_number,
-                            });
-                        }
-                        file_full_contents.insert(path.clone(), full_content);
+                // Raw link line numbers and embedding inputs are body-relative;
+                // frontmatter (including Formula output) must not affect them.
+                let link_contexts = parser::extract_links_with_context(&md.body, &md.links);
+                let source_str = path_util::to_slash(path);
+                for ctx in &link_contexts {
+                    let resolved_target = links::resolve_link(&source_str, &ctx.link.target);
+                    if resolved_target.is_empty() {
+                        continue;
                     }
-                    Err(e) => {
-                        debug!(path = %path.display(), error = %e, "could not read full file for edge extraction");
-                    }
+                    let edge_id = format!(
+                        "edge:{}->{}@{}",
+                        source_str, resolved_target, ctx.link.line_number
+                    );
+                    edge_batch_chunks.push(embedding::batch::Chunk {
+                        id: edge_id.clone(),
+                        source_path: path.clone(),
+                        content: ctx.paragraph.clone(),
+                    });
+                    edge_metas.push(EdgeMeta {
+                        edge_id,
+                        source: source_str.clone(),
+                        target: resolved_target,
+                        context_text: ctx.paragraph.clone(),
+                        line_number: ctx.link.line_number,
+                    });
                 }
             }
 
@@ -1237,7 +1387,10 @@ impl MarkdownVdb {
             return Ok(result);
         }
 
-        emit(&IngestPhase::Embedding { batch: 0, total_batches: 0 });
+        emit(&IngestPhase::Embedding {
+            batch: 0,
+            total_batches: 0,
+        });
 
         // Include edge chunks in the same batch as regular chunks (no extra API calls).
         all_batch_chunks.extend(edge_batch_chunks);
@@ -1251,15 +1404,19 @@ impl MarkdownVdb {
             .collect();
 
         let embed_start = std::time::Instant::now();
-        let embed_result = embedding::batch::embed_chunks(
-            self.ensure_provider()?.as_ref(),
-            &all_batch_chunks,
-            &embed_existing,
-            &embed_current,
-            self.config.embedding_batch_size,
-            None,
-        )
-        .await?;
+        let embed_result = if all_batch_chunks.is_empty() {
+            embedding::batch::EmbeddingResult::default()
+        } else {
+            embedding::batch::embed_chunks(
+                self.ensure_provider()?.as_ref(),
+                &all_batch_chunks,
+                &embed_existing,
+                &embed_current,
+                self.config.embedding_batch_size,
+                None,
+            )
+            .await?
+        };
         let embed_secs = embed_start.elapsed().as_secs_f64();
 
         result.api_calls = embed_result.api_calls;
@@ -1323,7 +1480,10 @@ impl MarkdownVdb {
                 if !old_edge_ids.is_empty() {
                     // Remove old edge vectors by upserting empty set after removing via index internals.
                     // The upsert_edges call will handle replacement since it removes existing edge: prefix entries.
-                    debug!(count = old_edge_ids.len(), "removing old edge vectors for single-file re-ingest");
+                    debug!(
+                        count = old_edge_ids.len(),
+                        "removing old edge vectors for single-file re-ingest"
+                    );
                 }
             }
 
@@ -1384,12 +1544,12 @@ impl MarkdownVdb {
             // Merge semantic edges into the link graph.
             let existing_graph = self.index.get_link_graph();
             {
-            let mut graph = existing_graph.unwrap_or_else(|| links::LinkGraph {
-                forward: HashMap::new(),
-                last_updated: 0,
-                semantic_edges: None,
-                edge_cluster_state: None,
-            });
+                let mut graph = existing_graph.unwrap_or_else(|| links::LinkGraph {
+                    forward: HashMap::new(),
+                    last_updated: 0,
+                    semantic_edges: None,
+                    edge_cluster_state: None,
+                });
                 if let Some(ref single_file) = options.file {
                     // Single-file ingest: remove old edges for the file, then merge new ones.
                     let source_str = path_util::to_slash(single_file);
@@ -1426,20 +1586,26 @@ impl MarkdownVdb {
                         if !state.clusters.is_empty() {
                             for em in &edge_metas {
                                 if let Some(vec) = all_edge_vectors.get(&em.edge_id) {
-                                    match clusterer.assign_edge_to_nearest(state, &em.edge_id, vec) {
+                                    match clusterer.assign_edge_to_nearest(state, &em.edge_id, vec)
+                                    {
                                         Ok(cid) => {
                                             // Update cluster_id on the SemanticEdge.
                                             if let Some(ref mut edges) = graph.semantic_edges {
                                                 if let Some(edge) = edges.get_mut(&em.edge_id) {
                                                     edge.cluster_id = Some(cid);
                                                     // Find relationship_type from the cluster label.
-                                                    if let Some(ci) = state.clusters.iter().find(|c| c.id == cid) {
-                                                        edge.relationship_type = Some(ci.label.clone());
+                                                    if let Some(ci) =
+                                                        state.clusters.iter().find(|c| c.id == cid)
+                                                    {
+                                                        edge.relationship_type =
+                                                            Some(ci.label.clone());
                                                     }
                                                 }
                                             }
                                         }
-                                        Err(e) => warn!(error = %e, edge_id = %em.edge_id, "failed to assign edge to cluster"),
+                                        Err(e) => {
+                                            warn!(error = %e, edge_id = %em.edge_id, "failed to assign edge to cluster")
+                                        }
                                     }
                                 }
                             }
@@ -1477,7 +1643,7 @@ impl MarkdownVdb {
 
                 self.index.update_link_graph(Some(graph));
             }
-            } // end semantic edges block
+        } // end semantic edges block
 
         // Consistency guard: rebuild FTS from stored chunks for files that
         // were skipped (already in vector index but missing from FTS).
@@ -1486,7 +1652,10 @@ impl MarkdownVdb {
             let file_hashes = self.index.get_file_hashes();
             for path_str in file_hashes.keys() {
                 // Skip files we already upserted above.
-                if parsed_files.keys().any(|p| path_util::to_slash(p) == *path_str) {
+                if parsed_files
+                    .keys()
+                    .any(|p| path_util::to_slash(p) == *path_str)
+                {
                     continue;
                 }
                 if let Some(file_entry) = self.index.get_file(path_str) {
@@ -1536,13 +1705,18 @@ impl MarkdownVdb {
                 self.index.get_file_hashes().keys().cloned().collect(),
                 graph_overlay,
             );
-            let mut graph = self.index.get_link_graph().unwrap_or_else(|| links::LinkGraph {
-                forward: HashMap::new(),
-                last_updated: 0,
-                semantic_edges: None,
-                edge_cluster_state: None,
-            });
+            let mut graph = self
+                .index
+                .get_link_graph()
+                .unwrap_or_else(|| links::LinkGraph {
+                    forward: HashMap::new(),
+                    last_updated: 0,
+                    semantic_edges: None,
+                    edge_cluster_state: None,
+                });
             if let Some((md, _)) = parsed_files.get(single_file) {
+                links::update_file_links(&mut graph, md, &relation_ctx);
+            } else if let Some(md) = metadata_only_files.get(single_file) {
                 links::update_file_links(&mut graph, md, &relation_ctx);
             }
             self.index.update_link_graph(Some(graph));
@@ -1594,11 +1768,9 @@ impl MarkdownVdb {
 
         let upsert_secs = upsert_start.elapsed().as_secs_f64();
 
-        // Save vector index first (atomic write-rename), then commit FTS.
+        // Keep raw, schema, and derived index mutations in memory until the
+        // final atomic save after all built-in module hooks have run.
         emit(&IngestPhase::Saving);
-        let save_start = std::time::Instant::now();
-        self.index.save()?;
-        self.fts_index.commit()?;
 
         // Run clustering if enabled.
         if self.config.clustering_enabled {
@@ -1629,7 +1801,8 @@ impl MarkdownVdb {
                             warn!(error = %e, "failed to assign document to cluster");
                         } else {
                             // Attempt rebalance with all document vectors.
-                            match clusterer.maybe_rebalance(&mut state, &doc_vectors, &doc_contents) {
+                            match clusterer.maybe_rebalance(&mut state, &doc_vectors, &doc_contents)
+                            {
                                 Ok(rebalanced) => {
                                     if rebalanced {
                                         info!("clusters rebalanced after single-file ingest");
@@ -1638,7 +1811,6 @@ impl MarkdownVdb {
                                 Err(e) => warn!(error = %e, "cluster rebalance failed"),
                             }
                             self.index.update_clusters(Some(state));
-                            self.index.save()?;
                         }
                     }
                 } else if options.file.is_none() || existing.is_none() {
@@ -1647,7 +1819,6 @@ impl MarkdownVdb {
                     match clusterer.cluster_all(&doc_vectors, &doc_contents, existing.as_ref()) {
                         Ok(state) => {
                             self.index.update_clusters(Some(state));
-                            self.index.save()?;
                             info!("clustering complete");
                         }
                         Err(e) => {
@@ -1659,7 +1830,6 @@ impl MarkdownVdb {
                     match clusterer.cluster_all(&doc_vectors, &doc_contents, existing.as_ref()) {
                         Ok(state) => {
                             self.index.update_clusters(Some(state));
-                            self.index.save()?;
                             info!("clusters rebuilt after algorithm change");
                         }
                         Err(e) => warn!(error = %e, "clustering failed (non-fatal)"),
@@ -1693,7 +1863,6 @@ impl MarkdownVdb {
                         match clusterer.assign_single_to_custom(&mut state, &path_str, vec) {
                             Ok(()) => {
                                 self.index.update_custom_clusters(Some(state));
-                                self.index.save()?;
                             }
                             Err(e) => warn!(error = %e, "topic assignment failed (non-fatal)"),
                         }
@@ -1733,7 +1902,6 @@ impl MarkdownVdb {
                     }) {
                         Ok(state) => {
                             self.index.update_custom_clusters(Some(state));
-                            self.index.save()?;
                             info!("topic assignment complete");
                         }
                         Err(e) => {
@@ -1745,7 +1913,6 @@ impl MarkdownVdb {
         } else if self.index.get_custom_clusters().is_some() {
             // Definitions removed from config — clear the state.
             self.index.update_custom_clusters(None);
-            self.index.save()?;
         }
 
         // Persist global and scoped schemas.
@@ -1772,7 +1939,8 @@ impl MarkdownVdb {
             self.index.set_schema(Some(merged));
 
             // Compute scoped schemas: auto-discovered scopes + overlay-defined scopes.
-            let mut scope_names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut scope_names: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
             for s in schema::Schema::discover_scopes(&all_md_for_schema) {
                 scope_names.insert(s);
             }
@@ -1790,7 +1958,8 @@ impl MarkdownVdb {
                         .as_ref()
                         .and_then(|o| o.scopes.get(scope))
                         .map(|so| so.fields.clone());
-                    let scoped_merged = schema::Schema::merge(scoped_inferred, scoped_overlay_fields);
+                    let scoped_merged =
+                        schema::Schema::merge(scoped_inferred, scoped_overlay_fields);
                     scoped_schemas.push(schema::ScopedSchema {
                         scope: scope.clone(),
                         schema: scoped_merged,
@@ -1799,8 +1968,37 @@ impl MarkdownVdb {
                 self.index.set_scoped_schemas(Some(scoped_schemas));
             }
 
-            self.index.save()?;
         }
+
+        // Derived-data hooks always run after raw/schema mutations and before
+        // the operation's final atomic index save. A normal full-vault ingest
+        // is also the watcher-off catch-up path for schema definition changes.
+        let module_event = if let Some(single_file) = &options.file {
+            modules::ModuleEvent::FilesChanged {
+                upserted: vec![path_util::to_slash(single_file)],
+                removed: removed_paths.clone(),
+                renamed: Vec::new(),
+            }
+        } else if options.full {
+            modules::ModuleEvent::FullIngest
+        } else {
+            modules::ModuleEvent::FilesChanged {
+                upserted: parsed_files
+                    .keys()
+                    .chain(metadata_only_files.keys())
+                    .map(|path| path_util::to_slash(path))
+                    .collect(),
+                removed: removed_paths.clone(),
+                renamed: Vec::new(),
+            }
+        };
+        result.module_reports =
+            modules::ModuleRunner::builtins().run(&self.root, &self.index, &module_event);
+        let save_start = std::time::Instant::now();
+        // The index is written once, atomically, with raw/schema/module state in
+        // agreement. FTS is committed afterwards and contains no formula data.
+        self.index.save()?;
+        self.fts_index.commit()?;
 
         let save_secs = save_start.elapsed().as_secs_f64();
 
@@ -1851,10 +2049,7 @@ impl MarkdownVdb {
     }
 
     /// Execute a semantic search query against the index.
-    pub async fn search(
-        &self,
-        query: search::SearchQuery,
-    ) -> Result<search::SearchResponse> {
+    pub async fn search(&self, query: search::SearchQuery) -> Result<search::SearchResponse> {
         let mut response = search::search(
             &query,
             &self.index,
@@ -1959,7 +2154,10 @@ impl MarkdownVdb {
             };
 
             let chunk_count = chunks.len();
-            let file_tokens: usize = chunks.iter().map(|c| chunker::count_tokens(&c.content)).sum();
+            let file_tokens: usize = chunks
+                .iter()
+                .map(|c| chunker::count_tokens(&c.content))
+                .sum();
 
             if status != PreviewFileStatus::Unchanged {
                 files_to_process += 1;
@@ -2005,8 +2203,7 @@ impl MarkdownVdb {
     /// and re-tokenizing in-scope files from disk. A scope matching nothing
     /// returns zeroed counts rather than an error.
     pub fn info(&self, path: Option<&str>) -> Result<VaultInfo> {
-        let (scope, _schema_key, is_whole_vault) =
-            normalize_collection_scope(path.unwrap_or("."));
+        let (scope, _schema_key, is_whole_vault) = normalize_collection_scope(path.unwrap_or("."));
 
         let disco = discovery::FileDiscovery::new(&self.root, &self.config);
         let discovered = disco.discover()?;
@@ -2125,11 +2322,15 @@ impl MarkdownVdb {
         }
         .reclassify_legacy_file_fields();
 
-        // Overlay edits are live configuration and must override a persisted
-        // schema immediately; requiring an ingest here makes app surfaces
-        // disagree until the index happens to be rebuilt.
-        let overlay = schema::Schema::load_overlay(&self.root)?;
-        let global_fields = overlay.map(|value| value.fields);
+        // Ordinary overlay annotations remain live, but formula definitions
+        // come only from the persisted module snapshot. This prevents a
+        // read-only query from exposing new definitions alongside stale values.
+        // A malformed overlay likewise falls back to the cached schema and its
+        // persisted formula diagnostics.
+        let global_fields = schema::Schema::load_overlay(&self.root)
+            .ok()
+            .flatten()
+            .map(|value| without_formula_overlay_fields(value.fields));
         Ok(schema::Schema::merge(base, global_fields))
     }
 
@@ -2155,10 +2356,15 @@ impl MarkdownVdb {
         }
         .reclassify_legacy_file_fields();
 
-        let overlay = schema::Schema::load_overlay(&self.root)?;
-        let overlay_fields = overlay
-            .as_ref()
-            .map(|value| schema::Schema::resolve_overlay_for_path(value, Some(path_prefix)));
+        let overlay_fields = schema::Schema::load_overlay(&self.root)
+            .ok()
+            .flatten()
+            .map(|value| {
+                without_formula_overlay_fields(schema::Schema::resolve_overlay_for_path(
+                    &value,
+                    Some(path_prefix),
+                ))
+            });
         let merged = schema::Schema::merge(base, overlay_fields);
         Ok(schema::ScopedSchema {
             scope: path_prefix.to_string(),
@@ -2188,9 +2394,7 @@ impl MarkdownVdb {
         }
         let legacy_path = root.join(".markdownvdb");
         if legacy_path.is_file() {
-            return Err(Error::ConfigAlreadyExists {
-                path: legacy_path,
-            });
+            return Err(Error::ConfigAlreadyExists { path: legacy_path });
         }
 
         // Create the .markdownvdb directory if it doesn't exist.
@@ -2309,8 +2513,7 @@ sources:
                         None
                     } else {
                         Some(
-                            c.members.iter().map(|m| m.score).sum::<f32>()
-                                / c.members.len() as f32,
+                            c.members.iter().map(|m| m.score).sum::<f32>() / c.members.len() as f32,
                         )
                     },
                 })
@@ -2635,10 +2838,8 @@ sources:
             .collect();
         let neighbor_batch = self.index.search_vectors_batch(&queries, search_k)?;
 
-        for (source_index, (cv, results)) in chunk_vectors
-            .iter()
-            .zip(neighbor_batch.matches)
-            .enumerate()
+        for (source_index, (cv, results)) in
+            chunk_vectors.iter().zip(neighbor_batch.matches).enumerate()
         {
             let mut cross_file_count = 0;
             for (neighbor_id_index, score) in results {
@@ -2737,14 +2938,23 @@ sources:
             });
         }
         let backlink_map = links::compute_backlinks(&graph);
-        Ok(links::query_links(path, &graph, &backlink_map, &indexed_files))
+        Ok(links::query_links(
+            path,
+            &graph,
+            &backlink_map,
+            &indexed_files,
+        ))
     }
 
     /// Query the multi-hop link neighborhood of a file.
     ///
     /// Returns a tree-structured view of outgoing and incoming links
     /// up to `depth` hops (clamped to 1–3).
-    pub fn links_neighborhood(&self, path: &str, depth: usize) -> Result<links::NeighborhoodResult> {
+    pub fn links_neighborhood(
+        &self,
+        path: &str,
+        depth: usize,
+    ) -> Result<links::NeighborhoodResult> {
         let graph = self.index.get_link_graph().ok_or_else(|| {
             Error::Config("no link graph available; run ingest first".to_string())
         })?;
@@ -2837,11 +3047,12 @@ sources:
     /// Get information about an indexed document by its relative path.
     pub fn get_document(&self, relative_path: &str) -> Result<DocumentInfo> {
         let relative_path = &path_util::normalize_path_input(relative_path);
-        let file = self.index.get_file(relative_path).ok_or_else(|| {
-            Error::FileNotInIndex {
+        let file = self
+            .index
+            .get_file(relative_path)
+            .ok_or_else(|| Error::FileNotInIndex {
                 path: PathBuf::from(relative_path),
-            }
-        })?;
+            })?;
 
         // Parse frontmatter from stored JSON string.
         let frontmatter = file
@@ -2855,6 +3066,8 @@ sources:
             path: relative_path.to_string(),
             content_hash: file.content_hash.clone(),
             frontmatter,
+            computed_fields: file.computed_values_json(),
+            computed_field_errors: file.computed_errors_json(),
             chunk_count: file.chunk_ids.len(),
             file_size: file.file_size,
             indexed_at: file.indexed_at,
@@ -2903,7 +3116,9 @@ sources:
             std::collections::BTreeMap::new();
 
         for fm_link in parser::extract_frontmatter_links(Some(frontmatter)) {
-            if ctx.is_file_field(source, &fm_link.field) {
+            if ctx.is_file_field(source, &fm_link.field)
+                || ctx.is_formula_field(source, &fm_link.field)
+            {
                 continue;
             }
             let target_folder = ctx.target_for(source, &fm_link.field);
@@ -3006,7 +3221,10 @@ sources:
         let mut rows = self.gather_collection_rows(&scope, is_whole_vault, opts.recursive)?;
 
         // 2. Metadata filter (reuses the search engine's MetadataFilter evaluation).
-        rows.retain(|r| search::evaluate_filters(&opts.filters, Some(&r.frontmatter)));
+        rows.retain(|row| {
+            let effective = effective_collection_frontmatter(row);
+            search::evaluate_filters(&opts.filters, Some(&effective))
+        });
 
         // 3. Total count after filtering, before pagination.
         let total_rows = rows.len();
@@ -3017,10 +3235,12 @@ sources:
         // 6 (computed before pagination): columns from the full filtered set so the
         // layout stays stable across pages. Collect present keys + a representative
         // non-null value per key for type inference of unscoped columns.
-        let mut present_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut present_keys: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         let mut key_sample: HashMap<String, serde_json::Value> = HashMap::new();
         for r in &rows {
-            if let serde_json::Value::Object(map) = &r.frontmatter {
+            let effective = effective_collection_frontmatter(r);
+            if let serde_json::Value::Object(map) = &effective {
                 for (k, v) in map {
                     present_keys.insert(k.clone());
                     if !v.is_null() {
@@ -3029,12 +3249,8 @@ sources:
                 }
             }
         }
-        let columns = self.build_collection_columns(
-            &schema_key,
-            is_whole_vault,
-            &present_keys,
-            &key_sample,
-        )?;
+        let columns =
+            self.build_collection_columns(&schema_key, is_whole_vault, &present_keys, &key_sample)?;
 
         // 5. Paginate: skip offset, take limit (or all).
         let limit = opts.limit.unwrap_or(usize::MAX);
@@ -3073,10 +3289,8 @@ sources:
         let disk_files = discovery.discover()?;
         let indexed_hashes: HashMap<String, String> = self.index.get_file_hashes();
 
-        let disk_paths: std::collections::HashSet<String> = disk_files
-            .iter()
-            .map(|p| path_util::to_slash(p))
-            .collect();
+        let disk_paths: std::collections::HashSet<String> =
+            disk_files.iter().map(|p| path_util::to_slash(p)).collect();
 
         // Scope + depth filter: prefix match, then (non-recursive) require the
         // remainder after the prefix to be a direct child (no further `/`).
@@ -3148,6 +3362,14 @@ sources:
             title,
             title_source,
             frontmatter,
+            computed_fields: stored
+                .as_ref()
+                .map(|file| file.computed_values_json())
+                .unwrap_or_default(),
+            computed_field_errors: stored
+                .as_ref()
+                .map(|file| file.computed_errors_json())
+                .unwrap_or_default(),
             content_hash: stored.as_ref().map(|f| f.content_hash.clone()),
             file_size: stored.as_ref().map(|f| f.file_size).unwrap_or(0),
             modified_at: self.index.get_file_mtime(path),
@@ -3177,6 +3399,8 @@ sources:
             title,
             title_source,
             frontmatter,
+            computed_fields: serde_json::Map::new(),
+            computed_field_errors: std::collections::BTreeMap::new(),
             content_hash: None,
             file_size,
             modified_at,
@@ -3219,6 +3443,8 @@ sources:
                 required: f.required,
                 in_schema: true,
                 relation_target: f.relation_target.clone(),
+                formula: f.formula.clone(),
+                result_type: f.result_type,
             });
         }
 
@@ -3241,6 +3467,8 @@ sources:
                 required: false,
                 in_schema: false,
                 relation_target: None,
+                formula: None,
+                result_type: None,
             });
         }
 
@@ -3468,7 +3696,10 @@ sources:
         // references are vault content, not index health.
         checks.push(self.doctor_relations_check());
 
-        let passed = checks.iter().filter(|c| c.status == CheckStatus::Pass).count();
+        let passed = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Pass)
+            .count();
         let total = checks.len();
 
         Ok(DoctorResult {
@@ -3671,6 +3902,18 @@ fn derive_title(path: &str, frontmatter: &serde_json::Value) -> (String, TitleSo
     (stem.to_string(), TitleSource::Filename)
 }
 
+/// Return source frontmatter for query/display semantics. Formula values are
+/// materialized into Markdown; the computed cache is bookkeeping only.
+fn effective_collection_frontmatter(row: &CollectionRow) -> serde_json::Value {
+    let mut frontmatter = row.frontmatter.clone();
+    if let Some(object) = frontmatter.as_object_mut() {
+        for field in row.computed_field_errors.keys() {
+            object.remove(field);
+        }
+    }
+    frontmatter
+}
+
 /// Sort collection rows in place.
 ///
 /// When `sort_by` is `None`, sorts by `path` ascending for deterministic output.
@@ -3685,8 +3928,10 @@ fn sort_collection_rows(rows: &mut [CollectionRow], sort_by: Option<&str>, order
     };
 
     rows.sort_by(|a, b| {
-        let av = a.frontmatter.get(field).filter(|v| !v.is_null());
-        let bv = b.frontmatter.get(field).filter(|v| !v.is_null());
+        let a_effective = effective_collection_frontmatter(a);
+        let b_effective = effective_collection_frontmatter(b);
+        let av = a_effective.get(field).filter(|v| !v.is_null());
+        let bv = b_effective.get(field).filter(|v| !v.is_null());
         match (av, bv) {
             (None, None) => a.path.cmp(&b.path),
             (None, Some(_)) => std::cmp::Ordering::Greater, // a is null → after
@@ -3715,6 +3960,8 @@ mod collection_unit_tests {
             title,
             title_source,
             frontmatter,
+            computed_fields: serde_json::Map::new(),
+            computed_field_errors: std::collections::BTreeMap::new(),
             content_hash: None,
             file_size: 0,
             modified_at: None,
@@ -3817,7 +4064,7 @@ mod collection_unit_tests {
     #[test]
     fn sort_nulls_last_ascending() {
         let mut rows = vec![
-            row("c.md", json!({})),                 // null (missing)
+            row("c.md", json!({})), // null (missing)
             row("a.md", json!({"order": 2})),
             row("b.md", json!({"order": 1})),
             row("d.md", json!({"order": serde_json::Value::Null})), // explicit null

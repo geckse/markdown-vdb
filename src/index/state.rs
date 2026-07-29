@@ -9,12 +9,13 @@ use usearch::Index as HnswIndex;
 use tracing::debug;
 
 use crate::chunker::Chunk;
+use crate::clustering::{ClusterState, CustomClusterState};
 use crate::error::{Error, Result};
 use crate::index::storage::{self, WriteOptions};
 use crate::index::types::{
-    EmbeddingConfig, IndexMetadata, IndexStatus, ScopedCounts, StoredChunk, StoredFile,
+    ComputedFieldEntry, EmbeddingConfig, IndexMetadata, IndexStatus, ScopedCounts, StoredChunk,
+    StoredFile,
 };
-use crate::clustering::{ClusterState, CustomClusterState};
 use crate::links::LinkGraph;
 use crate::parser::MarkdownFile;
 use crate::schema::Schema;
@@ -92,6 +93,18 @@ fn chunk_id_projection(state: &IndexState) -> (Vec<&str>, HashMap<u64, usize>) {
     (ids, key_to_id_index)
 }
 
+fn path_is_in_scope(path: &str, scope: Option<&str>) -> bool {
+    let Some(scope) = scope else {
+        return true;
+    };
+    let scope = scope.trim_matches('/');
+    scope.is_empty()
+        || path == scope
+        || path
+            .strip_prefix(scope)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 /// Internal mutable state protected by the RwLock.
 struct IndexState {
     metadata: IndexMetadata,
@@ -155,8 +168,7 @@ impl Index {
         if next_key < hnsw_size {
             debug!(
                 computed = next_key,
-                hnsw_size,
-                "next_key adjusted to match HNSW size"
+                hnsw_size, "next_key adjusted to match HNSW size"
             );
             next_key = hnsw_size;
         }
@@ -236,8 +248,20 @@ impl Index {
         config: &EmbeddingConfig,
         write_options: WriteOptions,
     ) -> Result<Self> {
+        Self::open_or_create_with_options_report(path, config, write_options)
+            .map(|(index, _rebuilt)| index)
+    }
+
+    /// Open an index and report whether a missing/incompatible generation had
+    /// to be recreated. Callers use this to invalidate companion stores such
+    /// as FTS in the same generation.
+    pub fn open_or_create_with_options_report(
+        path: &Path,
+        config: &EmbeddingConfig,
+        write_options: WriteOptions,
+    ) -> Result<(Self, bool)> {
         match Self::open_with_options(path, write_options.clone()) {
-            Ok(index) => Ok(index),
+            Ok(index) => Ok((index, false)),
             Err(Error::IndexNotFound { .. })
             | Err(Error::IndexVersionMismatch { .. })
             | Err(Error::IndexCorrupted(_)) => {
@@ -246,6 +270,7 @@ impl Index {
                     let _ = std::fs::remove_file(path);
                 }
                 Self::create_with_options(path, config, write_options)
+                    .map(|index| (index, true))
             }
             Err(e) => Err(e),
         }
@@ -267,15 +292,22 @@ impl Index {
 
         debug!(path = %relative_path, chunks = chunks.len(), "upserting file");
 
-        // Remove old data if file already exists.
-        if let Some(old_file) = state.metadata.files.remove(&relative_path) {
+        // Remove old vector data if file already exists, but retain module
+        // ownership until hooks replace it. This lets a removed/malformed
+        // formula definition clean its previously materialized source field
+        // even when the raw file was re-indexed in the same operation.
+        let previous_computed_fields =
+            if let Some(old_file) = state.metadata.files.remove(&relative_path) {
             for chunk_id in &old_file.chunk_ids {
                 if let Some(key) = state.id_to_key.remove(chunk_id) {
                     let _ = state.hnsw.remove(key);
                 }
                 state.metadata.chunks.remove(chunk_id);
             }
-        }
+                old_file.computed_fields
+            } else {
+                HashMap::new()
+            };
 
         // Ensure HNSW has capacity for new vectors.
         let current_size = state.hnsw.size();
@@ -289,6 +321,7 @@ impl Index {
 
         // Insert new chunks.
         let mut stored_file = StoredFile::from(file);
+        stored_file.computed_fields = previous_computed_fields;
         for (i, chunk) in chunks.iter().enumerate() {
             let key = state.next_key;
             state.next_key += 1;
@@ -305,7 +338,9 @@ impl Index {
         }
 
         // Store file modification time in the mtime map.
-        state.metadata.file_mtimes
+        state
+            .metadata
+            .file_mtimes
             .get_or_insert_with(HashMap::new)
             .insert(relative_path.clone(), file.modified_at);
 
@@ -406,6 +441,142 @@ impl Index {
     pub fn get_file(&self, relative_path: &str) -> Option<StoredFile> {
         let state = self.state.read();
         state.metadata.files.get(relative_path).cloned()
+    }
+
+    /// Get a cloned map of computed fields for one indexed file.
+    pub fn get_computed_fields(
+        &self,
+        relative_path: &str,
+    ) -> Option<HashMap<String, ComputedFieldEntry>> {
+        let state = self.state.read();
+        state
+            .metadata
+            .files
+            .get(relative_path)
+            .map(|file| file.computed_fields.clone())
+    }
+
+    /// Replace all computed fields for one indexed file.
+    ///
+    /// The module runner prepares a complete patch before calling this method,
+    /// keeping partially evaluated state out of the persisted index.
+    pub fn replace_computed_fields(
+        &self,
+        relative_path: &str,
+        computed_fields: HashMap<String, ComputedFieldEntry>,
+    ) -> Result<()> {
+        let mut state = self.state.write();
+        let file =
+            state
+                .metadata
+                .files
+                .get_mut(relative_path)
+                .ok_or_else(|| Error::FileNotInIndex {
+                    path: PathBuf::from(relative_path),
+                })?;
+        file.computed_fields = computed_fields;
+        state.dirty = true;
+        Ok(())
+    }
+
+    /// Refresh source metadata without touching chunks, vectors, or the body
+    /// hash represented by those vectors.
+    ///
+    /// This is used for frontmatter-only edits, including Formula write-backs.
+    /// Keeping the operation metadata-only is what prevents a watcher echo from
+    /// spending embedding tokens.
+    pub fn refresh_source_metadata(&self, file: &MarkdownFile) -> Result<()> {
+        let relative_path = crate::path_util::to_slash(&file.path);
+        let mut state = self.state.write();
+        let stored = state
+            .metadata
+            .files
+            .get_mut(&relative_path)
+            .ok_or_else(|| Error::FileNotInIndex {
+                path: PathBuf::from(&relative_path),
+            })?;
+        stored.content_hash = file.content_hash.clone();
+        stored.frontmatter = file
+            .frontmatter
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok());
+        stored.file_size = file.file_size;
+        state
+            .metadata
+            .file_mtimes
+            .get_or_insert_with(HashMap::new)
+            .insert(relative_path, file.modified_at);
+        state.dirty = true;
+        Ok(())
+    }
+
+    /// Commit a module-owned source rewrite and its bookkeeping as one index
+    /// mutation while preserving chunks, vectors, and embedding identity.
+    pub fn apply_module_source_state(
+        &self,
+        expected_content_hash: &str,
+        file: &MarkdownFile,
+        computed_fields: HashMap<String, ComputedFieldEntry>,
+    ) -> Result<()> {
+        let relative_path = crate::path_util::to_slash(&file.path);
+        let mut state = self.state.write();
+        let stored = state
+            .metadata
+            .files
+            .get_mut(&relative_path)
+            .ok_or_else(|| Error::FileNotInIndex {
+                path: PathBuf::from(&relative_path),
+            })?;
+        if stored.content_hash != expected_content_hash {
+            return Err(Error::SourceChanged {
+                path: PathBuf::from(&relative_path),
+            });
+        }
+
+        stored.content_hash = file.content_hash.clone();
+        stored.frontmatter = file
+            .frontmatter
+            .as_ref()
+            .and_then(|value| serde_json::to_string(value).ok());
+        stored.file_size = file.file_size;
+        stored.computed_fields = computed_fields;
+        state
+            .metadata
+            .file_mtimes
+            .get_or_insert_with(HashMap::new)
+            .insert(relative_path, file.modified_at);
+        state.dirty = true;
+        Ok(())
+    }
+
+    /// Clear entries owned by `module` within an optional path scope.
+    ///
+    /// A scope matches either an exact indexed path or all descendants of a
+    /// folder prefix. Returns the number of removed field entries.
+    pub fn clear_computed_fields_for_module(&self, module: &str, scope: Option<&str>) -> usize {
+        let mut state = self.state.write();
+        let mut removed = 0usize;
+
+        for (path, file) in &mut state.metadata.files {
+            if !path_is_in_scope(path, scope) {
+                continue;
+            }
+            let before = file.computed_fields.len();
+            file.computed_fields
+                .retain(|_, entry| entry.module != module);
+            removed += before - file.computed_fields.len();
+        }
+
+        if removed > 0 {
+            state.dirty = true;
+        }
+        removed
+    }
+
+    /// Get a cloned snapshot of all indexed files for read-only module execution.
+    pub fn get_all_files(&self) -> HashMap<String, StoredFile> {
+        let state = self.state.read();
+        state.metadata.files.clone()
     }
 
     /// Get a map of all file paths to their content hashes.
@@ -813,9 +984,11 @@ impl Index {
     /// Get the scoped schema for a specific path prefix, if any.
     pub fn get_scoped_schema(&self, prefix: &str) -> Option<crate::schema::ScopedSchema> {
         let state = self.state.read();
-        state.metadata.scoped_schemas.as_ref().and_then(|schemas| {
-            schemas.iter().find(|s| s.scope == prefix).cloned()
-        })
+        state
+            .metadata
+            .scoped_schemas
+            .as_ref()
+            .and_then(|schemas| schemas.iter().find(|s| s.scope == prefix).cloned())
     }
 
     /// Set (or clear) the scoped schemas.
@@ -939,7 +1112,12 @@ impl Index {
         // (dropped at the end of this scope; File drop releases the OS lock).
         {
             let _write_lock = acquire_write_lock(&self.path)?;
-            storage::write_index(&self.path, &state.metadata, &state.hnsw, &self.write_options)?;
+            storage::write_index(
+                &self.path,
+                &state.metadata,
+                &state.hnsw,
+                &self.write_options,
+            )?;
         }
         state.dirty = false;
 
@@ -1025,10 +1203,12 @@ impl Index {
             StoredFile {
                 relative_path: path.to_string(),
                 content_hash: hash.to_string(),
+                embedding_body_hash: hash.to_string(),
                 chunk_ids: Vec::new(),
                 frontmatter: None,
                 file_size: 0,
                 indexed_at: 0,
+                computed_fields: HashMap::new(),
             },
         );
     }
@@ -1124,15 +1304,11 @@ mod tests {
         let config = test_config();
         let index = Index::create(&path, &config).unwrap();
 
-        let edges1 = vec![
-            ("edge:a.md->b.md@0".to_string(), vec![1.0f32; 128]),
-        ];
+        let edges1 = vec![("edge:a.md->b.md@0".to_string(), vec![1.0f32; 128])];
         index.upsert_edges(&edges1).unwrap();
 
         // Upsert same ID with different vector.
-        let edges2 = vec![
-            ("edge:a.md->b.md@0".to_string(), vec![0.5f32; 128]),
-        ];
+        let edges2 = vec![("edge:a.md->b.md@0".to_string(), vec![0.5f32; 128])];
         index.upsert_edges(&edges2).unwrap();
 
         let state = index.state.read();
@@ -1168,6 +1344,169 @@ mod tests {
         }
     }
 
+    fn computed_entry(module: &str, value_json: &str) -> ComputedFieldEntry {
+        ComputedFieldEntry {
+            module: module.to_string(),
+            definition_fingerprint: format!("{module}-fingerprint"),
+            value_json: Some(value_json.to_string()),
+            diagnostic: None,
+        }
+    }
+
+    #[test]
+    fn replace_and_get_computed_fields() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+        index.upsert(&mk_file("invoice.md"), &[], &[]).unwrap();
+
+        let fields = HashMap::from([("total".to_string(), computed_entry("formula", "12.50"))]);
+        index
+            .replace_computed_fields("invoice.md", fields.clone())
+            .unwrap();
+
+        assert_eq!(index.get_computed_fields("invoice.md"), Some(fields));
+        assert_eq!(index.get_all_files()["invoice.md"].computed_fields.len(), 1);
+        assert!(matches!(
+            index.replace_computed_fields("missing.md", HashMap::new()),
+            Err(Error::FileNotInIndex { .. })
+        ));
+    }
+
+    #[test]
+    fn clear_computed_fields_for_module_honors_scope() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+        for file in ["invoices/a.md", "invoices/archive/b.md", "notes/c.md"] {
+            index.upsert(&mk_file(file), &[], &[]).unwrap();
+            index
+                .replace_computed_fields(
+                    file,
+                    HashMap::from([
+                        ("total".to_string(), computed_entry("formula", "10")),
+                        ("other".to_string(), computed_entry("other", "\"kept\"")),
+                    ]),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            index.clear_computed_fields_for_module("formula", Some("invoices/")),
+            2
+        );
+        assert_eq!(index.get_computed_fields("invoices/a.md").unwrap().len(), 1);
+        assert_eq!(
+            index.get_computed_fields("invoices/a.md").unwrap()["other"]
+                .module
+                .as_str(),
+            "other"
+        );
+        assert_eq!(index.get_computed_fields("notes/c.md").unwrap().len(), 2);
+
+        assert_eq!(index.clear_computed_fields_for_module("formula", None), 1);
+        assert_eq!(index.clear_computed_fields_for_module("formula", None), 0);
+    }
+
+    #[test]
+    fn raw_file_upsert_preserves_module_ownership_until_hooks_run() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+        let file = mk_file("invoice.md");
+        index.upsert(&file, &[], &[]).unwrap();
+        index
+            .replace_computed_fields(
+                "invoice.md",
+                HashMap::from([("total".to_string(), computed_entry("formula", "10"))]),
+            )
+            .unwrap();
+
+        index.upsert(&file, &[], &[]).unwrap();
+        assert_eq!(
+            index.get_computed_fields("invoice.md").unwrap()["total"]
+                .value_json
+                .as_deref(),
+            Some("10")
+        );
+    }
+
+    #[test]
+    fn computed_fields_persist_across_save_and_open() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+        index.upsert(&mk_file("invoice.md"), &[], &[]).unwrap();
+        let fields = HashMap::from([("total".to_string(), computed_entry("formula", "12.50"))]);
+        index
+            .replace_computed_fields("invoice.md", fields.clone())
+            .unwrap();
+        index.save().unwrap();
+
+        let reopened = Index::open(&path).unwrap();
+        assert_eq!(reopened.get_computed_fields("invoice.md"), Some(fields));
+    }
+
+    #[test]
+    fn metadata_and_module_source_sync_preserve_vectors_and_embedding_body_hash() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+        let original = mk_file("invoice.md");
+        let original_body_hash = crate::parser::compute_content_hash(&original.body);
+        index
+            .upsert(
+                &original,
+                &[mk_chunk("invoice.md", 0)],
+                &[vec![0.25; 128]],
+            )
+            .unwrap();
+        index
+            .replace_computed_fields(
+                "invoice.md",
+                HashMap::from([("other".to_string(), computed_entry("other", "\"kept\""))]),
+            )
+            .unwrap();
+
+        let mut metadata_edit = original.clone();
+        metadata_edit.content_hash = "frontmatter-edit".to_string();
+        metadata_edit.frontmatter = Some(serde_json::json!({"price": 3}));
+        metadata_edit.file_size = 123;
+        metadata_edit.modified_at = 456;
+        index.refresh_source_metadata(&metadata_edit).unwrap();
+
+        let refreshed = index.get_file("invoice.md").unwrap();
+        assert_eq!(refreshed.content_hash, "frontmatter-edit");
+        assert_eq!(refreshed.embedding_body_hash, original_body_hash);
+        assert_eq!(refreshed.chunk_ids, vec!["invoice.md#0"]);
+        assert_eq!(index.status().vector_count, 1);
+        assert_eq!(
+            refreshed.computed_fields["other"].value_json.as_deref(),
+            Some("\"kept\"")
+        );
+
+        let mut formula_write = metadata_edit;
+        formula_write.content_hash = "formula-write".to_string();
+        formula_write.frontmatter = Some(serde_json::json!({"price": 3, "total": 6}));
+        let fields = HashMap::from([
+            ("other".to_string(), computed_entry("other", "\"kept\"")),
+            ("total".to_string(), computed_entry("formula", "6")),
+        ]);
+        index
+            .apply_module_source_state("frontmatter-edit", &formula_write, fields)
+            .unwrap();
+
+        let final_file = index.get_file("invoice.md").unwrap();
+        assert_eq!(final_file.content_hash, "formula-write");
+        assert_eq!(final_file.embedding_body_hash, original_body_hash);
+        assert_eq!(final_file.chunk_ids, vec!["invoice.md#0"]);
+        assert_eq!(index.status().vector_count, 1);
+        assert_eq!(
+            final_file.computed_fields["other"].value_json.as_deref(),
+            Some("\"kept\"")
+        );
+    }
+
     #[test]
     fn status_edge_count_counts_only_edges() {
         let dir = TempDir::new().unwrap();
@@ -1192,10 +1531,7 @@ mod tests {
         assert_eq!(status.chunk_count, 2);
         assert_eq!(status.edge_count, 2);
         assert_eq!(status.vector_count, 4);
-        assert_eq!(
-            status.vector_count,
-            status.chunk_count + status.edge_count
-        );
+        assert_eq!(status.vector_count, status.chunk_count + status.edge_count);
     }
 
     #[test]
@@ -1221,20 +1557,50 @@ mod tests {
         // Edges attributed to their source file.
         index
             .upsert_edges(&[
-                ("edge:blog/a.md->notes/b.md@0".to_string(), vec![0.9f32; 128]),
-                ("edge:notes/b.md->blog/a.md@0".to_string(), vec![0.8f32; 128]),
-                ("edge:notes/b.md->blog/a.md@fm.rel".to_string(), vec![0.7f32; 128]),
+                (
+                    "edge:blog/a.md->notes/b.md@0".to_string(),
+                    vec![0.9f32; 128],
+                ),
+                (
+                    "edge:notes/b.md->blog/a.md@0".to_string(),
+                    vec![0.8f32; 128],
+                ),
+                (
+                    "edge:notes/b.md->blog/a.md@fm.rel".to_string(),
+                    vec![0.7f32; 128],
+                ),
             ])
             .unwrap();
 
         let blog = index.scoped_counts(Some("blog/"));
-        assert_eq!(blog, ScopedCounts { files: 1, chunks: 2, edges: 1 });
+        assert_eq!(
+            blog,
+            ScopedCounts {
+                files: 1,
+                chunks: 2,
+                edges: 1
+            }
+        );
 
         let notes = index.scoped_counts(Some("notes/"));
-        assert_eq!(notes, ScopedCounts { files: 1, chunks: 1, edges: 2 });
+        assert_eq!(
+            notes,
+            ScopedCounts {
+                files: 1,
+                chunks: 1,
+                edges: 2
+            }
+        );
 
         let all = index.scoped_counts(None);
-        assert_eq!(all, ScopedCounts { files: 2, chunks: 3, edges: 3 });
+        assert_eq!(
+            all,
+            ScopedCounts {
+                files: 2,
+                chunks: 3,
+                edges: 3
+            }
+        );
 
         let none = index.scoped_counts(Some("missing/"));
         assert_eq!(none, ScopedCounts::default());
@@ -1272,9 +1638,7 @@ mod tests {
         index.upsert(&file, &[chunk], &[vec![0.1f32; 128]]).unwrap();
 
         // Now add edge vectors.
-        let edges = vec![
-            ("edge:test.md->other.md@0".to_string(), vec![0.9f32; 128]),
-        ];
+        let edges = vec![("edge:test.md->other.md@0".to_string(), vec![0.9f32; 128])];
         index.upsert_edges(&edges).unwrap();
 
         let state = index.state.read();
@@ -1453,16 +1817,17 @@ mod tests {
         index.upsert(&file, &[chunk], &[vec![1.0f32; 128]]).unwrap();
 
         // Add edge vectors.
-        let edges = vec![
-            ("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128]),
-        ];
+        let edges = vec![("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128])];
         index.upsert_edges(&edges).unwrap();
 
         // search_vectors should NOT return edge IDs.
         let query = vec![1.0f32; 128];
         let results = index.search_vectors(&query, 10).unwrap();
         for (id, _) in &results {
-            assert!(!id.starts_with("edge:"), "search_vectors returned edge ID: {id}");
+            assert!(
+                !id.starts_with("edge:"),
+                "search_vectors returned edge ID: {id}"
+            );
         }
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "test.md#0");
@@ -1568,9 +1933,7 @@ mod tests {
         };
         index.upsert(&file, &[chunk], &[vec![1.0f32; 128]]).unwrap();
 
-        let edges = vec![
-            ("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128]),
-        ];
+        let edges = vec![("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128])];
         index.upsert_edges(&edges).unwrap();
 
         let query = vec![1.0f32; 128];
@@ -1666,9 +2029,7 @@ mod tests {
         index.upsert(&file, &[chunk], &[vec![0.1f32; 128]]).unwrap();
 
         // Add edge vectors.
-        let edges = vec![
-            ("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128]),
-        ];
+        let edges = vec![("edge:test.md->other.md@0".to_string(), vec![1.0f32; 128])];
         index.upsert_edges(&edges).unwrap();
 
         // Store edge info in link_graph so open_with_options can reconstruct id_to_key.

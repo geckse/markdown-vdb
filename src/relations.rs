@@ -69,6 +69,9 @@ pub struct RelationContext {
     target_cache: Mutex<HashMap<String, HashMap<String, String>>>,
     /// Per-directory cache of fields explicitly pinned as `field_type: file`.
     file_field_cache: Mutex<HashMap<String, HashSet<String>>>,
+    /// Per-directory cache of materialized Formula fields. Their values are
+    /// source metadata, but formulas do not create relation graph edges.
+    formula_field_cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl RelationContext {
@@ -79,6 +82,7 @@ impl RelationContext {
             overlay,
             target_cache: Mutex::new(HashMap::new()),
             file_field_cache: Mutex::new(HashMap::new()),
+            formula_field_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -135,6 +139,33 @@ impl RelationContext {
                         .field_type
                         .as_deref()
                         .filter(|kind| kind.eq_ignore_ascii_case("file"))
+                        .map(|_| name)
+                })
+                .collect()
+        });
+        fields.contains(field)
+    }
+
+    /// Whether `(source file, field)` is declared as a Formula field.
+    pub fn is_formula_field(&self, source: &str, field: &str) -> bool {
+        let Some(overlay) = self.overlay.as_ref() else {
+            return false;
+        };
+        let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        let mut cache = self.formula_field_cache.lock();
+        let fields = cache.entry(dir.to_string()).or_insert_with(|| {
+            let prefix = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{dir}/")
+            };
+            Schema::resolve_overlay_for_path(overlay, Some(&prefix))
+                .into_iter()
+                .filter_map(|(name, field)| {
+                    field
+                        .field_type
+                        .as_deref()
+                        .filter(|kind| kind.eq_ignore_ascii_case("formula"))
                         .map(|_| name)
                 })
                 .collect()
@@ -562,6 +593,8 @@ mod tests {
                 allowed_values: None,
                 required: None,
                 target: Some("clients/".to_string()),
+                formula: None,
+                result_type: None,
             },
         );
         let mut scopes = HashMap::new();

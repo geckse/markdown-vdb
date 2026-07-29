@@ -231,6 +231,15 @@ pub fn print_search_results(results: &[SearchResult], query: &str) {
                 println!("     {}", pairs.join("  "));
             }
         }
+        if !r.file.computed_fields.is_empty() {
+            let pairs: Vec<String> = r
+                .file
+                .computed_fields
+                .iter()
+                .map(|(key, value)| format!("ƒx {}: {}", key.dimmed(), value))
+                .collect();
+            println!("     {}", pairs.join("  "));
+        }
 
         println!();
     }
@@ -607,6 +616,20 @@ pub fn print_document(doc: &DocumentInfo) {
             }
         }
     }
+    if !doc.computed_fields.is_empty() || !doc.computed_field_errors.is_empty() {
+        println!();
+        println!("  {}", "Computed fields:".cyan());
+        for (key, value) in &doc.computed_fields {
+            println!("    ƒx {}: {}", key.dimmed(), value);
+        }
+        for (key, diagnostic) in &doc.computed_field_errors {
+            println!(
+                "    ƒx {}: {}",
+                key.dimmed(),
+                format!("{}: {}", diagnostic.code, diagnostic.message).red()
+            );
+        }
+    }
 
     // Relations (populate only).
     if let Some(relations) = &doc.relations {
@@ -684,6 +707,11 @@ pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
             FieldType::List => "list".to_string(),
             FieldType::Date => "date".to_string(),
             FieldType::Mixed => "mixed".to_string(),
+            FieldType::Formula => field
+                .result_type
+                .as_ref()
+                .map(|result| format!("formula → {result}"))
+                .unwrap_or_else(|| "formula".to_string()),
             FieldType::Relation => match &field.relation_target {
                 Some(target) => format!("relation → {target}"),
                 None => "relation".to_string(),
@@ -772,6 +800,11 @@ pub fn print_collection(resp: &CollectionResponse) {
                 FieldType::List => "list".to_string(),
                 FieldType::Date => "date".to_string(),
                 FieldType::Mixed => "mixed".to_string(),
+                FieldType::Formula => col
+                    .result_type
+                    .as_ref()
+                    .map(|result| format!("formula → {result}"))
+                    .unwrap_or_else(|| "formula".to_string()),
                 FieldType::Relation => match &col.relation_target {
                     Some(target) => format!("relation → {target}"),
                     None => "relation".to_string(),

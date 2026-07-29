@@ -10,6 +10,7 @@ use crate::embedding::provider::EmbeddingProvider;
 use crate::error::{Error, Result};
 use crate::fts::FtsIndex;
 use crate::index::state::Index;
+use crate::index::types::ComputedFieldDiagnostic;
 use crate::links;
 
 /// Search mode controlling which retrieval signals are used.
@@ -228,10 +229,7 @@ pub enum MetadataFilter {
     /// Exact value equality. If the field is an array, checks if the array contains the value.
     Equals { field: String, value: Value },
     /// Field value is in the provided list. If the field is an array, checks intersection.
-    In {
-        field: String,
-        values: Vec<Value>,
-    },
+    In { field: String, values: Vec<Value> },
     /// Numeric or lexicographic range comparison. Either bound may be omitted.
     Range {
         field: String,
@@ -279,6 +277,11 @@ pub struct SearchResultFile {
     pub path: String,
     /// Parsed frontmatter, if present.
     pub frontmatter: Option<Value>,
+    /// Successful Formula values mirrored for module provenance/diagnostics.
+    /// `frontmatter` is the authoritative materialized source.
+    pub computed_fields: serde_json::Map<String, Value>,
+    /// Per-field calculation errors, keyed by computed field name.
+    pub computed_field_errors: std::collections::BTreeMap<String, ComputedFieldDiagnostic>,
     /// File size in bytes.
     pub file_size: u64,
     /// Path split into components (e.g., `["docs", "api", "auth.md"]`).
@@ -287,8 +290,7 @@ pub struct SearchResultFile {
     pub modified_at: Option<u64>,
     /// Resolved frontmatter relations (populate only; key absent otherwise).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub relations:
-        Option<std::collections::BTreeMap<String, Vec<crate::relations::RelationValue>>>,
+    pub relations: Option<std::collections::BTreeMap<String, Vec<crate::relations::RelationValue>>>,
 }
 
 /// A graph context item representing a chunk from a file linked to a search result.
@@ -493,8 +495,9 @@ pub async fn search(
             // If graph expansion is needed, embed the query for HNSW lookup.
             if effective_expand_graph > 0 {
                 let t0 = Instant::now();
-                let embeddings =
-                    provider.embed_batch(std::slice::from_ref(&query.query)).await?;
+                let embeddings = provider
+                    .embed_batch(std::slice::from_ref(&query.query))
+                    .await?;
                 embed_secs = t0.elapsed().as_secs_f64();
                 query_embedding = Some(embeddings[0].clone());
             }
@@ -502,10 +505,10 @@ pub async fn search(
         }
         SearchMode::Hybrid => {
             let fts = fts_index.unwrap(); // safe: checked above
-            let (semantic_results, lexical_results) = tokio::join!(
-                semantic_search(query, index, provider, over_fetch),
-                async { lexical_search(query, fts, over_fetch) }
-            );
+            let (semantic_results, lexical_results) =
+                tokio::join!(semantic_search(query, index, provider, over_fetch), async {
+                    lexical_search(query, fts, over_fetch)
+                });
             let (semantic, qvec, es, vs) = semantic_results?;
             let (lexical, ls) = lexical_results?;
             embed_secs = es;
@@ -668,7 +671,9 @@ async fn semantic_search(
     limit: usize,
 ) -> Result<(Vec<(String, f64)>, Vec<f32>, f64, f64)> {
     let t0 = Instant::now();
-    let embeddings = provider.embed_batch(std::slice::from_ref(&query.query)).await?;
+    let embeddings = provider
+        .embed_batch(std::slice::from_ref(&query.query))
+        .await?;
     let embed_secs = t0.elapsed().as_secs_f64();
 
     let t1 = Instant::now();
@@ -782,14 +787,15 @@ fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
             continue;
         }
 
-        // Parse frontmatter JSON for filter evaluation.
+        // Keep the wire payload raw while filtering against effective metadata.
         let frontmatter: Option<Value> = file
             .frontmatter
             .as_ref()
             .and_then(|s| serde_json::from_str(s).ok());
+        let effective_frontmatter = file.effective_frontmatter();
 
         // Apply metadata filters.
-        if !evaluate_filters(&p.query.filters, frontmatter.as_ref()) {
+        if !evaluate_filters(&p.query.filters, effective_frontmatter.as_ref()) {
             continue;
         }
 
@@ -807,6 +813,8 @@ fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
             file: SearchResultFile {
                 path: chunk.source_path.clone(),
                 frontmatter,
+                computed_fields: file.computed_values_json(),
+                computed_field_errors: file.computed_errors_json(),
                 file_size: file.file_size,
                 path_components: chunk.source_path.split('/').map(String::from).collect(),
                 modified_at,
@@ -853,33 +861,30 @@ fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
 
                 // Build a lookup: target_path → best edge cosine similarity with query.
                 // We look at all semantic edges and index the best score per target file.
-                let edge_scores: HashMap<String, f64> = if let (
-                    Some(qe),
-                    Some(evecs),
-                    Some(edges_map),
-                ) = (
-                    p.query_embedding,
-                    &edge_vectors,
-                    graph.semantic_edges.as_ref(),
-                ) {
-                    let mut best: HashMap<String, f64> = HashMap::new();
-                    for (eid, edge) in edges_map.iter() {
-                        if let Some(evec) = evecs.get(eid) {
-                            let sim = cosine_similarity(qe, evec);
-                            // Index by both source and target so any file connected
-                            // via a relevant edge gets the boost.
-                            for path in [&edge.source, &edge.target] {
-                                let entry = best.entry(path.to_string()).or_insert(0.0);
-                                if sim > *entry {
-                                    *entry = sim;
+                let edge_scores: HashMap<String, f64> =
+                    if let (Some(qe), Some(evecs), Some(edges_map)) = (
+                        p.query_embedding,
+                        &edge_vectors,
+                        graph.semantic_edges.as_ref(),
+                    ) {
+                        let mut best: HashMap<String, f64> = HashMap::new();
+                        for (eid, edge) in edges_map.iter() {
+                            if let Some(evec) = evecs.get(eid) {
+                                let sim = cosine_similarity(qe, evec);
+                                // Index by both source and target so any file connected
+                                // via a relevant edge gets the boost.
+                                for path in [&edge.source, &edge.target] {
+                                    let entry = best.entry(path.to_string()).or_insert(0.0);
+                                    if sim > *entry {
+                                        *entry = sim;
+                                    }
                                 }
                             }
                         }
-                    }
-                    best
-                } else {
-                    HashMap::new()
-                };
+                        best
+                    } else {
+                        HashMap::new()
+                    };
 
                 for result in &mut results {
                     if let Some(&distance) = neighbors.get(&result.file.path) {
@@ -891,8 +896,7 @@ fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
                             // Flat fallback: use edge_boost_weight as the base boost.
                             p.edge_boost_weight
                         };
-                        let multiplier =
-                            1.0 + boost / 2.0_f64.powi(distance as i32 - 1);
+                        let multiplier = 1.0 + boost / 2.0_f64.powi(distance as i32 - 1);
                         result.score *= multiplier;
                         debug!(
                             path = %result.file.path,
@@ -1005,10 +1009,7 @@ fn expand_graph_context(
     }
 
     // Build a set of target file paths for filtering HNSW results.
-    let target_set: HashSet<&str> = expansion_targets
-        .iter()
-        .map(|(p, _)| p.as_str())
-        .collect();
+    let target_set: HashSet<&str> = expansion_targets.iter().map(|(p, _)| p.as_str()).collect();
 
     // Search HNSW for similar chunks, then filter to expansion targets.
     let search_limit = (expansion_targets.len() * 10).max(100);
@@ -1066,10 +1067,7 @@ fn expand_graph_context(
 
     for (hop, mut files) in by_hop {
         // Sort by score descending within each hop.
-        files.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         files.truncate(expand_limit);
 
         for (path, _) in files {
@@ -1107,6 +1105,8 @@ fn expand_graph_context(
                 file: SearchResultFile {
                     path: path.clone(),
                     frontmatter,
+                    computed_fields: file.computed_values_json(),
+                    computed_field_errors: file.computed_errors_json(),
                     file_size: file.file_size,
                     path_components: path.split('/').map(String::from).collect(),
                     modified_at,
@@ -1251,7 +1251,9 @@ pub(crate) fn evaluate_filters(filters: &[MetadataFilter], frontmatter: Option<&
         return false;
     };
 
-    filters.iter().all(|filter| evaluate_single_filter(filter, fm))
+    filters
+        .iter()
+        .all(|filter| evaluate_single_filter(filter, fm))
 }
 
 /// Equality between a frontmatter value and a filter value, aware of relation
@@ -1319,21 +1321,18 @@ fn evaluate_single_filter(filter: &MetadataFilter, frontmatter: &Value) -> bool 
             }
             true
         }
-        MetadataFilter::Exists { field } => {
-            frontmatter
-                .get(field)
-                .is_some_and(|v| !v.is_null())
-        }
+        MetadataFilter::Exists { field } => frontmatter.get(field).is_some_and(|v| !v.is_null()),
     }
 }
 
 /// Compare two JSON values. Returns true if `a` is equal to `b` or has the given ordering
-/// relative to `b`. Numeric values are compared as f64; otherwise falls back to string comparison.
+/// relative to `b`. Numeric values are compared as decimals; otherwise falls back to string comparison.
 fn compare_values(a: &Value, b: &Value, ordering: std::cmp::Ordering) -> bool {
-    // Try numeric comparison first
-    if let (Some(a_num), Some(b_num)) = (as_f64(a), as_f64(b)) {
-        let cmp = a_num.partial_cmp(&b_num);
-        return matches!(cmp, Some(std::cmp::Ordering::Equal)) || cmp == Some(ordering);
+    // Try exact decimal comparison first. JSON numbers are parsed from their
+    // textual representation so metadata ordering never detours through f64.
+    if let (Some(a_num), Some(b_num)) = (as_decimal(a), as_decimal(b)) {
+        let cmp = a_num.cmp(&b_num);
+        return cmp == std::cmp::Ordering::Equal || cmp == ordering;
     }
     // Fall back to string comparison
     let a_str = value_as_string(a);
@@ -1350,7 +1349,7 @@ fn compare_values(a: &Value, b: &Value, ordering: std::cmp::Ordering) -> bool {
 /// instead of a bool. This guarantees that sort order and `Range`-filter order
 /// never disagree.
 ///
-/// - Both parse as numbers → compared as `f64`.
+/// - Both parse as numbers → compared as exact decimals.
 /// - Both booleans → `false < true`.
 /// - Otherwise → compared by their stringified form
 ///   ([`value_as_string`], which preserves raw strings and JSON-encodes
@@ -1359,11 +1358,9 @@ fn compare_values(a: &Value, b: &Value, ordering: std::cmp::Ordering) -> bool {
 /// Null handling (nulls-last) is the caller's responsibility — this function
 /// only orders two concrete, non-null values.
 pub(crate) fn compare_json_for_sort(a: &Value, b: &Value) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-
     // Numeric comparison first (mirrors compare_values).
-    if let (Some(a_num), Some(b_num)) = (as_f64(a), as_f64(b)) {
-        return a_num.partial_cmp(&b_num).unwrap_or(Ordering::Equal);
+    if let (Some(a_num), Some(b_num)) = (as_decimal(a), as_decimal(b)) {
+        return a_num.cmp(&b_num);
     }
     // Booleans: false < true. (Equivalent to the string fallback below, which
     // yields "false" < "true", so this stays consistent with compare_values.)
@@ -1374,9 +1371,14 @@ pub(crate) fn compare_json_for_sort(a: &Value, b: &Value) -> std::cmp::Ordering 
     value_as_string(a).cmp(&value_as_string(b))
 }
 
-/// Try to extract a numeric f64 from a JSON value.
-fn as_f64(v: &Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_i64().map(|i| i as f64))
+/// Parse a JSON number without routing it through IEEE-754.
+fn as_decimal(v: &Value) -> Option<rust_decimal::Decimal> {
+    use std::str::FromStr;
+
+    match v {
+        Value::Number(number) => rust_decimal::Decimal::from_str(&number.to_string()).ok(),
+        _ => None,
+    }
 }
 
 /// Convert a JSON value to a string for lexicographic comparison.
@@ -1402,11 +1404,20 @@ mod tests {
     #[test]
     fn test_search_mode_from_str() {
         assert_eq!("hybrid".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
-        assert_eq!("semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
-        assert_eq!("lexical".parse::<SearchMode>().unwrap(), SearchMode::Lexical);
+        assert_eq!(
+            "semantic".parse::<SearchMode>().unwrap(),
+            SearchMode::Semantic
+        );
+        assert_eq!(
+            "lexical".parse::<SearchMode>().unwrap(),
+            SearchMode::Lexical
+        );
         // Case-insensitive
         assert_eq!("HYBRID".parse::<SearchMode>().unwrap(), SearchMode::Hybrid);
-        assert_eq!("Semantic".parse::<SearchMode>().unwrap(), SearchMode::Semantic);
+        assert_eq!(
+            "Semantic".parse::<SearchMode>().unwrap(),
+            SearchMode::Semantic
+        );
     }
 
     #[test]
@@ -1423,7 +1434,10 @@ mod tests {
 
     #[test]
     fn test_search_mode_edge_serialize() {
-        assert_eq!(serde_json::to_string(&SearchMode::Edge).unwrap(), "\"edge\"");
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Edge).unwrap(),
+            "\"edge\""
+        );
     }
 
     #[test]
@@ -1498,6 +1512,8 @@ mod tests {
             file: SearchResultFile {
                 path: "a.md".into(),
                 frontmatter: None,
+                computed_fields: serde_json::Map::new(),
+                computed_field_errors: std::collections::BTreeMap::new(),
                 file_size: 100,
                 path_components: vec!["a.md".into()],
                 modified_at: None,
@@ -1526,6 +1542,8 @@ mod tests {
             file: SearchResultFile {
                 path: "a.md".into(),
                 frontmatter: None,
+                computed_fields: serde_json::Map::new(),
+                computed_field_errors: std::collections::BTreeMap::new(),
                 file_size: 100,
                 path_components: vec!["a.md".into()],
                 modified_at: None,
@@ -1557,8 +1575,14 @@ mod tests {
 
     #[test]
     fn test_search_mode_serialize() {
-        assert_eq!(serde_json::to_string(&SearchMode::Hybrid).unwrap(), "\"hybrid\"");
-        assert_eq!(serde_json::to_string(&SearchMode::Lexical).unwrap(), "\"lexical\"");
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Hybrid).unwrap(),
+            "\"hybrid\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Lexical).unwrap(),
+            "\"lexical\""
+        );
     }
 
     // --- SortOrder tests ---
@@ -1590,26 +1614,61 @@ mod tests {
     fn test_compare_json_for_sort_numeric() {
         use std::cmp::Ordering;
         assert_eq!(compare_json_for_sort(&json!(1), &json!(2)), Ordering::Less);
-        assert_eq!(compare_json_for_sort(&json!(2.5), &json!(2.5)), Ordering::Equal);
-        assert_eq!(compare_json_for_sort(&json!(10), &json!(2)), Ordering::Greater);
+        assert_eq!(
+            compare_json_for_sort(&json!(2.5), &json!(2.5)),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_json_for_sort(&json!(10), &json!(2)),
+            Ordering::Greater
+        );
         // Numeric (not lexicographic): 10 > 2 even though "10" < "2" as strings.
-        assert_eq!(compare_json_for_sort(&json!(10), &json!(9)), Ordering::Greater);
+        assert_eq!(
+            compare_json_for_sort(&json!(10), &json!(9)),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_compare_json_for_sort_avoids_f64_precision_loss() {
+        use std::cmp::Ordering;
+        let lower: Value = serde_json::from_str("9007199254740992").unwrap();
+        let higher: Value = serde_json::from_str("9007199254740993").unwrap();
+        assert_eq!(compare_json_for_sort(&lower, &higher), Ordering::Less);
     }
 
     #[test]
     fn test_compare_json_for_sort_string() {
         use std::cmp::Ordering;
-        assert_eq!(compare_json_for_sort(&json!("apple"), &json!("banana")), Ordering::Less);
-        assert_eq!(compare_json_for_sort(&json!("zed"), &json!("zed")), Ordering::Equal);
-        assert_eq!(compare_json_for_sort(&json!("draft"), &json!("published")), Ordering::Less);
+        assert_eq!(
+            compare_json_for_sort(&json!("apple"), &json!("banana")),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_json_for_sort(&json!("zed"), &json!("zed")),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_json_for_sort(&json!("draft"), &json!("published")),
+            Ordering::Less
+        );
     }
 
     #[test]
     fn test_compare_json_for_sort_bool() {
         use std::cmp::Ordering;
-        assert_eq!(compare_json_for_sort(&json!(false), &json!(true)), Ordering::Less);
-        assert_eq!(compare_json_for_sort(&json!(true), &json!(false)), Ordering::Greater);
-        assert_eq!(compare_json_for_sort(&json!(true), &json!(true)), Ordering::Equal);
+        assert_eq!(
+            compare_json_for_sort(&json!(false), &json!(true)),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_json_for_sort(&json!(true), &json!(false)),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_json_for_sort(&json!(true), &json!(true)),
+            Ordering::Equal
+        );
     }
 
     #[test]
@@ -1618,7 +1677,10 @@ mod tests {
         // Lists are compared by their JSON-string form, deterministically.
         let ord = compare_json_for_sort(&json!(["a"]), &json!(["b"]));
         assert_eq!(ord, Ordering::Less);
-        assert_eq!(compare_json_for_sort(&json!(["x"]), &json!(["x"])), Ordering::Equal);
+        assert_eq!(
+            compare_json_for_sort(&json!(["x"]), &json!(["x"])),
+            Ordering::Equal
+        );
     }
 
     #[test]
@@ -1708,9 +1770,7 @@ mod tests {
 
     #[test]
     fn test_filters_no_frontmatter() {
-        let filters = vec![MetadataFilter::Exists {
-            field: "a".into(),
-        }];
+        let filters = vec![MetadataFilter::Exists { field: "a".into() }];
         assert!(!evaluate_filters(&filters, None));
     }
 
@@ -1928,23 +1988,38 @@ mod tests {
         // Non-link strings never enter the normalized path.
         let fm = json!({"status": "draft", "n": 5, "tags": ["a", "b"], "date": "2024-01-15"});
         assert!(evaluate_filters(
-            &[MetadataFilter::Equals { field: "status".into(), value: json!("draft") }],
+            &[MetadataFilter::Equals {
+                field: "status".into(),
+                value: json!("draft")
+            }],
             Some(&fm)
         ));
         assert!(!evaluate_filters(
-            &[MetadataFilter::Equals { field: "status".into(), value: json!("draft.md") }],
+            &[MetadataFilter::Equals {
+                field: "status".into(),
+                value: json!("draft.md")
+            }],
             Some(&fm)
         ));
         assert!(evaluate_filters(
-            &[MetadataFilter::Equals { field: "n".into(), value: json!(5) }],
+            &[MetadataFilter::Equals {
+                field: "n".into(),
+                value: json!(5)
+            }],
             Some(&fm)
         ));
         assert!(evaluate_filters(
-            &[MetadataFilter::Equals { field: "tags".into(), value: json!("a") }],
+            &[MetadataFilter::Equals {
+                field: "tags".into(),
+                value: json!("a")
+            }],
             Some(&fm)
         ));
         assert!(evaluate_filters(
-            &[MetadataFilter::Equals { field: "date".into(), value: json!("2024-01-15") }],
+            &[MetadataFilter::Equals {
+                field: "date".into(),
+                value: json!("2024-01-15")
+            }],
             Some(&fm)
         ));
     }
@@ -1955,11 +2030,17 @@ mod tests {
         // client=acme, NOT client=clients/acme (no resolution at filter time).
         let fm = json!({"client": "[[acme]]"});
         assert!(evaluate_filters(
-            &[MetadataFilter::Equals { field: "client".into(), value: json!("acme") }],
+            &[MetadataFilter::Equals {
+                field: "client".into(),
+                value: json!("acme")
+            }],
             Some(&fm)
         ));
         assert!(!evaluate_filters(
-            &[MetadataFilter::Equals { field: "client".into(), value: json!("clients/acme") }],
+            &[MetadataFilter::Equals {
+                field: "client".into(),
+                value: json!("clients/acme")
+            }],
             Some(&fm)
         ));
     }
@@ -1980,7 +2061,9 @@ mod tests {
 
     #[test]
     fn test_search_query_with_boost_links_false() {
-        let q = SearchQuery::new("test").with_boost_links(true).with_boost_links(false);
+        let q = SearchQuery::new("test")
+            .with_boost_links(true)
+            .with_boost_links(false);
         assert_eq!(q.boost_links, Some(false));
     }
 
@@ -2101,9 +2184,15 @@ mod tests {
         assert!((results[0].1 - 0.0).abs() < 1e-10, "0 maps to 0");
         assert!((results[1].1 - 0.25).abs() < 1e-10, "0.5 maps to 0.25");
         assert!((results[2].1 - 0.5).abs() < 1e-10, "1.5 maps to 0.5");
-        assert!((results[3].1 - 2.0 / 3.0).abs() < 1e-10, "3.0 maps to ~0.67");
+        assert!(
+            (results[3].1 - 2.0 / 3.0).abs() < 1e-10,
+            "3.0 maps to ~0.67"
+        );
         assert!((results[4].1 - 0.8).abs() < 1e-10, "6.0 maps to 0.8");
-        assert!((results[5].1 - 15.0 / 16.5).abs() < 1e-10, "15.0 maps to ~0.91");
+        assert!(
+            (results[5].1 - 15.0 / 16.5).abs() < 1e-10,
+            "15.0 maps to ~0.91"
+        );
     }
 
     #[test]
@@ -2122,7 +2211,11 @@ mod tests {
     fn test_bm25_normalization_stays_below_one() {
         let mut results = vec![("a".to_string(), 1000.0)];
         normalize_bm25_scores(&mut results, 1.5);
-        assert!(results[0].1 < 1.0, "score should be < 1.0, got {}", results[0].1);
+        assert!(
+            results[0].1 < 1.0,
+            "score should be < 1.0, got {}",
+            results[0].1
+        );
     }
 
     #[test]
@@ -2139,7 +2232,11 @@ mod tests {
         // #1 in both lists with k=60 → raw score = 2/61, max = 2/61 → normalized = 1.0
         let mut results = vec![("a".to_string(), 2.0 / 61.0)];
         normalize_rrf_scores(&mut results, 60.0, 2);
-        assert!((results[0].1 - 1.0).abs() < 1e-10, "expected 1.0, got {}", results[0].1);
+        assert!(
+            (results[0].1 - 1.0).abs() < 1e-10,
+            "expected 1.0, got {}",
+            results[0].1
+        );
     }
 
     #[test]
@@ -2147,15 +2244,19 @@ mod tests {
         // #1 in one list only → raw = 1/61, max = 2/61 → normalized = 0.5
         let mut results = vec![("a".to_string(), 1.0 / 61.0)];
         normalize_rrf_scores(&mut results, 60.0, 2);
-        assert!((results[0].1 - 0.5).abs() < 1e-10, "expected 0.5, got {}", results[0].1);
+        assert!(
+            (results[0].1 - 0.5).abs() < 1e-10,
+            "expected 0.5, got {}",
+            results[0].1
+        );
     }
 
     #[test]
     fn test_rrf_normalization_preserves_order() {
         let mut results = vec![
-            ("a".to_string(), 2.0 / 61.0),  // both #1
+            ("a".to_string(), 2.0 / 61.0),              // both #1
             ("b".to_string(), 1.0 / 61.0 + 1.0 / 62.0), // #1 + #2
-            ("c".to_string(), 1.0 / 61.0),  // single #1
+            ("c".to_string(), 1.0 / 61.0),              // single #1
         ];
         normalize_rrf_scores(&mut results, 60.0, 2);
         assert!(results[0].1 > results[1].1);
@@ -2194,7 +2295,11 @@ mod tests {
         let now = 1_700_000_000;
         let modified = now - 180 * 86400;
         let result = apply_time_decay(1.0, modified, 90.0, now);
-        assert!((result - 0.25).abs() < 1e-10, "expected 0.25, got {}", result);
+        assert!(
+            (result - 0.25).abs() < 1e-10,
+            "expected 0.25, got {}",
+            result
+        );
     }
 
     #[test]
@@ -2204,7 +2309,11 @@ mod tests {
         let modified = now - 365 * 86400;
         let result = apply_time_decay(1.0, modified, 90.0, now);
         assert!(result > 0.0, "score should never be zero");
-        assert!(result < 0.1, "365 days old should be < 10% of original, got {}", result);
+        assert!(
+            result < 0.1,
+            "365 days old should be < 10% of original, got {}",
+            result
+        );
     }
 
     #[test]
@@ -2230,7 +2339,11 @@ mod tests {
         let now = 1_700_000_000;
         let modified = now + 100;
         let result = apply_time_decay(0.8, modified, 90.0, now);
-        assert!((result - 0.8).abs() < 1e-10, "future mtime should have no penalty, got {}", result);
+        assert!(
+            (result - 0.8).abs() < 1e-10,
+            "future mtime should have no penalty, got {}",
+            result
+        );
     }
 
     #[test]
@@ -2240,7 +2353,11 @@ mod tests {
         for days_ago in [0, 1, 10, 30, 90, 180, 365, 1000] {
             let modified = now - days_ago * 86400;
             let result = apply_time_decay(0.75, modified, 90.0, now);
-            assert!(result <= 0.75 + 1e-10, "decay should not exceed original score for age {} days", days_ago);
+            assert!(
+                result <= 0.75 + 1e-10,
+                "decay should not exceed original score for age {} days",
+                days_ago
+            );
             assert!(result >= 0.0, "decay should not go negative");
         }
     }
@@ -2293,14 +2410,16 @@ mod tests {
             .with_decay_exclude(vec!["docs/reference".into(), "wiki/pinned".into()]);
         assert_eq!(
             q.decay_exclude,
-            Some(vec!["docs/reference".to_string(), "wiki/pinned".to_string()])
+            Some(vec![
+                "docs/reference".to_string(),
+                "wiki/pinned".to_string()
+            ])
         );
     }
 
     #[test]
     fn test_search_query_with_decay_include() {
-        let q = SearchQuery::new("test")
-            .with_decay_include(vec!["journal".into()]);
+        let q = SearchQuery::new("test").with_decay_include(vec!["journal".into()]);
         assert_eq!(q.decay_include, Some(vec!["journal".to_string()]));
     }
 
@@ -2340,7 +2459,11 @@ mod tests {
         let exclude = vec!["journal/pinned".to_string()];
         let include = vec!["journal/".to_string()];
         // Matches include but also matches exclude → excluded
-        assert!(!should_apply_decay("journal/pinned/important.md", &exclude, &include));
+        assert!(!should_apply_decay(
+            "journal/pinned/important.md",
+            &exclude,
+            &include
+        ));
         // Matches include and not exclude → included
         assert!(should_apply_decay("journal/2024-01.md", &exclude, &include));
     }
@@ -2349,10 +2472,26 @@ mod tests {
     fn test_should_apply_decay_multiple_patterns() {
         let exclude = vec!["docs/reference".to_string(), "wiki/glossary".to_string()];
         let include = vec!["docs/".to_string(), "wiki/".to_string()];
-        assert!(!should_apply_decay("docs/reference/api.md", &exclude, &include));
-        assert!(!should_apply_decay("wiki/glossary/terms.md", &exclude, &include));
-        assert!(should_apply_decay("docs/guides/setup.md", &exclude, &include));
-        assert!(should_apply_decay("wiki/articles/rust.md", &exclude, &include));
+        assert!(!should_apply_decay(
+            "docs/reference/api.md",
+            &exclude,
+            &include
+        ));
+        assert!(!should_apply_decay(
+            "wiki/glossary/terms.md",
+            &exclude,
+            &include
+        ));
+        assert!(should_apply_decay(
+            "docs/guides/setup.md",
+            &exclude,
+            &include
+        ));
+        assert!(should_apply_decay(
+            "wiki/articles/rust.md",
+            &exclude,
+            &include
+        ));
         assert!(!should_apply_decay("notes/random.md", &exclude, &include));
     }
 
@@ -2437,8 +2576,10 @@ mod tests {
         let high_multiplier = 1.0 + high_boost / 2.0_f64.powi(0); // hop 1
         let low_multiplier = 1.0 + low_boost / 2.0_f64.powi(0); // hop 1
 
-        assert!(high_multiplier > low_multiplier,
-            "high sim edge ({high_multiplier}) should boost more than low sim ({low_multiplier})");
+        assert!(
+            high_multiplier > low_multiplier,
+            "high sim edge ({high_multiplier}) should boost more than low sim ({low_multiplier})"
+        );
         // High: 1.0 + 0.15 * 0.95 = 1.1425
         assert!((high_multiplier - 1.1425).abs() < 1e-10);
         // Low: 1.0 + 0.15 * 0.2 = 1.03

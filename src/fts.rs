@@ -59,16 +59,26 @@ impl FtsIndex {
             Index::create_in_dir(path, schema).map_err(|e| Error::Fts(e.to_string()))?
         };
 
-        let writer = index
-            .writer(50_000_000) // 50MB heap
-            .map_err(|e| match e {
-                // Another process (e.g. `mdvdb watch`) holds the Tantivy
-                // writer lock for this directory.
-                tantivy::TantivyError::LockFailure(..) => Error::IndexBusy {
-                    path: path.to_path_buf(),
-                },
-                other => Error::Fts(other.to_string()),
-            })?;
+        // A watcher or previous in-process writer can release Tantivy's lock a
+        // moment after its owner is dropped. Brief retries make watcher
+        // pause/run/restart and immediate reopen deterministic without hiding
+        // a genuinely active writer.
+        let mut attempts = 0;
+        let writer = loop {
+            match index.writer(50_000_000) {
+                Ok(writer) => break writer,
+                Err(tantivy::TantivyError::LockFailure(..)) if attempts < 9 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(tantivy::TantivyError::LockFailure(..)) => {
+                    return Err(Error::IndexBusy {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(other) => return Err(Error::Fts(other.to_string())),
+            }
+        };
 
         Ok(Self {
             index,

@@ -36,6 +36,9 @@ pub enum Error {
     #[error("file not in index: {}", path.display())]
     FileNotInIndex { path: PathBuf },
 
+    #[error("source changed while applying a module patch: {}", path.display())]
+    SourceChanged { path: PathBuf },
+
     #[error("index already exists: {}", path.display())]
     IndexAlreadyExists { path: PathBuf },
 

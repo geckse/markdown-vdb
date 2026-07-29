@@ -16,11 +16,61 @@ pub enum FieldType {
     List,
     Date,
     Mixed,
+    /// A schema-only field whose value is calculated by the formula module.
+    Formula,
     /// A frontmatter reference to another document (wiki link, markdown link,
     /// or bare `.md` path — whole-value only). Serializes as `"Relation"`.
     Relation,
     /// A frontmatter reference to a collection-local, non-Markdown file.
     File,
+}
+
+/// The declared output type of a formula field.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Serialize,
+    serde::Deserialize,
+)]
+#[rkyv(derive(Debug))]
+pub enum FormulaResultType {
+    String,
+    Number,
+    Boolean,
+    Date,
+    DateTime,
+    List,
+    Json,
+}
+
+impl std::fmt::Display for FormulaResultType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Date => "date",
+            Self::DateTime => "datetime",
+            Self::List => "list",
+            Self::Json => "json",
+        })
+    }
+}
+
+impl std::str::FromStr for FormulaResultType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        parse_formula_result_type_str(value)
+            .ok_or_else(|| format!("unsupported formula result type `{value}`"))
+    }
 }
 
 /// Intermediate type used during inference to accumulate field information.
@@ -53,6 +103,10 @@ pub struct OverlayField {
     /// Target folder for relation fields (the FK's "table"). Accepts `clients`
     /// or `clients/` on read; emitted slash-less. Implies `field_type: relation`.
     pub target: Option<String>,
+    /// JavaScript-like expression evaluated by the built-in formula module.
+    pub formula: Option<String>,
+    /// Declared formula output type (e.g. "number", "date_time", "json").
+    pub result_type: Option<String>,
 }
 
 /// A scope's field overlay, defining field annotations for a path prefix.
@@ -94,6 +148,12 @@ pub struct SchemaField {
     /// Overlay-declared FK target folder for relation fields (slash-less).
     /// Serializes as `null` when absent (always-present JSON key per contract).
     pub relation_target: Option<String>,
+    /// Formula expression for `Formula` fields, otherwise `None`.
+    /// Serializes as `null` when absent.
+    pub formula: Option<String>,
+    /// Declared formula output type for `Formula` fields, otherwise `None`.
+    /// Serializes as `null` when absent.
+    pub result_type: Option<FormulaResultType>,
 }
 
 /// A schema tagged with its path scope, persisted in the index.
@@ -196,7 +256,7 @@ fn value_to_sample_string(value: &serde_json::Value) -> String {
 }
 
 /// Convert an overlay type string to a `FieldType`.
-fn parse_field_type_str(s: &str) -> Option<FieldType> {
+pub(crate) fn parse_field_type_str(s: &str) -> Option<FieldType> {
     match s.to_lowercase().as_str() {
         "string" => Some(FieldType::String),
         "number" => Some(FieldType::Number),
@@ -204,10 +264,96 @@ fn parse_field_type_str(s: &str) -> Option<FieldType> {
         "list" | "array" => Some(FieldType::List),
         "date" => Some(FieldType::Date),
         "mixed" => Some(FieldType::Mixed),
+        "formula" => Some(FieldType::Formula),
         "relation" => Some(FieldType::Relation),
         "file" => Some(FieldType::File),
         _ => None,
     }
+}
+
+/// Convert an overlay result type string to a [`FormulaResultType`].
+pub fn parse_formula_result_type_str(s: &str) -> Option<FormulaResultType> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "string" => Some(FormulaResultType::String),
+        "number" => Some(FormulaResultType::Number),
+        "boolean" | "bool" => Some(FormulaResultType::Boolean),
+        "date" => Some(FormulaResultType::Date),
+        "datetime" | "date_time" | "date-time" => Some(FormulaResultType::DateTime),
+        "list" | "array" => Some(FormulaResultType::List),
+        "json" => Some(FormulaResultType::Json),
+        _ => None,
+    }
+}
+
+fn validate_overlay_field(location: &str, name: &str, field: &OverlayField) -> crate::Result<()> {
+    let parsed_field_type = match field.field_type.as_deref() {
+        Some(field_type) => Some(parse_field_type_str(field_type).ok_or_else(|| {
+            crate::error::Error::Config(format!(
+                "invalid field_type `{field_type}` for `{location}.{name}`"
+            ))
+        })?),
+        None => None,
+    };
+    let is_formula = parsed_field_type == Some(FieldType::Formula);
+
+    if is_formula && matches!(name, "title" | "path") {
+        return Err(crate::error::Error::Config(format!(
+            "`{name}` is reserved and cannot be a formula field in `{location}`"
+        )));
+    }
+
+    if is_formula {
+        if field
+            .formula
+            .as_deref()
+            .is_none_or(|formula| formula.trim().is_empty())
+        {
+            return Err(crate::error::Error::Config(format!(
+                "formula field `{location}.{name}` requires a non-empty `formula`"
+            )));
+        }
+
+        let result_type = field.result_type.as_deref().ok_or_else(|| {
+            crate::error::Error::Config(format!(
+                "formula field `{location}.{name}` requires `result_type`"
+            ))
+        })?;
+        if parse_formula_result_type_str(result_type).is_none() {
+            return Err(crate::error::Error::Config(format!(
+                "invalid result_type `{result_type}` for formula field `{location}.{name}`"
+            )));
+        }
+        if field.target.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "formula field `{location}.{name}` cannot declare a relation `target`"
+            )));
+        }
+    } else {
+        if field.formula.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "`formula` on `{location}.{name}` requires `field_type: formula`"
+            )));
+        }
+        if field.result_type.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "`result_type` on `{location}.{name}` requires `field_type: formula`"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_overlay(overlay: &OverlaySchema) -> crate::Result<()> {
+    for (name, field) in &overlay.fields {
+        validate_overlay_field("fields", name, field)?;
+    }
+    for (scope, scope_overlay) in &overlay.scopes {
+        for (name, field) in &scope_overlay.fields {
+            validate_overlay_field(&format!("scopes.{scope}.fields"), name, field)?;
+        }
+    }
+    Ok(())
 }
 
 /// Normalize an overlay `target:` folder: trim whitespace and a trailing `/`.
@@ -262,6 +408,18 @@ impl Schema {
 
     /// Core inference logic operating over any iterator of `&MarkdownFile`.
     pub fn infer_from_iter<'a>(files: impl IntoIterator<Item = &'a MarkdownFile>) -> Self {
+        Self::infer_from_frontmatter_iter(
+            files
+                .into_iter()
+                .filter_map(|file| file.frontmatter.as_ref()),
+        )
+    }
+
+    /// Infer schema metadata directly from raw frontmatter JSON values already
+    /// persisted in the index.
+    pub(crate) fn infer_from_frontmatter_iter<'a>(
+        frontmatters: impl IntoIterator<Item = &'a serde_json::Value>,
+    ) -> Self {
         // Track per-field: types seen, occurrence count, sample values
         let mut field_types: HashMap<String, HashSet<std::mem::Discriminant<FieldType>>> =
             HashMap::new();
@@ -269,9 +427,9 @@ impl Schema {
         let mut occurrence_counts: HashMap<String, usize> = HashMap::new();
         let mut sample_values: HashMap<String, HashSet<String>> = HashMap::new();
 
-        for file in files {
-            let frontmatter = match &file.frontmatter {
-                Some(serde_json::Value::Object(map)) => map,
+        for frontmatter in frontmatters {
+            let frontmatter = match frontmatter {
+                serde_json::Value::Object(map) => map,
                 _ => continue,
             };
 
@@ -310,7 +468,10 @@ impl Schema {
                 let field_type = if types.len() > 1 {
                     FieldType::Mixed
                 } else {
-                    field_type_values.get(&name).cloned().unwrap_or(FieldType::String)
+                    field_type_values
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or(FieldType::String)
                 };
 
                 let mut samples: Vec<String> = sample_values
@@ -329,6 +490,8 @@ impl Schema {
                     allowed_values: None,
                     required: false,
                     relation_target: None,
+                    formula: None,
+                    result_type: None,
                 }
             })
             .collect();
@@ -338,7 +501,10 @@ impl Schema {
             .unwrap_or_default()
             .as_secs();
 
-        debug!(field_count = field_types.len(), "schema inferred from frontmatter");
+        debug!(
+            field_count = field_types.len(),
+            "schema inferred from frontmatter"
+        );
 
         Schema {
             fields,
@@ -347,9 +513,7 @@ impl Schema {
     }
 
     /// Load an optional overlay from `.markdownvdb.schema.yml` in the project root.
-    pub fn load_overlay(
-        project_root: &Path,
-    ) -> crate::Result<Option<OverlaySchema>> {
+    pub fn load_overlay(project_root: &Path) -> crate::Result<Option<OverlaySchema>> {
         let path = project_root.join(".markdownvdb.schema.yml");
         if !path.exists() {
             debug!("no schema overlay file found at {}", path.display());
@@ -358,11 +522,9 @@ impl Schema {
 
         let contents = std::fs::read_to_string(&path)?;
         let overlay: OverlaySchema = serde_yaml::from_str(&contents).map_err(|e| {
-            crate::error::Error::Config(format!(
-                "failed to parse {}: {e}",
-                path.display()
-            ))
+            crate::error::Error::Config(format!("failed to parse {}: {e}", path.display()))
         })?;
+        validate_overlay(&overlay)?;
 
         debug!(field_count = overlay.fields.len(), "loaded schema overlay");
         Ok(Some(overlay))
@@ -385,10 +547,18 @@ impl Schema {
         };
 
         // Collect matching scopes and sort by prefix length (shortest first)
+        let normalized_prefix = prefix.trim_matches('/');
         let mut matching_scopes: Vec<(&str, &ScopeOverlay)> = overlay
             .scopes
             .iter()
-            .filter(|(scope, _)| prefix.starts_with(scope.as_str()) || prefix == scope.as_str())
+            .filter(|(scope, _)| {
+                let normalized_scope = scope.trim_matches('/');
+                normalized_scope.is_empty()
+                    || normalized_prefix == normalized_scope
+                    || normalized_prefix
+                        .strip_prefix(normalized_scope)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
             .map(|(s, o)| (s.as_str(), o))
             .collect();
         matching_scopes.sort_by_key(|(scope, _)| scope.len());
@@ -419,7 +589,12 @@ impl Schema {
         // Apply overlay
         for (name, ov) in &overlay {
             let target = ov.target.as_deref().and_then(normalize_target);
+            let formula_result_type = ov
+                .result_type
+                .as_deref()
+                .and_then(parse_formula_result_type_str);
             if let Some(field) = merged.get_mut(name) {
+                let had_cached_formula_stats = field.field_type == FieldType::Formula;
                 // Apply overlay to existing inferred field
                 if let Some(desc) = &ov.description {
                     field.description = Some(desc.clone());
@@ -443,6 +618,19 @@ impl Schema {
                 } else {
                     None
                 };
+                if field.field_type == FieldType::Formula {
+                    field.formula = ov.formula.clone();
+                    field.result_type = formula_result_type;
+                    // Formula samples/counts come from successful cached results,
+                    // never from a colliding raw frontmatter field.
+                    if !had_cached_formula_stats {
+                        field.occurrence_count = 0;
+                        field.sample_values.clear();
+                    }
+                } else {
+                    field.formula = None;
+                    field.result_type = None;
+                }
             } else {
                 // Overlay-only field: not seen in any file
                 let field_type = ov
@@ -459,6 +647,7 @@ impl Schema {
                 } else {
                     None
                 };
+                let is_formula = field_type == FieldType::Formula;
 
                 merged.insert(
                     name.clone(),
@@ -471,6 +660,12 @@ impl Schema {
                         allowed_values: ov.allowed_values.clone(),
                         required: ov.required.unwrap_or(false),
                         relation_target,
+                        formula: if is_formula { ov.formula.clone() } else { None },
+                        result_type: if is_formula {
+                            formula_result_type
+                        } else {
+                            None
+                        },
                     },
                 );
             }
@@ -555,7 +750,34 @@ mod tests {
         assert_eq!(parse_field_type_str("array"), Some(FieldType::List));
         assert_eq!(parse_field_type_str("date"), Some(FieldType::Date));
         assert_eq!(parse_field_type_str("mixed"), Some(FieldType::Mixed));
+        assert_eq!(parse_field_type_str("formula"), Some(FieldType::Formula));
         assert_eq!(parse_field_type_str("unknown"), None);
+    }
+
+    #[test]
+    fn formula_result_type_parsing_and_display() {
+        assert_eq!(
+            parse_formula_result_type_str("string"),
+            Some(FormulaResultType::String)
+        );
+        assert_eq!(
+            parse_formula_result_type_str("BOOL"),
+            Some(FormulaResultType::Boolean)
+        );
+        assert_eq!(
+            parse_formula_result_type_str("date_time"),
+            Some(FormulaResultType::DateTime)
+        );
+        assert_eq!(
+            parse_formula_result_type_str("date-time"),
+            Some(FormulaResultType::DateTime)
+        );
+        assert_eq!(
+            "json".parse::<FormulaResultType>().unwrap(),
+            FormulaResultType::Json
+        );
+        assert_eq!(FormulaResultType::DateTime.to_string(), "datetime");
+        assert!("unknown".parse::<FormulaResultType>().is_err());
     }
 
     #[test]
@@ -581,11 +803,23 @@ mod tests {
 
     #[test]
     fn infer_field_type_from_value() {
-        assert_eq!(infer_field_type(&serde_json::json!(true)), FieldType::Boolean);
+        assert_eq!(
+            infer_field_type(&serde_json::json!(true)),
+            FieldType::Boolean
+        );
         assert_eq!(infer_field_type(&serde_json::json!(42)), FieldType::Number);
-        assert_eq!(infer_field_type(&serde_json::json!("hello")), FieldType::String);
-        assert_eq!(infer_field_type(&serde_json::json!("2024-01-15")), FieldType::Date);
-        assert_eq!(infer_field_type(&serde_json::json!(["a", "b"])), FieldType::List);
+        assert_eq!(
+            infer_field_type(&serde_json::json!("hello")),
+            FieldType::String
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!("2024-01-15")),
+            FieldType::Date
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!(["a", "b"])),
+            FieldType::List
+        );
     }
 
     #[test]
@@ -667,9 +901,9 @@ mod tests {
 
     #[test]
     fn infer_null_values_skipped() {
-        let files = vec![
-            make_file(serde_json::json!({"title": "Hello", "opt": null})),
-        ];
+        let files = vec![make_file(
+            serde_json::json!({"title": "Hello", "opt": null}),
+        )];
         let schema = Schema::infer(&files);
         // "opt" field has null value, which is skipped entirely
         assert_eq!(schema.fields.len(), 1);
@@ -678,9 +912,7 @@ mod tests {
 
     #[test]
     fn infer_nested_objects_as_string() {
-        let files = vec![
-            make_file(serde_json::json!({"meta": {"nested": "value"}})),
-        ];
+        let files = vec![make_file(serde_json::json!({"meta": {"nested": "value"}}))];
         let schema = Schema::infer(&files);
         assert_eq!(schema.fields[0].name, "meta");
         assert_eq!(schema.fields[0].field_type, FieldType::String);
@@ -708,7 +940,10 @@ fields:
         std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
         let result = Schema::load_overlay(dir.path()).unwrap().unwrap();
         assert_eq!(result.fields.len(), 2);
-        assert_eq!(result.fields["title"].description.as_deref(), Some("The document title"));
+        assert_eq!(
+            result.fields["title"].description.as_deref(),
+            Some("The document title")
+        );
         assert_eq!(result.fields["title"].required, Some(true));
         assert!(result.fields["status"].allowed_values.is_some());
     }
@@ -716,9 +951,95 @@ fields:
     #[test]
     fn load_overlay_invalid_yaml_returns_config_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), "not: [valid: yaml: !!").unwrap();
+        std::fs::write(
+            dir.path().join(".markdownvdb.schema.yml"),
+            "not: [valid: yaml: !!",
+        )
+        .unwrap();
         let err = Schema::load_overlay(dir.path()).unwrap_err();
         assert!(matches!(err, crate::error::Error::Config(_)));
+    }
+
+    #[test]
+    fn load_and_merge_scoped_formula_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+scopes:
+  invoices/:
+    fields:
+      total:
+        field_type: formula
+        formula: price * quantity
+        result_type: number
+"#;
+        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+        let overlay = Schema::load_overlay(dir.path()).unwrap().unwrap();
+        let resolved = Schema::resolve_overlay_for_path(&overlay, Some("invoices/"));
+
+        // A colliding raw field remains raw data; schema samples/counts for the
+        // formula must come from computed results instead.
+        let inferred = Schema::infer(&[make_file(serde_json::json!({
+            "price": 10,
+            "quantity": 2,
+            "total": 999
+        }))]);
+        let merged = Schema::merge(inferred, Some(resolved));
+        let total = merged.get_field("total").unwrap();
+        assert_eq!(total.field_type, FieldType::Formula);
+        assert_eq!(total.formula.as_deref(), Some("price * quantity"));
+        assert_eq!(total.result_type, Some(FormulaResultType::Number));
+        assert_eq!(total.occurrence_count, 0);
+        assert!(total.sample_values.is_empty());
+        assert_eq!(
+            serde_json::to_value(total).unwrap()["field_type"],
+            serde_json::json!("Formula")
+        );
+    }
+
+    #[test]
+    fn load_overlay_rejects_invalid_formula_metadata() {
+        let invalid_overlays = [
+            (
+                "missing formula",
+                "fields:\n  total:\n    field_type: formula\n    result_type: number\n",
+            ),
+            (
+                "missing result type",
+                "fields:\n  total:\n    field_type: formula\n    formula: price * quantity\n",
+            ),
+            (
+                "invalid result type",
+                "fields:\n  total:\n    field_type: formula\n    formula: price\n    result_type: currency\n",
+            ),
+            (
+                "formula without formula type",
+                "fields:\n  total:\n    formula: price\n    result_type: number\n",
+            ),
+            (
+                "reserved field",
+                "fields:\n  title:\n    field_type: formula\n    formula: name\n    result_type: string\n",
+            ),
+            (
+                "relation target",
+                "fields:\n  total:\n    field_type: formula\n    formula: price\n    result_type: number\n    target: invoices\n",
+            ),
+            (
+                "unknown field type",
+                "fields:\n  total:\n    field_type: currency\n",
+            ),
+        ];
+
+        for (case, yaml) in invalid_overlays {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+            assert!(
+                matches!(
+                    Schema::load_overlay(dir.path()),
+                    Err(crate::error::Error::Config(_))
+                ),
+                "{case} should be rejected"
+            );
+        }
     }
 
     #[test]
@@ -735,13 +1056,18 @@ fields:
         let files = vec![make_file(serde_json::json!({"title": "Hello"}))];
         let inferred = Schema::infer(&files);
         let mut overlay = HashMap::new();
-        overlay.insert("title".to_string(), OverlayField {
-            description: Some("Doc title".to_string()),
-            field_type: None,
-            allowed_values: None,
-            required: Some(true),
-            target: None,
-        });
+        overlay.insert(
+            "title".to_string(),
+            OverlayField {
+                description: Some("Doc title".to_string()),
+                field_type: None,
+                allowed_values: None,
+                required: Some(true),
+                target: None,
+                formula: None,
+                result_type: None,
+            },
+        );
         let merged = Schema::merge(inferred, Some(overlay));
         assert_eq!(merged.fields[0].description.as_deref(), Some("Doc title"));
         assert!(merged.fields[0].required);
@@ -752,13 +1078,18 @@ fields:
         let files = vec![make_file(serde_json::json!({"title": "Hello"}))];
         let inferred = Schema::infer(&files);
         let mut overlay = HashMap::new();
-        overlay.insert("category".to_string(), OverlayField {
-            description: Some("Content category".to_string()),
-            field_type: Some("string".to_string()),
-            allowed_values: Some(vec!["blog".to_string(), "docs".to_string()]),
-            required: Some(false),
-            target: None,
-        });
+        overlay.insert(
+            "category".to_string(),
+            OverlayField {
+                description: Some("Content category".to_string()),
+                field_type: Some("string".to_string()),
+                allowed_values: Some(vec!["blog".to_string(), "docs".to_string()]),
+                required: Some(false),
+                target: None,
+                formula: None,
+                result_type: None,
+            },
+        );
         let merged = Schema::merge(inferred, Some(overlay));
         assert_eq!(merged.fields.len(), 2);
         // alphabetical: category before title
@@ -773,20 +1104,27 @@ fields:
         let inferred = Schema::infer(&files);
         assert_eq!(inferred.fields[0].field_type, FieldType::String);
         let mut overlay = HashMap::new();
-        overlay.insert("count".to_string(), OverlayField {
-            description: None,
-            field_type: Some("number".to_string()),
-            allowed_values: None,
-            required: None,
-            target: None,
-        });
+        overlay.insert(
+            "count".to_string(),
+            OverlayField {
+                description: None,
+                field_type: Some("number".to_string()),
+                allowed_values: None,
+                required: None,
+                target: None,
+                formula: None,
+                result_type: None,
+            },
+        );
         let merged = Schema::merge(inferred, Some(overlay));
         assert_eq!(merged.fields[0].field_type, FieldType::Number);
     }
 
     #[test]
     fn get_field_found_and_not_found() {
-        let files = vec![make_file(serde_json::json!({"title": "Hello", "tags": ["a"]}))];
+        let files = vec![make_file(
+            serde_json::json!({"title": "Hello", "tags": ["a"]}),
+        )];
         let schema = Schema::infer(&files);
         assert!(schema.get_field("title").is_some());
         assert!(schema.get_field("nonexistent").is_none());
@@ -814,17 +1152,30 @@ fields:
             allowed_values: None,
             required: None,
             target: None,
+            formula: None,
+            result_type: None,
         }
     }
 
     #[test]
     fn resolve_no_prefix_returns_global_only() {
         let mut fields = HashMap::new();
-        fields.insert("title".to_string(), make_overlay_field(Some("Global title")));
+        fields.insert(
+            "title".to_string(),
+            make_overlay_field(Some("Global title")),
+        );
         let mut scopes = HashMap::new();
         let mut scope_fields = HashMap::new();
-        scope_fields.insert("status".to_string(), make_overlay_field(Some("Blog status")));
-        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        scope_fields.insert(
+            "status".to_string(),
+            make_overlay_field(Some("Blog status")),
+        );
+        scopes.insert(
+            "blog/".to_string(),
+            ScopeOverlay {
+                fields: scope_fields,
+            },
+        );
         let overlay = make_overlay(fields, scopes);
 
         let resolved = Schema::resolve_overlay_for_path(&overlay, None);
@@ -835,11 +1186,22 @@ fields:
     #[test]
     fn resolve_matching_scope() {
         let mut fields = HashMap::new();
-        fields.insert("title".to_string(), make_overlay_field(Some("Global title")));
+        fields.insert(
+            "title".to_string(),
+            make_overlay_field(Some("Global title")),
+        );
         let mut scopes = HashMap::new();
         let mut scope_fields = HashMap::new();
-        scope_fields.insert("status".to_string(), make_overlay_field(Some("Blog status")));
-        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        scope_fields.insert(
+            "status".to_string(),
+            make_overlay_field(Some("Blog status")),
+        );
+        scopes.insert(
+            "blog/".to_string(),
+            ScopeOverlay {
+                fields: scope_fields,
+            },
+        );
         let overlay = make_overlay(fields, scopes);
 
         let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/"));
@@ -851,11 +1213,19 @@ fields:
     #[test]
     fn resolve_scope_overrides_global() {
         let mut fields = HashMap::new();
-        fields.insert("title".to_string(), make_overlay_field(Some("Global title")));
+        fields.insert(
+            "title".to_string(),
+            make_overlay_field(Some("Global title")),
+        );
         let mut scopes = HashMap::new();
         let mut scope_fields = HashMap::new();
         scope_fields.insert("title".to_string(), make_overlay_field(Some("Blog title")));
-        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        scopes.insert(
+            "blog/".to_string(),
+            ScopeOverlay {
+                fields: scope_fields,
+            },
+        );
         let overlay = make_overlay(fields, scopes);
 
         let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/"));
@@ -868,7 +1238,12 @@ fields:
         let mut scopes = HashMap::new();
         let mut scope_fields = HashMap::new();
         scope_fields.insert("category".to_string(), make_overlay_field(Some("Blog cat")));
-        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        scopes.insert(
+            "blog/".to_string(),
+            ScopeOverlay {
+                fields: scope_fields,
+            },
+        );
         let overlay = make_overlay(HashMap::new(), scopes);
 
         let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/2024/post.md"));
@@ -881,10 +1256,20 @@ fields:
         let mut scopes = HashMap::new();
         let mut blog_fields = HashMap::new();
         blog_fields.insert("category".to_string(), make_overlay_field(Some("Blog cat")));
-        scopes.insert("blog/".to_string(), ScopeOverlay { fields: blog_fields });
+        scopes.insert(
+            "blog/".to_string(),
+            ScopeOverlay {
+                fields: blog_fields,
+            },
+        );
         let mut nested_fields = HashMap::new();
         nested_fields.insert("year".to_string(), make_overlay_field(Some("Year")));
-        scopes.insert("blog/2024/".to_string(), ScopeOverlay { fields: nested_fields });
+        scopes.insert(
+            "blog/2024/".to_string(),
+            ScopeOverlay {
+                fields: nested_fields,
+            },
+        );
         let overlay = make_overlay(HashMap::new(), scopes);
 
         let resolved = Schema::resolve_overlay_for_path(&overlay, Some("blog/2024/post.md"));
@@ -900,12 +1285,36 @@ fields:
         let mut scopes = HashMap::new();
         let mut scope_fields = HashMap::new();
         scope_fields.insert("status".to_string(), make_overlay_field(None));
-        scopes.insert("blog/".to_string(), ScopeOverlay { fields: scope_fields });
+        scopes.insert(
+            "blog/".to_string(),
+            ScopeOverlay {
+                fields: scope_fields,
+            },
+        );
         let overlay = make_overlay(fields, scopes);
 
         let resolved = Schema::resolve_overlay_for_path(&overlay, Some("docs/readme.md"));
         assert_eq!(resolved.len(), 1);
         assert!(resolved.contains_key("title"));
+    }
+
+    #[test]
+    fn resolve_scope_requires_a_path_segment_boundary() {
+        let mut scopes = HashMap::new();
+        let mut scope_fields = HashMap::new();
+        scope_fields.insert("total".to_string(), make_overlay_field(None));
+        scopes.insert(
+            "invoices".to_string(),
+            ScopeOverlay {
+                fields: scope_fields,
+            },
+        );
+        let overlay = make_overlay(HashMap::new(), scopes);
+
+        assert!(Schema::resolve_overlay_for_path(&overlay, Some("invoices/a.md"))
+            .contains_key("total"));
+        assert!(!Schema::resolve_overlay_for_path(&overlay, Some("invoices-old/a.md"))
+            .contains_key("total"));
     }
 
     #[test]
@@ -978,9 +1387,18 @@ fields:
     #[test]
     fn infer_scoped_filters_by_prefix() {
         let files = vec![
-            make_file_with_path("blog/post1.md", serde_json::json!({"title": "Post", "status": "draft"})),
-            make_file_with_path("blog/post2.md", serde_json::json!({"title": "Post2", "status": "published"})),
-            make_file_with_path("docs/readme.md", serde_json::json!({"title": "Docs", "version": "1.0"})),
+            make_file_with_path(
+                "blog/post1.md",
+                serde_json::json!({"title": "Post", "status": "draft"}),
+            ),
+            make_file_with_path(
+                "blog/post2.md",
+                serde_json::json!({"title": "Post2", "status": "published"}),
+            ),
+            make_file_with_path(
+                "docs/readme.md",
+                serde_json::json!({"title": "Docs", "version": "1.0"}),
+            ),
         ];
         let schema = Schema::infer_scoped(&files, "blog");
         assert_eq!(schema.fields.len(), 2); // status, title
@@ -991,9 +1409,10 @@ fields:
 
     #[test]
     fn infer_scoped_empty_prefix_returns_empty() {
-        let files = vec![
-            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
-        ];
+        let files = vec![make_file_with_path(
+            "blog/post.md",
+            serde_json::json!({"title": "Post"}),
+        )];
         // Empty prefix matches nothing since paths don't start with ""... actually they do
         let schema = Schema::infer_scoped(&files, "");
         assert_eq!(schema.fields.len(), 1);
@@ -1001,18 +1420,20 @@ fields:
 
     #[test]
     fn infer_scoped_no_matches() {
-        let files = vec![
-            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
-        ];
+        let files = vec![make_file_with_path(
+            "blog/post.md",
+            serde_json::json!({"title": "Post"}),
+        )];
         let schema = Schema::infer_scoped(&files, "docs");
         assert!(schema.fields.is_empty());
     }
 
     #[test]
     fn infer_scoped_with_trailing_slash() {
-        let files = vec![
-            make_file_with_path("blog/post.md", serde_json::json!({"title": "Post"})),
-        ];
+        let files = vec![make_file_with_path(
+            "blog/post.md",
+            serde_json::json!({"title": "Post"}),
+        )];
         let schema = Schema::infer_scoped(&files, "blog/");
         assert_eq!(schema.fields.len(), 1);
     }
@@ -1124,6 +1545,8 @@ fields:
                 allowed_values: None,
                 required: None,
                 target: Some("assets".to_string()),
+                formula: None,
+                result_type: None,
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1164,6 +1587,8 @@ fields:
                 allowed_values: None,
                 required: None,
                 target: Some("documents".to_string()),
+                formula: None,
+                result_type: None,
             },
         );
 
@@ -1247,6 +1672,8 @@ fields:
                 allowed_values: None,
                 required: None,
                 target: Some("clients/".to_string()),
+                formula: None,
+                result_type: None,
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1269,6 +1696,8 @@ fields:
                 allowed_values: None,
                 required: None,
                 target: Some("clients".to_string()),
+                formula: None,
+                result_type: None,
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1288,6 +1717,8 @@ fields:
                 allowed_values: None,
                 required: None,
                 target: Some("clients".to_string()),
+                formula: None,
+                result_type: None,
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));

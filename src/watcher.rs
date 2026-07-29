@@ -15,8 +15,11 @@ use crate::embedding::provider::EmbeddingProvider;
 use crate::error::{Error, Result};
 use crate::fts::{FtsChunkData, FtsIndex};
 use crate::index::state::Index;
+use crate::modules::{ModuleEvent, ModuleReport, ModuleRunner};
 
 use serde::Serialize;
+
+const SCHEMA_OVERLAY_PATH: &str = ".markdownvdb.schema.yml";
 
 /// Type of watch event for reporting.
 #[derive(Debug, Clone, Serialize)]
@@ -42,6 +45,8 @@ pub struct WatchEventReport {
     pub success: bool,
     /// Error message, if processing failed.
     pub error: Option<String>,
+    /// Reports from always-on derived-data modules executed for this event.
+    pub module_reports: Vec<ModuleReport>,
 }
 
 /// Callback invoked after each watch event is processed.
@@ -58,6 +63,14 @@ pub enum FileEvent {
     Deleted(PathBuf),
     /// A markdown file was renamed from one path to another.
     Renamed { from: PathBuf, to: PathBuf },
+    /// The project schema overlay was created, changed, replaced, or removed.
+    SchemaChanged(PathBuf),
+}
+
+#[derive(Debug)]
+struct EventOutcome {
+    chunks_processed: usize,
+    module_reports: Vec<ModuleReport>,
 }
 
 /// Watches configured source directories for markdown file changes and
@@ -108,6 +121,7 @@ impl Watcher {
 
         // Build a FileDiscovery for the sync callback thread.
         let cb_discovery = FileDiscovery::new(&self.project_root, &self.config);
+        let cb_source_dirs = self.config.source_dirs.clone();
 
         let mut debouncer = new_debouncer(
             debounce_duration,
@@ -124,9 +138,16 @@ impl Watcher {
                 };
 
                 for event in events {
-                    let file_events =
-                        classify_event(&event.event.kind, &event.paths, &project_root, &cb_discovery);
-                    for fe in file_events {
+                    let file_events = classify_event(
+                        &event.event.kind,
+                        &event.paths,
+                        &project_root,
+                        &cb_discovery,
+                    );
+                    for fe in file_events
+                        .into_iter()
+                        .filter(|event| event_is_in_sources(event, &cb_source_dirs))
+                    {
                         if tx.send(fe).is_err() {
                             debug!("watcher channel closed, stopping event forwarding");
                             return;
@@ -137,19 +158,40 @@ impl Watcher {
         )
         .map_err(|e| Error::Watch(format!("failed to create debouncer: {e}")))?;
 
-        // Watch each configured source directory.
+        // Watch each configured source directory. Track whether the project
+        // root itself is already covered recursively so we can watch the
+        // root-level schema overlay without registering a duplicate watch.
+        let mut project_root_watched_recursively = false;
+        let canonical_project_root = self.project_root.canonicalize().ok();
         for source_dir in &self.config.source_dirs {
             let abs_dir = self.project_root.join(source_dir);
             if !abs_dir.is_dir() {
                 debug!("skipping non-existent source dir: {}", abs_dir.display());
                 continue;
             }
+            project_root_watched_recursively |= abs_dir
+                .canonicalize()
+                .ok()
+                .is_some_and(|path| canonical_project_root.as_ref() == Some(&path));
             debouncer
                 .watch(&abs_dir, RecursiveMode::Recursive)
-                .map_err(|e| {
-                    Error::Watch(format!("failed to watch {}: {e}", abs_dir.display()))
-                })?;
+                .map_err(|e| Error::Watch(format!("failed to watch {}: {e}", abs_dir.display())))?;
             info!("watching directory: {}", abs_dir.display());
+        }
+
+        if !project_root_watched_recursively {
+            debouncer
+                .watch(&self.project_root, RecursiveMode::NonRecursive)
+                .map_err(|e| {
+                    Error::Watch(format!(
+                        "failed to watch schema overlay in {}: {e}",
+                        self.project_root.display()
+                    ))
+                })?;
+            info!(
+                "watching schema overlay directory: {}",
+                self.project_root.display()
+            );
         }
 
         info!(
@@ -182,15 +224,25 @@ impl Watcher {
             FileEvent::Created(p) => (WatchEventType::Created, crate::path_util::to_slash(p)),
             FileEvent::Modified(p) => (WatchEventType::Modified, crate::path_util::to_slash(p)),
             FileEvent::Deleted(p) => (WatchEventType::Deleted, crate::path_util::to_slash(p)),
-            FileEvent::Renamed { to, .. } => (WatchEventType::Renamed, crate::path_util::to_slash(to)),
+            FileEvent::Renamed { to, .. } => {
+                (WatchEventType::Renamed, crate::path_util::to_slash(to))
+            }
+            FileEvent::SchemaChanged(p) => {
+                (WatchEventType::Modified, crate::path_util::to_slash(p))
+            }
         };
 
         let result = self.handle_event_inner(event).await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        let (success, error, chunks_processed) = match &result {
-            Ok(chunks) => (true, None, *chunks),
-            Err(e) => (false, Some(e.to_string()), 0),
+        let (success, error, chunks_processed, module_reports) = match &result {
+            Ok(outcome) => (
+                true,
+                None,
+                outcome.chunks_processed,
+                outcome.module_reports.clone(),
+            ),
+            Err(e) => (false, Some(e.to_string()), 0, Vec::new()),
         };
 
         if let Some(ref cb) = self.event_callback {
@@ -201,54 +253,127 @@ impl Watcher {
                 duration_ms,
                 success,
                 error,
+                module_reports,
             });
         }
 
         result.map(|_| ())
     }
 
-    /// Inner implementation of event handling, returns chunk count on success.
-    async fn handle_event_inner(&self, event: &FileEvent) -> Result<usize> {
+    /// Inner implementation of event handling.
+    async fn handle_event_inner(&self, event: &FileEvent) -> Result<EventOutcome> {
         match event {
             FileEvent::Created(path) | FileEvent::Modified(path) => {
                 debug!(path = %path.display(), "processing created/modified event");
-                self.process_file(path).await
+                let relative = crate::path_util::to_slash(path);
+                let module_event = ModuleEvent::FilesChanged {
+                    upserted: vec![relative],
+                    removed: Vec::new(),
+                    renamed: Vec::new(),
+                };
+                self.process_file(path, module_event).await
             }
             FileEvent::Deleted(path) => {
                 let relative = crate::path_util::to_slash(path);
+
+                // Atomic replace writes may surface as a removal of the old
+                // inode followed by a create/rename for the same path. By the
+                // time the debounced event is handled the final file already
+                // exists, so reconcile it as an upsert instead of briefly
+                // deleting its vectors (and potentially re-embedding it on the
+                // following create event).
+                if self.project_root.join(path).is_file() {
+                    debug!(path = %relative, "delete event target still exists, reconciling replacement");
+                    return self
+                        .process_file(
+                            path,
+                            ModuleEvent::FilesChanged {
+                                upserted: vec![relative],
+                                removed: Vec::new(),
+                                renamed: Vec::new(),
+                            },
+                        )
+                        .await;
+                }
+
                 info!(path = %relative, "removing deleted file from index");
                 self.index.remove_file(&relative)?;
 
                 // Update link graph: remove links from deleted file.
-                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0, semantic_edges: None, edge_cluster_state: None });
+                let mut graph =
+                    self.index
+                        .get_link_graph()
+                        .unwrap_or_else(|| crate::links::LinkGraph {
+                            forward: std::collections::HashMap::new(),
+                            last_updated: 0,
+                            semantic_edges: None,
+                            edge_cluster_state: None,
+                        });
                 crate::links::remove_file_links(&mut graph, &relative);
                 self.index.update_link_graph(Some(graph));
 
                 self.remove_from_clusters(&relative);
                 self.fts_index.remove_file(&relative)?;
+                self.refresh_schemas();
+                let module_reports = self.run_modules(&ModuleEvent::FilesChanged {
+                    upserted: Vec::new(),
+                    removed: vec![relative],
+                    renamed: Vec::new(),
+                });
                 self.fts_index.commit()?;
                 self.index.save()?;
-                Ok(0)
+                Ok(EventOutcome {
+                    chunks_processed: 0,
+                    module_reports,
+                })
             }
             FileEvent::Renamed { from, to } => {
                 let from_str = crate::path_util::to_slash(from);
+                let to_str = crate::path_util::to_slash(to);
                 debug!(from = %from_str, to = %to.display(), "processing rename event");
                 self.index.remove_file(&from_str)?;
 
                 // Remove old path links from graph before processing new path.
-                let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0, semantic_edges: None, edge_cluster_state: None });
+                let mut graph =
+                    self.index
+                        .get_link_graph()
+                        .unwrap_or_else(|| crate::links::LinkGraph {
+                            forward: std::collections::HashMap::new(),
+                            last_updated: 0,
+                            semantic_edges: None,
+                            edge_cluster_state: None,
+                        });
                 crate::links::remove_file_links(&mut graph, &from_str);
                 self.index.update_link_graph(Some(graph));
 
                 self.remove_from_clusters(&from_str);
                 self.fts_index.remove_file(&from_str)?;
-                self.process_file(to).await
+                let module_event = ModuleEvent::FilesChanged {
+                    upserted: vec![to_str.clone()],
+                    removed: vec![from_str.clone()],
+                    renamed: vec![(from_str, to_str)],
+                };
+                self.process_file(to, module_event).await
+            }
+            FileEvent::SchemaChanged(path) => {
+                debug!(path = %path.display(), "processing schema overlay event");
+                self.refresh_schemas();
+                let module_reports = self.run_modules(&ModuleEvent::SchemaChanged);
+                self.index.save()?;
+                Ok(EventOutcome {
+                    chunks_processed: 0,
+                    module_reports,
+                })
             }
         }
     }
 
     /// Parse, chunk, embed, and upsert a single file. Returns the number of chunks processed.
-    async fn process_file(&self, relative_path: &Path) -> Result<usize> {
+    async fn process_file(
+        &self,
+        relative_path: &Path,
+        module_event: ModuleEvent,
+    ) -> Result<EventOutcome> {
         let abs_path = self.project_root.join(relative_path);
 
         // If the file no longer exists (deleted between event and processing, or the
@@ -259,40 +384,78 @@ impl Watcher {
             self.index.remove_file(&relative)?;
             self.remove_from_clusters(&relative);
             self.fts_index.remove_file(&relative)?;
+            self.refresh_schemas();
+            let module_reports = self.run_modules(&ModuleEvent::FilesChanged {
+                upserted: Vec::new(),
+                removed: vec![relative],
+                renamed: Vec::new(),
+            });
             self.fts_index.commit()?;
             self.index.save()?;
-            return Ok(0);
+            return Ok(EventOutcome {
+                chunks_processed: 0,
+                module_reports,
+            });
         }
 
-        // Check content hash to skip unchanged files.
-        let stored_hash = self
-            .index
-            .get_file(&crate::path_util::to_slash(relative_path))
-            .map(|f| f.content_hash.clone());
-
+        let relative = crate::path_util::to_slash(relative_path);
+        let stored_file = self.index.get_file(&relative);
         let file = crate::parser::parse_markdown_file(&self.project_root, relative_path)?;
+        let body_hash = crate::parser::compute_content_hash(&file.body);
 
-        if let Some(ref hash) = stored_hash {
-            if hash == &file.content_hash {
-                debug!(path = %relative_path.display(), "content unchanged, skipping");
-                return Ok(0);
+        if let Some(stored) = stored_file.as_ref() {
+            let source_unchanged = stored.content_hash == file.content_hash;
+            let embedding_unchanged = stored.embedding_body_hash == body_hash;
+
+            // Formula writeback synchronizes the final source hash before its
+            // own filesystem event can be processed. Treat that echo (and any
+            // duplicate notify event) as a true no-op: running hooks or saving
+            // here could produce another write and turn the echo into a loop.
+            if source_unchanged && embedding_unchanged {
+                debug!(path = %relative_path.display(), "source and embedding body unchanged, skipping");
+                return Ok(EventOutcome {
+                    chunks_processed: 0,
+                    module_reports: Vec::new(),
+                });
+            }
+
+            // Frontmatter is source data, but it is not part of any document
+            // or edge embedding input. Refresh raw metadata and derived state
+            // without touching the provider, vectors, FTS, or clusters.
+            if embedding_unchanged {
+                debug!(path = %relative_path.display(), "frontmatter-only change, refreshing metadata");
+                self.index.refresh_source_metadata(&file)?;
+                self.update_file_links(&file);
+                self.refresh_schemas();
+                let module_reports = self.run_modules(&module_event);
+                self.index.save()?;
+                return Ok(EventOutcome {
+                    chunks_processed: 0,
+                    module_reports,
+                });
             }
         }
 
-        let chunks = crate::chunker::chunk_document(
-            &file,
-            self.config.chunk_max_tokens,
-            self.config.chunk_overlap_tokens,
-        )?;
+        let chunks = if file.body.trim().is_empty() {
+            Vec::new()
+        } else {
+            crate::chunker::chunk_document(
+                &file,
+                self.config.chunk_max_tokens,
+                self.config.chunk_overlap_tokens,
+            )?
+        };
 
-        if chunks.is_empty() {
-            debug!(path = %relative_path.display(), "no chunks produced, skipping");
-            return Ok(0);
-        }
-
-        // Embed all chunk texts.
-        let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-        let embeddings = self.provider.embed_batch(&texts).await?;
+        // Empty-body documents still carry frontmatter and may participate in
+        // formulas. Upsert them with zero chunks, without making an empty
+        // provider request.
+        let embeddings = if chunks.is_empty() {
+            debug!(path = %relative_path.display(), "document body produced no chunks");
+            Vec::new()
+        } else {
+            let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+            self.provider.embed_batch(&texts).await?
+        };
 
         // Upsert vector index and FTS index.
         self.index.upsert(&file, &chunks, &embeddings)?;
@@ -300,16 +463,7 @@ impl Watcher {
         // Update link graph with body links + frontmatter relations from this
         // file. Always runs (not gated on the file having links) so removing a
         // file's last link also removes its stale graph entries.
-        {
-            let overlay = crate::schema::Schema::load_overlay(&self.project_root).unwrap_or(None);
-            let relation_ctx = crate::relations::RelationContext::new(
-                self.index.get_file_hashes().keys().cloned().collect(),
-                overlay,
-            );
-            let mut graph = self.index.get_link_graph().unwrap_or_else(|| crate::links::LinkGraph { forward: std::collections::HashMap::new(), last_updated: 0, semantic_edges: None, edge_cluster_state: None });
-            crate::links::update_file_links(&mut graph, &file, &relation_ctx);
-            self.index.update_link_graph(Some(graph));
-        }
+        self.update_file_links(&file);
 
         let fts_chunks: Vec<FtsChunkData> = chunks
             .iter()
@@ -323,29 +477,15 @@ impl Watcher {
         let path_str_fts = crate::path_util::to_slash(relative_path);
         self.fts_index.upsert_chunks(&path_str_fts, &fts_chunks)?;
 
-        // Update schema inference with the new/changed file's frontmatter.
-        if file.frontmatter.is_some() {
-            let schema = crate::schema::Schema::infer(&[file]);
-            let overlay_schema = crate::schema::Schema::load_overlay(&self.project_root)
-                .unwrap_or(None);
-            let overlay = overlay_schema
-                .as_ref()
-                .map(|o| crate::schema::Schema::resolve_overlay_for_path(o, None));
-            let merged = if let Some(existing) = self.index.get_schema() {
-                // Merge new schema fields into existing schema.
-                let combined = crate::schema::Schema::merge(existing, None);
-                // Re-infer to include all frontmatter from the index is not
-                // practical here, so we merge the new inferences into existing.
-                crate::schema::Schema::merge(combined, overlay)
-            } else {
-                crate::schema::Schema::merge(schema, overlay)
-            };
-            self.index.set_schema(Some(merged));
-        }
+        // Rebuild raw global/scoped schema metadata without embedding. This
+        // keeps occurrence counts correct and ensures a first file in a new
+        // scope has a scoped schema before formula hooks refresh their stats.
+        self.refresh_schemas();
 
         // Keep cluster and topic membership live under watch mode.
         self.update_clusters_for_file(&path_str_fts);
 
+        let module_reports = self.run_modules(&module_event);
         self.fts_index.commit()?;
         self.index.save()?;
         let chunk_count = chunks.len();
@@ -355,7 +495,91 @@ impl Watcher {
             "indexed file"
         );
 
-        Ok(chunk_count)
+        Ok(EventOutcome {
+            chunks_processed: chunk_count,
+            module_reports,
+        })
+    }
+
+    fn run_modules(&self, event: &ModuleEvent) -> Vec<ModuleReport> {
+        ModuleRunner::builtins().run(&self.project_root, self.index.as_ref(), event)
+    }
+
+    fn update_file_links(&self, file: &crate::parser::MarkdownFile) {
+        let overlay = crate::schema::Schema::load_overlay(&self.project_root).unwrap_or(None);
+        let relation_ctx = crate::relations::RelationContext::new(
+            self.index.get_file_hashes().keys().cloned().collect(),
+            overlay,
+        );
+        let mut graph = self
+            .index
+            .get_link_graph()
+            .unwrap_or_else(|| crate::links::LinkGraph {
+                forward: std::collections::HashMap::new(),
+                last_updated: 0,
+                semantic_edges: None,
+                edge_cluster_state: None,
+            });
+        crate::links::update_file_links(&mut graph, file, &relation_ctx);
+        self.index.update_link_graph(Some(graph));
+    }
+
+    /// Rebuild global and scoped schema metadata from indexed Markdown without
+    /// embedding or otherwise mutating source-derived index content.
+    ///
+    /// A malformed overlay is intentionally treated as absent here. The
+    /// formula module receives the same `SchemaChanged` event immediately
+    /// afterwards and owns clearing cached formula values plus persisting the
+    /// parse diagnostic.
+    fn refresh_schemas(&self) {
+        let mut paths: Vec<String> = self.index.get_file_hashes().into_keys().collect();
+        paths.sort();
+
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            match crate::parser::parse_markdown_file(&self.project_root, Path::new(&path)) {
+                Ok(file) => files.push(file),
+                Err(error) => {
+                    warn!(path = %path, error = %error, "skipping file during schema refresh");
+                }
+            }
+        }
+
+        let overlay = match crate::schema::Schema::load_overlay(&self.project_root) {
+            Ok(overlay) => overlay,
+            Err(error) => {
+                warn!(error = %error, "schema overlay is malformed; clearing overlay schema metadata");
+                None
+            }
+        };
+
+        let inferred = crate::schema::Schema::infer(&files);
+        let global_overlay = overlay.as_ref().map(|schema| schema.fields.clone());
+        self.index
+            .set_schema(Some(crate::schema::Schema::merge(inferred, global_overlay)));
+
+        let mut scopes = std::collections::BTreeSet::new();
+        scopes.extend(crate::schema::Schema::discover_scopes(&files));
+        if let Some(overlay) = &overlay {
+            scopes.extend(overlay.scopes.keys().cloned());
+        }
+
+        let scoped_schemas: Vec<_> = scopes
+            .into_iter()
+            .map(|scope| {
+                let inferred = crate::schema::Schema::infer_scoped(&files, &scope);
+                let overlay_fields = overlay
+                    .as_ref()
+                    .and_then(|schema| schema.scopes.get(&scope))
+                    .map(|scope| scope.fields.clone());
+                crate::schema::ScopedSchema {
+                    scope,
+                    schema: crate::schema::Schema::merge(inferred, overlay_fields),
+                }
+            })
+            .collect();
+        self.index
+            .set_scoped_schemas((!scoped_schemas.is_empty()).then_some(scoped_schemas));
     }
 
     /// Incrementally assign a new/changed document to the auto clusters and
@@ -437,6 +661,29 @@ impl Watcher {
     }
 }
 
+fn event_is_in_sources(event: &FileEvent, source_dirs: &[PathBuf]) -> bool {
+    if matches!(event, FileEvent::SchemaChanged(_)) {
+        return true;
+    }
+
+    let path = match event {
+        FileEvent::Created(path) | FileEvent::Modified(path) | FileEvent::Deleted(path) => path,
+        FileEvent::Renamed { to, .. } => to,
+        FileEvent::SchemaChanged(_) => return true,
+    };
+
+    source_dirs.iter().any(|source| {
+        let normalized: PathBuf = source
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::CurDir => None,
+                other => Some(other.as_os_str()),
+            })
+            .collect();
+        normalized.as_os_str().is_empty() || path.starts_with(normalized)
+    })
+}
+
 /// Classify a notify event into zero or more `FileEvent` values.
 fn classify_event(
     kind: &EventKind,
@@ -445,6 +692,11 @@ fn classify_event(
     discovery: &FileDiscovery,
 ) -> Vec<FileEvent> {
     let mut result = Vec::new();
+
+    let schema_relative = |abs: &Path| -> Option<PathBuf> {
+        let rel = abs.strip_prefix(project_root).ok()?;
+        (rel == Path::new(SCHEMA_OVERLAY_PATH)).then(|| rel.to_path_buf())
+    };
 
     let to_relative = |abs: &Path| -> Option<PathBuf> {
         let rel = abs.strip_prefix(project_root).ok()?;
@@ -458,7 +710,9 @@ fn classify_event(
     match kind {
         EventKind::Create(CreateKind::File) | EventKind::Create(CreateKind::Any) => {
             for path in paths {
-                if let Some(rel) = to_relative(path) {
+                if let Some(rel) = schema_relative(path) {
+                    result.push(FileEvent::SchemaChanged(rel));
+                } else if let Some(rel) = to_relative(path) {
                     result.push(FileEvent::Created(rel));
                 }
             }
@@ -467,14 +721,25 @@ fn classify_event(
         | EventKind::Modify(ModifyKind::Any)
         | EventKind::Modify(ModifyKind::Other) => {
             for path in paths {
-                if let Some(rel) = to_relative(path) {
+                if let Some(rel) = schema_relative(path) {
+                    result.push(FileEvent::SchemaChanged(rel));
+                } else if let Some(rel) = to_relative(path) {
                     result.push(FileEvent::Modified(rel));
                 }
             }
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
             if paths.len() >= 2 {
-                let from_rel = paths[0].strip_prefix(project_root).ok().map(Path::to_path_buf);
+                let from_schema = schema_relative(&paths[0]);
+                let to_schema = schema_relative(&paths[1]);
+                if let Some(schema_path) = to_schema.or(from_schema) {
+                    result.push(FileEvent::SchemaChanged(schema_path));
+                    return result;
+                }
+                let from_rel = paths[0]
+                    .strip_prefix(project_root)
+                    .ok()
+                    .map(Path::to_path_buf);
                 let to_rel = to_relative(&paths[1]);
                 match (from_rel, to_rel) {
                     (Some(from), Some(to)) => {
@@ -499,7 +764,9 @@ fn classify_event(
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
             for path in paths {
-                if let Ok(rel) = path.strip_prefix(project_root) {
+                if let Some(rel) = schema_relative(path) {
+                    result.push(FileEvent::SchemaChanged(rel));
+                } else if let Ok(rel) = path.strip_prefix(project_root) {
                     if rel.extension().and_then(|e| e.to_str()) == Some("md") {
                         result.push(FileEvent::Deleted(rel.to_path_buf()));
                     }
@@ -508,14 +775,29 @@ fn classify_event(
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
             for path in paths {
-                if let Some(rel) = to_relative(path) {
+                if let Some(rel) = schema_relative(path) {
+                    result.push(FileEvent::SchemaChanged(rel));
+                } else if let Some(rel) = to_relative(path) {
                     result.push(FileEvent::Created(rel));
+                }
+            }
+        }
+        EventKind::Modify(ModifyKind::Name(_)) => {
+            // Some backends cannot provide paired rename details. A schema
+            // overlay path is still enough to trigger a safe full formula
+            // recomputation; retain the existing ignore behavior for other
+            // ambiguous rename events.
+            for path in paths {
+                if let Some(rel) = schema_relative(path) {
+                    result.push(FileEvent::SchemaChanged(rel));
                 }
             }
         }
         EventKind::Remove(RemoveKind::File) | EventKind::Remove(RemoveKind::Any) => {
             for path in paths {
-                if let Ok(rel) = path.strip_prefix(project_root) {
+                if let Some(rel) = schema_relative(path) {
+                    result.push(FileEvent::SchemaChanged(rel));
+                } else if let Ok(rel) = path.strip_prefix(project_root) {
                     if rel.extension().and_then(|e| e.to_str()) == Some("md") {
                         result.push(FileEvent::Deleted(rel.to_path_buf()));
                     }
@@ -590,9 +872,7 @@ mod tests {
             &discovery,
         );
         assert_eq!(events.len(), 1);
-        assert!(
-            matches!(&events[0], FileEvent::Created(p) if p == Path::new("docs/hello.md"))
-        );
+        assert!(matches!(&events[0], FileEvent::Created(p) if p == Path::new("docs/hello.md")));
     }
 
     #[test]
@@ -606,6 +886,65 @@ mod tests {
             &discovery,
         );
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn root_schema_watch_does_not_expand_markdown_sources() {
+        let sources = vec![PathBuf::from("docs")];
+        assert!(event_is_in_sources(
+            &FileEvent::Modified(PathBuf::from("docs/note.md")),
+            &sources
+        ));
+        assert!(!event_is_in_sources(
+            &FileEvent::Modified(PathBuf::from("root-note.md")),
+            &sources
+        ));
+        assert!(event_is_in_sources(
+            &FileEvent::SchemaChanged(PathBuf::from(SCHEMA_OVERLAY_PATH)),
+            &sources
+        ));
+    }
+
+    #[test]
+    fn classify_schema_overlay_create_modify_and_delete() {
+        let discovery = test_discovery();
+        let root = Path::new("/tmp/test");
+        let schema = root.join(SCHEMA_OVERLAY_PATH);
+
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            let events = classify_event(&kind, std::slice::from_ref(&schema), root, &discovery);
+            assert_eq!(events.len(), 1, "event kind {kind:?}");
+            assert!(matches!(
+                &events[0],
+                FileEvent::SchemaChanged(path)
+                    if path == Path::new(SCHEMA_OVERLAY_PATH)
+            ));
+        }
+    }
+
+    #[test]
+    fn classify_atomic_schema_overlay_replacement() {
+        let discovery = test_discovery();
+        let root = Path::new("/tmp/test");
+        let events = classify_event(
+            &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &[
+                root.join(".markdownvdb.schema.yml.tmp"),
+                root.join(SCHEMA_OVERLAY_PATH),
+            ],
+            root,
+            &discovery,
+        );
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            FileEvent::SchemaChanged(path)
+                if path == Path::new(SCHEMA_OVERLAY_PATH)
+        ));
     }
 
     #[test]

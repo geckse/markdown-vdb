@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mdvdb::config::{Config, EmbeddingProviderType};
@@ -54,17 +54,23 @@ fn test_config(source_dir: &str) -> Config {
         search_expand_limit: 3,
         vector_quantization: mdvdb::VectorQuantization::F16,
         index_compression: true,
-            edge_embeddings: true,
-            edge_boost_weight: 0.15,
-            edge_cluster_rebalance: 50,
-            custom_cluster_defs: Vec::new(),
+        edge_embeddings: true,
+        edge_boost_weight: 0.15,
+        edge_cluster_rebalance: 50,
+        custom_cluster_defs: Vec::new(),
     }
 }
 
 /// Create a temp directory under the current working directory so that macOS
 /// FSEvents can reliably deliver file-system notifications. Temp dirs under
 /// /private/tmp are problematic in sandboxed environments.
-fn setup() -> (TempDir, PathBuf, Arc<Index>, Arc<FtsIndex>, Arc<dyn EmbeddingProvider>) {
+fn setup() -> (
+    TempDir,
+    PathBuf,
+    Arc<Index>,
+    Arc<FtsIndex>,
+    Arc<dyn EmbeddingProvider>,
+) {
     let dir = TempDir::new_in(".").unwrap();
     let project_root = dir.path().canonicalize().unwrap();
 
@@ -79,7 +85,8 @@ fn setup() -> (TempDir, PathBuf, Arc<Index>, Arc<FtsIndex>, Arc<dyn EmbeddingPro
         dimensions: 8,
     };
     let index = Arc::new(Index::create(&index_path, &embedding_config).unwrap());
-    let fts_index = Arc::new(FtsIndex::open_or_create(&project_root.join(".markdownvdb").join("fts")).unwrap());
+    let fts_index =
+        Arc::new(FtsIndex::open_or_create(&project_root.join(".markdownvdb").join("fts")).unwrap());
     let provider: Arc<dyn EmbeddingProvider> = Arc::new(MockProvider::new(8));
 
     (dir, project_root, index, fts_index, provider)
@@ -113,13 +120,18 @@ async fn watcher_detects_new_file() {
     let config = test_config("docs");
     let cancel = CancellationToken::new();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider, None);
+    let watcher = Watcher::new(
+        config,
+        &project_root,
+        index.clone(),
+        fts_index,
+        provider,
+        None,
+    );
 
     let cancel_clone = cancel.clone();
     let root_clone = project_root.clone();
-    let watch_handle = tokio::spawn(async move {
-        watcher.watch(cancel_clone).await
-    });
+    let watch_handle = tokio::spawn(async move { watcher.watch(cancel_clone).await });
 
     // Give the watcher time to start.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -129,12 +141,12 @@ async fn watcher_detects_new_file() {
     fs::write(&new_file, "# New File\n\nSome content here.").unwrap();
 
     let idx = index.clone();
-    let detected = wait_for_condition(
-        move || idx.status().document_count == 1,
-        10_000,
-    ).await;
+    let detected = wait_for_condition(move || idx.status().document_count == 1, 10_000).await;
     assert!(detected, "watcher should have indexed the new file");
-    assert!(index.status().chunk_count > 0, "should have at least one chunk");
+    assert!(
+        index.status().chunk_count > 0,
+        "should have at least one chunk"
+    );
 
     cancel.cancel();
     let result = watch_handle.await.unwrap();
@@ -152,25 +164,34 @@ async fn watcher_detects_modification() {
     let file_path = project_root.join("docs/existing.md");
     fs::write(&file_path, "# Original\n\nOriginal content.").unwrap();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider, None);
+    let watcher = Watcher::new(
+        config,
+        &project_root,
+        index.clone(),
+        fts_index,
+        provider,
+        None,
+    );
 
     let cancel_clone = cancel.clone();
-    let watch_handle = tokio::spawn(async move {
-        watcher.watch(cancel_clone).await
-    });
+    let watch_handle = tokio::spawn(async move { watcher.watch(cancel_clone).await });
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Modify the file with different content.
-    fs::write(&file_path, "# Updated\n\nUpdated content with more text.\n\n## Section 2\n\nAnother section.").unwrap();
+    fs::write(
+        &file_path,
+        "# Updated\n\nUpdated content with more text.\n\n## Section 2\n\nAnother section.",
+    )
+    .unwrap();
 
     let idx = index.clone();
-    let detected = wait_for_condition(
-        move || idx.status().document_count == 1,
-        10_000,
-    ).await;
+    let detected = wait_for_condition(move || idx.status().document_count == 1, 10_000).await;
     assert!(detected, "should have one document after modification");
-    assert!(index.status().chunk_count > 0, "should have chunks after modification");
+    assert!(
+        index.status().chunk_count > 0,
+        "should have chunks after modification"
+    );
 
     cancel.cancel();
     let result = watch_handle.await.unwrap();
@@ -189,12 +210,17 @@ async fn watcher_detects_deletion() {
     let file_path = project_root.join("docs/to_delete.md");
     fs::write(&file_path, "# To Delete\n\nThis will be deleted.").unwrap();
 
-    let watcher = Watcher::new(config, &project_root, index.clone(), fts_index, provider, None);
+    let watcher = Watcher::new(
+        config,
+        &project_root,
+        index.clone(),
+        fts_index,
+        provider,
+        None,
+    );
 
     let cancel_clone = cancel.clone();
-    let watch_handle = tokio::spawn(async move {
-        watcher.watch(cancel_clone).await
-    });
+    let watch_handle = tokio::spawn(async move { watcher.watch(cancel_clone).await });
 
     // Wait for watcher to start and pick up the initial Create event from
     // the file that existed before watching started. On macOS, FSEvents may
@@ -202,13 +228,14 @@ async fn watcher_detects_deletion() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Ensure the file is indexed by triggering a content change.
-    fs::write(&file_path, "# To Delete\n\nModified content to trigger re-index.").unwrap();
+    fs::write(
+        &file_path,
+        "# To Delete\n\nModified content to trigger re-index.",
+    )
+    .unwrap();
 
     let idx = index.clone();
-    let indexed = wait_for_condition(
-        move || idx.status().document_count == 1,
-        10_000,
-    ).await;
+    let indexed = wait_for_condition(move || idx.status().document_count == 1, 10_000).await;
     assert!(indexed, "file should be indexed before deletion");
 
     // Wait for any in-flight events to settle before deleting.
@@ -218,11 +245,11 @@ async fn watcher_detects_deletion() {
     fs::remove_file(&file_path).unwrap();
 
     let idx2 = index.clone();
-    let deleted = wait_for_condition(
-        move || idx2.status().document_count == 0,
-        10_000,
-    ).await;
-    assert!(deleted, "watcher should have removed deleted file from index");
+    let deleted = wait_for_condition(move || idx2.status().document_count == 0, 10_000).await;
+    assert!(
+        deleted,
+        "watcher should have removed deleted file from index"
+    );
     assert_eq!(index.status().chunk_count, 0, "no chunks should remain");
 
     cancel.cancel();
@@ -239,9 +266,7 @@ async fn watcher_graceful_shutdown_via_cancellation_token() {
     let watcher = Watcher::new(config, &project_root, index, fts_index, provider, None);
 
     let cancel_clone = cancel.clone();
-    let watch_handle = tokio::spawn(async move {
-        watcher.watch(cancel_clone).await
-    });
+    let watch_handle = tokio::spawn(async move { watcher.watch(cancel_clone).await });
 
     // Let the watcher start up.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -254,7 +279,569 @@ async fn watcher_graceful_shutdown_via_cancellation_token() {
         .expect("watcher should shut down within 5 seconds")
         .expect("task should not panic");
 
-    assert!(result.is_ok(), "watcher should return Ok on graceful shutdown");
+    assert!(
+        result.is_ok(),
+        "watcher should return Ok on graceful shutdown"
+    );
+}
+
+#[tokio::test]
+async fn unchanged_source_event_is_a_true_no_op() {
+    let (_dir, project_root, index, fts_index, _provider) = setup();
+    let mock = Arc::new(MockProvider::new(8));
+    let provider: Arc<dyn EmbeddingProvider> = mock.clone();
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let callback = Box::new(move |report: &mdvdb::WatchEventReport| {
+        callback_reports.lock().unwrap().push(report.clone());
+    });
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        Some(callback),
+    );
+    let relative = PathBuf::from("docs/unchanged.md");
+
+    fs::write(
+        project_root.join(&relative),
+        "---\nstatus: open\n---\n# Unchanged\n\nBody text.\n",
+    )
+    .unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(relative.clone()))
+        .await
+        .unwrap();
+    assert_eq!(mock.call_count(), 1);
+
+    watcher
+        .handle_event(&FileEvent::Modified(relative))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "an exact watcher echo must not call the embedding provider"
+    );
+    let reports = reports.lock().unwrap();
+    let echo = reports.last().expect("echo callback report");
+    assert_eq!(echo.chunks_processed, 0);
+    assert!(
+        echo.module_reports.is_empty(),
+        "an exact watcher echo must not rerun modules"
+    );
+}
+
+#[tokio::test]
+async fn delete_event_for_existing_target_reconciles_atomic_replacement() {
+    let (_dir, project_root, index, fts_index, _provider) = setup();
+    let mock = Arc::new(MockProvider::new(8));
+    let provider: Arc<dyn EmbeddingProvider> = mock.clone();
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        None,
+    );
+    let relative = PathBuf::from("docs/replaced.md");
+
+    fs::write(
+        project_root.join(&relative),
+        "---\nstatus: open\n---\n# Replaced\n\nStable body.\n",
+    )
+    .unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(relative.clone()))
+        .await
+        .unwrap();
+    assert_eq!(mock.call_count(), 1);
+
+    // Simulate the remove half of an atomic replacement. The final target is
+    // already present when the debounced event reaches the watcher.
+    watcher
+        .handle_event(&FileEvent::Deleted(relative))
+        .await
+        .unwrap();
+
+    assert!(
+        index.get_file("docs/replaced.md").is_some(),
+        "an atomic replacement event must not remove the live target"
+    );
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "reconciling an unchanged replacement must not re-embed"
+    );
+}
+
+#[tokio::test]
+async fn frontmatter_only_change_refreshes_metadata_without_embedding() {
+    let (_dir, project_root, index, fts_index, _provider) = setup();
+    let mock = Arc::new(MockProvider::new(8));
+    let provider: Arc<dyn EmbeddingProvider> = mock.clone();
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        None,
+    );
+    let relative = PathBuf::from("docs/metadata.md");
+    let absolute = project_root.join(&relative);
+
+    fs::write(
+        &absolute,
+        "---\nstatus: open\n---\n# Metadata\n\nBody text stays identical.\n",
+    )
+    .unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(relative.clone()))
+        .await
+        .unwrap();
+    assert_eq!(mock.call_count(), 1);
+    let original = index.get_file("docs/metadata.md").unwrap();
+
+    fs::write(
+        &absolute,
+        "---\nstatus: closed\n---\n# Metadata\n\nBody text stays identical.\n",
+    )
+    .unwrap();
+    watcher
+        .handle_event(&FileEvent::Modified(relative.clone()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "frontmatter-only changes must reuse body embeddings"
+    );
+    let parsed = mdvdb::parser::parse_markdown_file(&project_root, &relative).unwrap();
+    let refreshed = index.get_file("docs/metadata.md").unwrap();
+    assert_eq!(refreshed.content_hash, parsed.content_hash);
+    assert_eq!(
+        refreshed.embedding_body_hash, original.embedding_body_hash,
+        "metadata refresh must retain the hash represented by stored vectors"
+    );
+    let frontmatter: serde_json::Value =
+        serde_json::from_str(refreshed.frontmatter.as_deref().unwrap()).unwrap();
+    assert_eq!(frontmatter["status"], "closed");
+}
+
+#[tokio::test]
+async fn matching_source_hash_does_not_hide_a_stale_body_embedding() {
+    let (_dir, project_root, index, fts_index, _provider) = setup();
+    let mock = Arc::new(MockProvider::new(8));
+    let provider: Arc<dyn EmbeddingProvider> = mock.clone();
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        None,
+    );
+    let relative = PathBuf::from("docs/stale-body.md");
+    let absolute = project_root.join(&relative);
+
+    fs::write(&absolute, "# Original\n\nOriginal body.\n").unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(relative.clone()))
+        .await
+        .unwrap();
+    assert_eq!(mock.call_count(), 1);
+
+    fs::write(&absolute, "# Changed\n\nA genuinely changed body.\n").unwrap();
+    let changed = mdvdb::parser::parse_markdown_file(&project_root, &relative).unwrap();
+    index.refresh_source_metadata(&changed).unwrap();
+    assert_eq!(
+        index.get_file("docs/stale-body.md").unwrap().content_hash,
+        changed.content_hash,
+        "simulate a metadata refresh performed before the watcher event"
+    );
+
+    watcher
+        .handle_event(&FileEvent::Modified(relative))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock.call_count(),
+        2,
+        "a stale embedding body must be rebuilt even when the full source hash matches"
+    );
+    let stored = index.get_file("docs/stale-body.md").unwrap();
+    assert_eq!(
+        stored.embedding_body_hash,
+        mdvdb::parser::compute_content_hash(&changed.body)
+    );
+}
+
+#[tokio::test]
+async fn empty_body_file_is_upserted_without_provider_call() {
+    let (_dir, project_root, index, fts_index, _provider) = setup();
+    let mock = Arc::new(MockProvider::new(8));
+    let provider: Arc<dyn EmbeddingProvider> = mock.clone();
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        None,
+    );
+    let relative = PathBuf::from("docs/frontmatter-only.md");
+
+    fs::write(project_root.join(&relative), "---\nprice: 10\n---\n").unwrap();
+    let parsed = mdvdb::parser::parse_markdown_file(&project_root, &relative).unwrap();
+    assert!(parsed.body.trim().is_empty());
+    watcher
+        .handle_event(&FileEvent::Created(relative))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock.call_count(),
+        0,
+        "an empty embedding batch must never reach the provider"
+    );
+    let stored = index
+        .get_file("docs/frontmatter-only.md")
+        .expect("frontmatter-only documents remain indexable");
+    assert!(stored.chunk_ids.is_empty());
+    let frontmatter: serde_json::Value =
+        serde_json::from_str(stored.frontmatter.as_deref().unwrap()).unwrap();
+    assert_eq!(frontmatter["price"], 10);
+}
+
+#[tokio::test]
+async fn watcher_delete_refreshes_raw_schema_counts() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        None,
+    );
+
+    for name in ["a.md", "b.md"] {
+        fs::write(
+            project_root.join("docs").join(name),
+            "---\nprice: 10\n---\n# Invoice\n",
+        )
+        .unwrap();
+        watcher
+            .handle_event(&FileEvent::Created(PathBuf::from(format!("docs/{name}"))))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        index
+            .get_scoped_schema("docs")
+            .unwrap()
+            .schema
+            .get_field("price")
+            .unwrap()
+            .occurrence_count,
+        2
+    );
+
+    fs::remove_file(project_root.join("docs/a.md")).unwrap();
+    watcher
+        .handle_event(&FileEvent::Deleted(PathBuf::from("docs/a.md")))
+        .await
+        .unwrap();
+    assert_eq!(
+        index
+            .get_scoped_schema("docs")
+            .unwrap()
+            .schema
+            .get_field("price")
+            .unwrap()
+            .occurrence_count,
+        1
+    );
+}
+
+#[tokio::test]
+async fn schema_change_recomputes_formulas_without_embedding() {
+    let (_dir, project_root, index, fts_index, _provider) = setup();
+    let config = test_config("docs");
+    let mock = Arc::new(MockProvider::new(8));
+    let provider: Arc<dyn EmbeddingProvider> = mock.clone();
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let callback = Box::new(move |report: &mdvdb::WatchEventReport| {
+        callback_reports.lock().unwrap().push(report.clone());
+    });
+    let watcher = Watcher::new(
+        config,
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        Some(callback),
+    );
+
+    fs::write(
+        project_root.join("docs/invoice.md"),
+        "---\nprice: 0.1\nquantity: 3\n---\n# Invoice\n",
+    )
+    .unwrap();
+    fs::write(
+        project_root.join(".markdownvdb.schema.yml"),
+        "scopes:\n  docs:\n    fields:\n      total:\n        field_type: formula\n        formula: price * quantity\n        result_type: number\n",
+    )
+    .unwrap();
+
+    watcher
+        .handle_event(&FileEvent::Created(PathBuf::from("docs/invoice.md")))
+        .await
+        .unwrap();
+    assert_eq!(mock.call_count(), 1);
+    let first = index
+        .get_computed_fields("docs/invoice.md")
+        .unwrap()
+        .remove("total")
+        .unwrap();
+    assert_eq!(
+        first
+            .value_json
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .unwrap(),
+        Some(serde_json::json!(0.3))
+    );
+    assert_eq!(
+        mdvdb::parser::parse_markdown_file(
+            &project_root,
+            &PathBuf::from("docs/invoice.md")
+        )
+        .unwrap()
+        .frontmatter
+        .unwrap()["total"],
+        serde_json::json!(0.3)
+    );
+
+    fs::write(
+        project_root.join(".markdownvdb.schema.yml"),
+        "scopes:\n  docs:\n    fields:\n      total:\n        field_type: formula\n        formula: price * quantity + 1\n        result_type: number\n",
+    )
+    .unwrap();
+    watcher
+        .handle_event(&FileEvent::SchemaChanged(PathBuf::from(
+            ".markdownvdb.schema.yml",
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "schema-only recomputation must not request embeddings"
+    );
+    let second = index
+        .get_computed_fields("docs/invoice.md")
+        .unwrap()
+        .remove("total")
+        .unwrap();
+    assert_eq!(
+        second
+            .value_json
+            .as_deref()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .transpose()
+            .unwrap(),
+        Some(serde_json::json!(1.3))
+    );
+    assert_eq!(
+        mdvdb::parser::parse_markdown_file(
+            &project_root,
+            &PathBuf::from("docs/invoice.md")
+        )
+        .unwrap()
+        .frontmatter
+        .unwrap()["total"],
+        serde_json::json!(1.3)
+    );
+
+    // Reconcile the filesystem event generated by the atomic Formula write.
+    // The final source hash was already committed, so this is a true no-op.
+    watcher
+        .handle_event(&FileEvent::Modified(PathBuf::from("docs/invoice.md")))
+        .await
+        .unwrap();
+    assert_eq!(mock.call_count(), 1);
+
+    let reports = reports.lock().unwrap();
+    let schema_report = reports
+        .iter()
+        .rev()
+        .find(|report| report.path == ".markdownvdb.schema.yml")
+        .expect("schema callback report");
+    assert_eq!(schema_report.chunks_processed, 0);
+    assert_eq!(schema_report.path, ".markdownvdb.schema.yml");
+    assert_eq!(schema_report.module_reports.len(), 1);
+    assert_eq!(schema_report.module_reports[0].module, "formula");
+    assert_eq!(schema_report.module_reports[0].event, "schema_changed");
+}
+
+#[tokio::test]
+async fn malformed_and_deleted_schema_clear_formula_cache_without_embedding() {
+    let (_dir, project_root, index, fts_index, _provider) = setup();
+    let config = test_config("docs");
+    let mock = Arc::new(MockProvider::new(8));
+    let provider: Arc<dyn EmbeddingProvider> = mock.clone();
+    let watcher = Watcher::new(
+        config,
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        None,
+    );
+    let schema_path = project_root.join(".markdownvdb.schema.yml");
+
+    fs::write(
+        project_root.join("docs/invoice.md"),
+        "---\nprice: 10\nquantity: 2\n---\n# Invoice\n",
+    )
+    .unwrap();
+    fs::write(
+        &schema_path,
+        "scopes:\n  docs:\n    fields:\n      total:\n        field_type: formula\n        formula: price * quantity\n        result_type: number\n",
+    )
+    .unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(PathBuf::from("docs/invoice.md")))
+        .await
+        .unwrap();
+    assert_eq!(mock.call_count(), 1);
+
+    fs::write(&schema_path, "scopes: [this is not a mapping\n").unwrap();
+    watcher
+        .handle_event(&FileEvent::SchemaChanged(PathBuf::from(
+            ".markdownvdb.schema.yml",
+        )))
+        .await
+        .unwrap();
+    let malformed = index
+        .get_computed_fields("docs/invoice.md")
+        .unwrap()
+        .remove("total")
+        .unwrap();
+    assert!(malformed.value_json.is_none());
+    assert_eq!(
+        malformed
+            .diagnostic
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("invalid_schema")
+    );
+    assert!(
+        !fs::read_to_string(project_root.join("docs/invoice.md"))
+            .unwrap()
+            .contains("total:"),
+        "a failed definition must remove its stale materialized value"
+    );
+
+    fs::remove_file(schema_path).unwrap();
+    watcher
+        .handle_event(&FileEvent::SchemaChanged(PathBuf::from(
+            ".markdownvdb.schema.yml",
+        )))
+        .await
+        .unwrap();
+    let removed = index
+        .get_computed_fields("docs/invoice.md")
+        .unwrap()
+        .remove("total")
+        .unwrap();
+    assert!(
+        removed.value_json.is_none(),
+        "deleting the overlay must clear the cached result"
+    );
+    assert_eq!(
+        removed.diagnostic.as_ref().map(|error| error.code.as_str()),
+        Some("schema_overlay_missing")
+    );
+    assert!(
+        !fs::read_to_string(project_root.join("docs/invoice.md"))
+            .unwrap()
+            .contains("total:")
+    );
+    assert!(
+        index
+            .get_scoped_schema("docs")
+            .unwrap()
+            .schema
+            .get_field("total")
+            .is_none(),
+        "a removed definition must not survive as an inferred raw field"
+    );
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "schema recovery must not request embeddings"
+    );
+}
+
+#[tokio::test]
+async fn rename_drops_old_computed_state_and_calculates_new_path() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let config = test_config("docs");
+    let watcher = Watcher::new(
+        config,
+        &project_root,
+        Arc::clone(&index),
+        fts_index,
+        provider,
+        None,
+    );
+
+    fs::write(
+        project_root.join(".markdownvdb.schema.yml"),
+        "scopes:\n  docs:\n    fields:\n      total:\n        field_type: formula\n        formula: price * quantity\n        result_type: number\n",
+    )
+    .unwrap();
+    let old_path = project_root.join("docs/old.md");
+    let new_path = project_root.join("docs/new.md");
+    fs::write(&old_path, "---\nprice: 4\nquantity: 5\n---\n# Invoice\n").unwrap();
+    watcher
+        .handle_event(&FileEvent::Created(PathBuf::from("docs/old.md")))
+        .await
+        .unwrap();
+    fs::rename(old_path, new_path).unwrap();
+
+    watcher
+        .handle_event(&FileEvent::Renamed {
+            from: PathBuf::from("docs/old.md"),
+            to: PathBuf::from("docs/new.md"),
+        })
+        .await
+        .unwrap();
+
+    assert!(index.get_file("docs/old.md").is_none());
+    assert!(index.get_computed_fields("docs/old.md").is_none());
+    let new_total = index
+        .get_computed_fields("docs/new.md")
+        .unwrap()
+        .remove("total")
+        .unwrap();
+    assert_eq!(
+        new_total.value_json.as_deref(),
+        Some("20"),
+        "the renamed row must receive fresh computed state"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -270,11 +857,7 @@ fn clustering_config(source_dir: &str) -> Config {
     config
 }
 
-async fn index_initial_docs(
-    watcher: &Watcher,
-    docs_dir: &std::path::Path,
-    names: &[(&str, &str)],
-) {
+async fn index_initial_docs(watcher: &Watcher, docs_dir: &std::path::Path, names: &[(&str, &str)]) {
     for (name, content) in names {
         fs::write(docs_dir.join(name), content).unwrap();
         watcher
@@ -324,7 +907,11 @@ async fn watcher_assigns_new_file_to_existing_cluster() {
     index.save().unwrap();
 
     // A new file arriving under watch must get a cluster assignment.
-    fs::write(docs_dir.join("d.md"), "# Delta\nFresh document about testing").unwrap();
+    fs::write(
+        docs_dir.join("d.md"),
+        "# Delta\nFresh document about testing",
+    )
+    .unwrap();
     watcher
         .handle_event(&FileEvent::Created(PathBuf::from("docs/d.md")))
         .await

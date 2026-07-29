@@ -4,13 +4,17 @@ mod update;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process;
+use std::str::FromStr;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use serde_json::Value;
 
 use mdvdb::links::{LinkQueryResult, OrphanFile, ResolvedLink, SemanticEdge};
-use mdvdb::search::{EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult, SearchTimings, SortOrder};
+use mdvdb::search::{
+    EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResult,
+    SearchTimings, SortOrder,
+};
 use mdvdb::{CollectionQuery, GraphLevel, IngestTimings, MarkdownVdb};
 
 /// Wrapped search output for JSON mode.
@@ -38,10 +42,17 @@ struct IngestOutput {
     api_calls: usize,
     files_failed: usize,
     errors: Vec<mdvdb::IngestError>,
+    module_reports: Vec<mdvdb::modules::ModuleReport>,
     duration_secs: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     timings: Option<IngestTimings>,
     cancelled: bool,
+}
+
+#[derive(serde::Serialize)]
+struct FormulaValidationOutput {
+    valid: bool,
+    diagnostics: Vec<mdvdb::formula::FormulaDiagnostic>,
 }
 
 /// Wrapped links output for JSON mode.
@@ -137,6 +148,9 @@ enum Commands {
 
     /// Watch for file changes and re-index automatically
     Watch(WatchArgs),
+
+    /// Inspect and run built-in derived-data modules
+    Modules(ModulesArgs),
 
     /// Initialize a new .markdownvdb config file
     Init(InitArgs),
@@ -396,6 +410,45 @@ struct CollectionArgs {
 struct WatchArgs {}
 
 #[derive(Parser)]
+struct ModulesArgs {
+    #[command(subcommand)]
+    action: ModuleAction,
+}
+
+#[derive(Subcommand)]
+enum ModuleAction {
+    /// List compiled-in modules and their hooks
+    List,
+    /// Validate module input without changing the index
+    Validate {
+        /// Module id (`formula`)
+        module: String,
+        /// Formula expression to validate
+        #[arg(long)]
+        formula: String,
+        /// Declared formula result type
+        #[arg(long)]
+        result_type: String,
+    },
+    /// Recompute a module's persisted derived data
+    Run {
+        /// Module id (`formula`)
+        module: String,
+        /// Optional folder scope
+        #[arg(long)]
+        path: Option<String>,
+    },
+    /// Show persisted diagnostics for a module
+    Status {
+        /// Module id (`formula`)
+        module: String,
+        /// Optional folder scope
+        #[arg(long)]
+        path: Option<String>,
+    },
+}
+
+#[derive(Parser)]
 struct LinksArgs {
     /// Path to the markdown file
     file_path: PathBuf,
@@ -511,12 +564,12 @@ fn parse_filter(s: &str) -> anyhow::Result<MetadataFilter> {
     let val = val.trim();
 
     // Try to parse as number or boolean, fall back to string.
-    let value: Value = if let Ok(n) = val.parse::<f64>() {
-        Value::Number(serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0)))
-    } else if val == "true" {
+    let value: Value = if val == "true" {
         Value::Bool(true)
     } else if val == "false" {
         Value::Bool(false)
+    } else if let Ok(number) = serde_json::Number::from_str(val) {
+        Value::Number(number)
     } else {
         Value::String(val.to_string())
     };
@@ -643,7 +696,11 @@ async fn run() -> anyhow::Result<()> {
                     query: args.query.clone(),
                     results: response.results,
                     mode: effective_mode,
-                    timings: if cli.verbose > 0 { Some(response.timings) } else { None },
+                    timings: if cli.verbose > 0 {
+                        Some(response.timings)
+                    } else {
+                        None
+                    },
                     graph_context: response.graph_context,
                     edge_results: response.edge_results,
                 };
@@ -697,7 +754,7 @@ async fn run() -> anyhow::Result<()> {
                 let main_bar = mp.add(indicatif::ProgressBar::new(0));
                 main_bar.set_style(
                     indicatif::ProgressStyle::with_template(
-                        "  {spinner:.green} [{pos}/{len}] {msg} {wide_bar:.cyan/dim} {percent}%"
+                        "  {spinner:.green} [{pos}/{len}] {msg} {wide_bar:.cyan/dim} {percent}%",
                     )
                     .unwrap()
                     .progress_chars("█░░"),
@@ -706,10 +763,7 @@ async fn run() -> anyhow::Result<()> {
 
                 let status_bar = mp.add(indicatif::ProgressBar::new_spinner());
                 status_bar.set_style(
-                    indicatif::ProgressStyle::with_template(
-                        "  {spinner:.dim} {msg}"
-                    )
-                    .unwrap(),
+                    indicatif::ProgressStyle::with_template("  {spinner:.dim} {msg}").unwrap(),
                 );
                 status_bar.enable_steady_tick(std::time::Duration::from_millis(120));
 
@@ -723,20 +777,34 @@ async fn run() -> anyhow::Result<()> {
                             main_bar.set_message("Discovering files...");
                             status_bar.set_message(format!("[{elapsed_str}] discovering"));
                         }
-                        mdvdb::IngestPhase::Parsing { current, total, path } => {
+                        mdvdb::IngestPhase::Parsing {
+                            current,
+                            total,
+                            path,
+                        } => {
                             main_bar.set_length(*total as u64);
                             main_bar.set_position(*current as u64);
                             main_bar.set_message(path.to_string());
-                            status_bar.set_message(format!("[{elapsed_str}] parsing {current}/{total}"));
+                            status_bar
+                                .set_message(format!("[{elapsed_str}] parsing {current}/{total}"));
                         }
-                        mdvdb::IngestPhase::Skipped { current, total, path } => {
+                        mdvdb::IngestPhase::Skipped {
+                            current,
+                            total,
+                            path,
+                        } => {
                             main_bar.set_length(*total as u64);
                             main_bar.set_position(*current as u64);
                             main_bar.set_message(format!("{path} (skipped)"));
-                            status_bar.set_message(format!("[{elapsed_str}] skipped {current}/{total}"));
+                            status_bar
+                                .set_message(format!("[{elapsed_str}] skipped {current}/{total}"));
                         }
-                        mdvdb::IngestPhase::Embedding { batch, total_batches } => {
-                            main_bar.set_message(format!("Embedding batch {batch}/{total_batches}"));
+                        mdvdb::IngestPhase::Embedding {
+                            batch,
+                            total_batches,
+                        } => {
+                            main_bar
+                                .set_message(format!("Embedding batch {batch}/{total_batches}"));
                             status_bar.set_message(format!("[{elapsed_str}] embedding"));
                         }
                         mdvdb::IngestPhase::Saving => {
@@ -779,8 +847,13 @@ async fn run() -> anyhow::Result<()> {
                     api_calls: result.api_calls,
                     files_failed: result.files_failed,
                     errors: result.errors.clone(),
+                    module_reports: result.module_reports.clone(),
                     duration_secs: result.duration_secs,
-                    timings: if cli.verbose > 0 { result.timings.clone() } else { None },
+                    timings: if cli.verbose > 0 {
+                        result.timings.clone()
+                    } else {
+                        None
+                    },
                     cancelled: result.cancelled,
                 };
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
@@ -803,8 +876,24 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Status(_args)) => {
-            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let status = vdb.status();
+            let empty_embedding = mdvdb::index::types::EmbeddingConfig {
+                provider: format!("{:?}", config.embedding_provider),
+                model: config.embedding_model.clone(),
+                dimensions: config.embedding_dimensions,
+            };
+            let status = match MarkdownVdb::open_readonly_with_config(cwd, config) {
+                Ok(vdb) => vdb.status(),
+                Err(mdvdb::Error::IndexNotFound { .. }) => mdvdb::IndexStatus {
+                    document_count: 0,
+                    chunk_count: 0,
+                    vector_count: 0,
+                    edge_count: 0,
+                    last_updated: 0,
+                    file_size: 0,
+                    embedding_config: empty_embedding,
+                },
+                Err(error) => return Err(error.into()),
+            };
 
             if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &status)?;
@@ -882,7 +971,9 @@ async fn run() -> anyhow::Result<()> {
                     write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
 
                     if !json {
-                        eprintln!("Added topic '{name}'. Run `mdvdb ingest` to compute assignments.");
+                        eprintln!(
+                            "Added topic '{name}'. Run `mdvdb ingest` to compute assignments."
+                        );
                     }
                 }
                 Some(ClusterAction::Update {
@@ -918,10 +1009,7 @@ async fn run() -> anyhow::Result<()> {
                         def_snapshot.description.as_deref(),
                         def_snapshot.threshold,
                     )?;
-                    let duplicates = defs
-                        .iter()
-                        .filter(|d| d.name == def_snapshot.name)
-                        .count();
+                    let duplicates = defs.iter().filter(|d| d.name == def_snapshot.name).count();
                     if duplicates > 1 {
                         anyhow::bail!("topic '{}' already exists", def_snapshot.name);
                     }
@@ -948,7 +1036,9 @@ async fn run() -> anyhow::Result<()> {
                     write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
 
                     if !json {
-                        eprintln!("Removed topic '{name}'. Run `mdvdb ingest` to update assignments.");
+                        eprintln!(
+                            "Removed topic '{name}'. Run `mdvdb ingest` to update assignments."
+                        );
                     }
                 }
                 Some(ClusterAction::List) => {
@@ -1279,11 +1369,15 @@ async fn run() -> anyhow::Result<()> {
             });
 
             if json {
-                let msg = serde_json::json!({"status": "watching", "message": "File watching started"});
+                let msg =
+                    serde_json::json!({"status": "watching", "message": "File watching started"});
                 let line = serde_json::to_string(&msg)?;
                 println!("{line}");
             } else {
-                let dirs: Vec<String> = vdb.config().source_dirs.iter()
+                let dirs: Vec<String> = vdb
+                    .config()
+                    .source_dirs
+                    .iter()
                     .map(|d| d.to_string_lossy().to_string())
                     .collect();
                 format::print_watch_started(&dirs);
@@ -1302,6 +1396,92 @@ async fn run() -> anyhow::Result<()> {
 
             vdb.watch(cancel, Some(callback)).await?;
         }
+        Some(Commands::Modules(args)) => match args.action {
+            ModuleAction::List => {
+                let descriptors = mdvdb::modules::ModuleRunner::builtins().descriptors();
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &descriptors)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    for descriptor in descriptors {
+                        let mode = if descriptor.always_on {
+                            "always on"
+                        } else {
+                            "manual"
+                        };
+                        println!(
+                            "{}\t{}\tv{}\t{}",
+                            descriptor.id, descriptor.name, descriptor.version, mode
+                        );
+                    }
+                }
+            }
+            ModuleAction::Validate {
+                module,
+                formula,
+                result_type,
+            } => {
+                if module != mdvdb::formula::FORMULA_MODULE_ID {
+                    anyhow::bail!("unknown module `{module}`");
+                }
+                let result_type = result_type
+                    .parse::<mdvdb::FormulaResultType>()
+                    .map_err(anyhow::Error::msg)?;
+                let diagnostics = mdvdb::formula::FormulaEngine::default()
+                    .validate(&formula, result_type)
+                    .err()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let output = FormulaValidationOutput {
+                    valid: diagnostics.is_empty(),
+                    diagnostics,
+                };
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &output)?;
+                    writeln!(std::io::stdout())?;
+                } else if output.valid {
+                    println!("Formula is valid.");
+                } else {
+                    for diagnostic in output.diagnostics {
+                        eprintln!("{}: {}", diagnostic.code, diagnostic.message);
+                    }
+                }
+            }
+            ModuleAction::Run { module, path } => {
+                let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+                let report = vdb.run_module(&module, path.as_deref())?;
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &report)?;
+                    writeln!(std::io::stdout())?;
+                } else {
+                    println!(
+                        "{}: evaluated {} files, updated {} fields, {} diagnostics",
+                        report.module,
+                        report.files_evaluated,
+                        report.fields_updated,
+                        report.diagnostics.len()
+                    );
+                }
+            }
+            ModuleAction::Status { module, path } => {
+                let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+                let diagnostics = vdb.module_status(&module, path.as_deref())?;
+                if json {
+                    serde_json::to_writer_pretty(std::io::stdout(), &diagnostics)?;
+                    writeln!(std::io::stdout())?;
+                } else if diagnostics.is_empty() {
+                    println!("{module}: no cached diagnostics");
+                } else {
+                    for diagnostic in diagnostics {
+                        let path = diagnostic.path.as_deref().unwrap_or("-");
+                        println!(
+                            "{}\t{}\t{}\t{}",
+                            path, diagnostic.field, diagnostic.code, diagnostic.message
+                        );
+                    }
+                }
+            }
+        },
         Some(Commands::Init(args)) => {
             if args.global {
                 let config_path = mdvdb::config::Config::user_config_path()
@@ -1358,11 +1538,7 @@ async fn run() -> anyhow::Result<()> {
             let dir = args.dir.canonicalize()?;
             let mut md_files: Vec<_> = std::fs::read_dir(&dir)?
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .is_some_and(|ext| ext == "md")
-                })
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
                 .map(|e| e.file_name().into())
                 .collect::<Vec<std::path::PathBuf>>();
             md_files.sort();
@@ -1406,7 +1582,7 @@ _mdvdb() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="search ingest status info schema clusters tree get collection watch init config doctor links backlinks orphans completions"
+    commands="search ingest status info schema clusters tree get collection watch modules init config doctor links backlinks orphans completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands --help --version --verbose --root --json --no-color" -- "$cur"))
@@ -1456,6 +1632,7 @@ _mdvdb() {
         'get:Get metadata for a specific file'
         'collection:List a folder'\''s documents as a table'
         'watch:Watch for file changes and re-index automatically'
+        'modules:Inspect and run built-in derived-data modules'
         'init:Initialize a new .markdownvdb config file'
         'config:Show resolved configuration'
         'doctor:Run diagnostic checks'
@@ -1538,6 +1715,7 @@ complete -c mdvdb -n '__fish_use_subcommand' -a tree -d 'Show file tree with syn
 complete -c mdvdb -n '__fish_use_subcommand' -a get -d 'Get metadata for a specific file'
 complete -c mdvdb -n '__fish_use_subcommand' -a collection -d 'List a folder'\''s documents as a table'
 complete -c mdvdb -n '__fish_use_subcommand' -a watch -d 'Watch for file changes and re-index automatically'
+complete -c mdvdb -n '__fish_use_subcommand' -a modules -d 'Inspect and run built-in derived-data modules'
 complete -c mdvdb -n '__fish_use_subcommand' -a init -d 'Initialize a new .markdownvdb config file'
 complete -c mdvdb -n '__fish_use_subcommand' -a config -d 'Show resolved configuration'
 complete -c mdvdb -n '__fish_use_subcommand' -a doctor -d 'Run diagnostic checks'
@@ -1605,6 +1783,7 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
         @{ Name = 'get'; Tooltip = 'Get metadata for a specific file' },
         @{ Name = 'collection'; Tooltip = 'List a folder''s documents as a table' },
         @{ Name = 'watch'; Tooltip = 'Watch for file changes and re-index automatically' },
+        @{ Name = 'modules'; Tooltip = 'Inspect and run built-in derived-data modules' },
         @{ Name = 'init'; Tooltip = 'Initialize a new .markdownvdb config file' },
         @{ Name = 'config'; Tooltip = 'Show resolved configuration' },
         @{ Name = 'doctor'; Tooltip = 'Run diagnostic checks' },
@@ -1739,7 +1918,10 @@ fn write_custom_clusters_to_yaml(
                 map.insert(
                     serde_yaml::Value::String("seeds".into()),
                     serde_yaml::Value::Sequence(
-                        d.seeds.iter().map(|s| serde_yaml::Value::String(s.clone())).collect(),
+                        d.seeds
+                            .iter()
+                            .map(|s| serde_yaml::Value::String(s.clone()))
+                            .collect(),
                     ),
                 );
             }
