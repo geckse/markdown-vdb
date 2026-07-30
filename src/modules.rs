@@ -197,7 +197,11 @@ impl DerivedStateSnapshot {
                     &owned_fields,
                 ) {
                     if index
-                        .apply_module_source_state(&file.content_hash, &writeback.file, fields.clone())
+                        .apply_module_source_state(
+                            &file.content_hash,
+                            &writeback.file,
+                            fields.clone(),
+                        )
                         .is_ok()
                     {
                         continue;
@@ -349,12 +353,7 @@ impl ModuleRunner {
                 Ok(()) => execution,
                 Err(error) => {
                     let message = error.to_string();
-                    snapshot.restore_failed_module(
-                        project_root,
-                        index,
-                        &descriptor.id,
-                        &message,
-                    );
+                    snapshot.restore_failed_module(project_root, index, &descriptor.id, &message);
                     Self::failure_execution(&descriptor.id, message)
                 }
             },
@@ -464,12 +463,7 @@ impl FormulaModule {
     }
 
     fn path_matches_scope(path: &str, scope: &str) -> bool {
-        let scope = scope.trim_matches('/');
-        scope.is_empty()
-            || path == scope
-            || path
-                .strip_prefix(scope)
-                .is_some_and(|suffix| suffix.starts_with('/'))
+        crate::path_util::path_is_in_scope(path, scope)
     }
 
     fn needs_recompute(&self, overlay: &OverlaySchema, path: &str, file: &StoredFile) -> bool {
@@ -731,8 +725,7 @@ impl FormulaModule {
             .map(|(field, _)| field.as_str())
             .collect();
         base.fields.retain(|field| {
-            field.field_type != FieldType::Formula
-                && !globally_owned.contains(field.name.as_str())
+            field.field_type != FieldType::Formula && !globally_owned.contains(field.name.as_str())
         });
         let overlay_fields = overlay.map(|overlay| overlay.fields.clone());
         let schema = Some(Schema::merge(base, overlay_fields));
@@ -780,8 +773,7 @@ impl FormulaModule {
                 .map(|(field, _)| field.as_str())
                 .collect();
             raw_schema.fields.retain(|field| {
-                field.field_type != FieldType::Formula
-                    && !scope_owned.contains(field.name.as_str())
+                field.field_type != FieldType::Formula && !scope_owned.contains(field.name.as_str())
             });
             let overlay_fields =
                 overlay.map(|overlay| Schema::resolve_overlay_for_path(overlay, Some(&scope)));
@@ -1016,7 +1008,11 @@ pub(crate) fn event_paths(event: &ModuleEvent, files: &HashMap<String, StoredFil
             let prefix = normalize_module_scope(scope.as_deref());
             files
                 .keys()
-                .filter(|path| prefix.as_ref().is_none_or(|p| path.starts_with(p)))
+                .filter(|path| {
+                    prefix
+                        .as_ref()
+                        .is_none_or(|scope| crate::path_util::path_is_in_scope(path, scope))
+                })
                 .cloned()
                 .collect()
         }
@@ -1090,8 +1086,7 @@ mod tests {
             let absolute = dir.path().join(path);
             std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
             std::fs::write(&absolute, format!("---\n{field}: {value}\n---\nBody\n")).unwrap();
-            let parsed =
-                crate::parser::parse_markdown_file(dir.path(), Path::new(path)).unwrap();
+            let parsed = crate::parser::parse_markdown_file(dir.path(), Path::new(path)).unwrap();
             index.upsert(&parsed, &[], &[]).unwrap();
         }
 

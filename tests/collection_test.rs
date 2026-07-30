@@ -97,7 +97,11 @@ fn write_standard_vault(root: &std::path::Path) {
         "---\ntitle: No Date\nstatus: draft\n---\n\n# No Date\n\nMissing date field.\n",
     )
     .unwrap();
-    fs::write(root.join("blog/plain.md"), "# Plain\n\nNo frontmatter whatsoever.\n").unwrap();
+    fs::write(
+        root.join("blog/plain.md"),
+        "# Plain\n\nNo frontmatter whatsoever.\n",
+    )
+    .unwrap();
 
     fs::create_dir_all(root.join("blog/2024")).unwrap();
     fs::write(
@@ -158,8 +162,14 @@ fn test_collection_direct_children_only() {
     assert_eq!(resp.rows.len(), 5, "direct children only, got {p:?}");
     assert!(p.contains(&"blog/launch.md"));
     assert!(p.contains(&"blog/plain.md"));
-    assert!(!p.contains(&"blog/2024/recap.md"), "should exclude nested files");
-    assert!(!p.iter().any(|x| x.starts_with("docs/")), "should exclude other scopes");
+    assert!(
+        !p.contains(&"blog/2024/recap.md"),
+        "should exclude nested files"
+    );
+    assert!(
+        !p.iter().any(|x| x.starts_with("docs/")),
+        "should exclude other scopes"
+    );
     assert_eq!(resp.total_rows, 5);
 }
 
@@ -178,9 +188,37 @@ fn test_collection_recursive_includes_nested() {
 
     assert!(resp.recursive);
     let p = paths(&resp);
-    assert!(p.contains(&"blog/2024/recap.md"), "recursive should include nested, got {p:?}");
+    assert!(
+        p.contains(&"blog/2024/recap.md"),
+        "recursive should include nested, got {p:?}"
+    );
     assert_eq!(resp.rows.len(), 6);
     assert_eq!(resp.total_rows, 6);
+}
+
+#[test]
+fn test_collection_scope_requires_path_segment_boundary() {
+    let dir = setup_collection_vault();
+    fs::create_dir_all(dir.path().join("blog-old")).unwrap();
+    fs::write(
+        dir.path().join("blog-old/archive.md"),
+        "# Archive\n\nNot part of blog.\n",
+    )
+    .unwrap();
+    let vdb = open(&dir);
+
+    let response = vdb
+        .collection(CollectionQuery {
+            path: "blog".into(),
+            recursive: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert!(response
+        .rows
+        .iter()
+        .all(|row| !row.path.starts_with("blog-old/")));
 }
 
 #[test]
@@ -247,19 +285,34 @@ fn test_collection_title_derivation() {
         })
         .unwrap();
 
-    let launch = resp.rows.iter().find(|r| r.path == "blog/launch.md").unwrap();
+    let launch = resp
+        .rows
+        .iter()
+        .find(|r| r.path == "blog/launch.md")
+        .unwrap();
     assert_eq!(launch.title, "Launch Announcement");
     assert_eq!(launch.title_source, TitleSource::Frontmatter);
 
-    let no_title = resp.rows.iter().find(|r| r.path == "blog/no-title.md").unwrap();
+    let no_title = resp
+        .rows
+        .iter()
+        .find(|r| r.path == "blog/no-title.md")
+        .unwrap();
     assert_eq!(no_title.title, "no-title");
     assert_eq!(no_title.title_source, TitleSource::Filename);
 
     // A file with no frontmatter at all also falls back to the stem.
-    let plain = resp.rows.iter().find(|r| r.path == "blog/plain.md").unwrap();
+    let plain = resp
+        .rows
+        .iter()
+        .find(|r| r.path == "blog/plain.md")
+        .unwrap();
     assert_eq!(plain.title, "plain");
     assert_eq!(plain.title_source, TitleSource::Filename);
-    assert!(resp.rows.iter().all(|r| !r.title.is_empty()), "title never empty");
+    assert!(
+        resp.rows.iter().all(|r| !r.title.is_empty()),
+        "title never empty"
+    );
 }
 
 #[test]
@@ -277,7 +330,10 @@ fn test_collection_sort_asc_desc_nulls_last() {
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(asc.rows[0].path, "blog/intro.md", "earliest date first (asc)");
+    assert_eq!(
+        asc.rows[0].path, "blog/intro.md",
+        "earliest date first (asc)"
+    );
     let last_asc = asc.rows.last().unwrap();
     assert!(
         last_asc.frontmatter.get("date").is_none_or(|v| v.is_null()),
@@ -294,10 +350,16 @@ fn test_collection_sort_asc_desc_nulls_last() {
             ..Default::default()
         })
         .unwrap();
-    assert_eq!(desc.rows[0].path, "blog/launch.md", "latest date first (desc)");
+    assert_eq!(
+        desc.rows[0].path, "blog/launch.md",
+        "latest date first (desc)"
+    );
     let last_desc = desc.rows.last().unwrap();
     assert!(
-        last_desc.frontmatter.get("date").is_none_or(|v| v.is_null()),
+        last_desc
+            .frontmatter
+            .get("date")
+            .is_none_or(|v| v.is_null()),
         "missing-date row sorts last (desc), not first"
     );
 }
@@ -333,7 +395,10 @@ fn test_collection_filter_reuses_metadatafilter() {
     assert_eq!(resp.total_rows, 2, "post-filter count, got {p:?}");
     assert!(p.contains(&"blog/launch.md"));
     assert!(p.contains(&"blog/no-title.md"));
-    assert!(!p.contains(&"blog/freshly-added.md"), "New {{}} row dropped under any filter");
+    assert!(
+        !p.contains(&"blog/freshly-added.md"),
+        "New {{}} row dropped under any filter"
+    );
 
     // Second filter ANDs with the first.
     let resp2 = vdb
@@ -341,8 +406,14 @@ fn test_collection_filter_reuses_metadatafilter() {
             path: "blog".into(),
             recursive: false,
             filters: vec![
-                MetadataFilter::Equals { field: "status".into(), value: serde_json::json!("published") },
-                MetadataFilter::Equals { field: "date".into(), value: serde_json::json!("2024-03-10") },
+                MetadataFilter::Equals {
+                    field: "status".into(),
+                    value: serde_json::json!("published"),
+                },
+                MetadataFilter::Equals {
+                    field: "date".into(),
+                    value: serde_json::json!("2024-03-10"),
+                },
             ],
             ..Default::default()
         })
@@ -357,7 +428,11 @@ fn test_collection_pagination_total_rows() {
     let vdb = open(&dir);
 
     let full = vdb
-        .collection(CollectionQuery { path: "blog".into(), recursive: true, ..Default::default() })
+        .collection(CollectionQuery {
+            path: "blog".into(),
+            recursive: true,
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(full.total_rows, 6);
 
@@ -388,11 +463,22 @@ fn test_collection_frontmatter_always_object() {
     let vdb = open(&dir);
 
     let resp = vdb
-        .collection(CollectionQuery { path: "blog".into(), recursive: false, ..Default::default() })
+        .collection(CollectionQuery {
+            path: "blog".into(),
+            recursive: false,
+            ..Default::default()
+        })
         .unwrap();
 
-    let plain = resp.rows.iter().find(|r| r.path == "blog/plain.md").unwrap();
-    assert!(plain.frontmatter.is_object(), "frontmatter is always an object");
+    let plain = resp
+        .rows
+        .iter()
+        .find(|r| r.path == "blog/plain.md")
+        .unwrap();
+    assert!(
+        plain.frontmatter.is_object(),
+        "frontmatter is always an object"
+    );
     assert!(
         plain.frontmatter.as_object().unwrap().is_empty(),
         "no-frontmatter file yields {{}}, not null"
@@ -416,27 +502,57 @@ fn test_collection_new_and_deleted_states() {
 
     let vdb = open(&dir);
     let resp = vdb
-        .collection(CollectionQuery { path: "blog".into(), recursive: false, ..Default::default() })
+        .collection(CollectionQuery {
+            path: "blog".into(),
+            recursive: false,
+            ..Default::default()
+        })
         .unwrap();
 
-    let new_row = resp.rows.iter().find(|r| r.path == "blog/brand-new.md").unwrap();
+    let new_row = resp
+        .rows
+        .iter()
+        .find(|r| r.path == "blog/brand-new.md")
+        .unwrap();
     assert_eq!(new_row.state, FileState::New);
-    assert!(new_row.content_hash.is_none(), "new rows have null content_hash");
-    assert!(new_row.indexed_at.is_none(), "new rows have null indexed_at");
+    assert!(
+        new_row.content_hash.is_none(),
+        "new rows have null content_hash"
+    );
+    assert!(
+        new_row.indexed_at.is_none(),
+        "new rows have null indexed_at"
+    );
     assert!(new_row.frontmatter.is_object());
     assert!(
         new_row.frontmatter.as_object().unwrap().is_empty(),
         "new files are not parsed in v1 → empty frontmatter"
     );
-    assert_eq!(new_row.title, "brand-new", "new row title from filename stem");
+    assert_eq!(
+        new_row.title, "brand-new",
+        "new row title from filename stem"
+    );
 
-    let deleted_row = resp.rows.iter().find(|r| r.path == "blog/intro.md").unwrap();
+    let deleted_row = resp
+        .rows
+        .iter()
+        .find(|r| r.path == "blog/intro.md")
+        .unwrap();
     assert_eq!(deleted_row.state, FileState::Deleted);
-    assert!(deleted_row.content_hash.is_some(), "deleted rows keep stored content_hash");
-    assert!(deleted_row.indexed_at.is_some(), "deleted rows keep stored indexed_at");
+    assert!(
+        deleted_row.content_hash.is_some(),
+        "deleted rows keep stored content_hash"
+    );
+    assert!(
+        deleted_row.indexed_at.is_some(),
+        "deleted rows keep stored indexed_at"
+    );
     // Stored frontmatter survives deletion.
     assert_eq!(
-        deleted_row.frontmatter.get("title").and_then(|v| v.as_str()),
+        deleted_row
+            .frontmatter
+            .get("title")
+            .and_then(|v| v.as_str()),
         Some("Intro Post")
     );
 }
@@ -449,7 +565,11 @@ fn test_collection_whole_vault_scope() {
     // "." => whole vault. Non-recursive → only root-level files (there are none
     // at the root here), so recursive is needed to see everything.
     let resp = vdb
-        .collection(CollectionQuery { path: ".".into(), recursive: true, ..Default::default() })
+        .collection(CollectionQuery {
+            path: ".".into(),
+            recursive: true,
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(resp.scope, ".");
     let p = paths(&resp);
@@ -472,7 +592,9 @@ fn test_collection_read_only_no_markdown_writes() {
             path: "blog".into(),
             recursive: true,
             sort_by: Some("date".into()),
-            filters: vec![MetadataFilter::Exists { field: "status".into() }],
+            filters: vec![MetadataFilter::Exists {
+                field: "status".into(),
+            }],
             ..Default::default()
         })
         .unwrap();

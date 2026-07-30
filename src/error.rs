@@ -6,6 +6,12 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Config(String),
 
+    #[error("shard error: {0}")]
+    Shard(String),
+
+    #[error("another mdvdb process is updating the project configuration: {}", path.display())]
+    ConfigBusy { path: PathBuf },
+
     #[error("index not found: {}", path.display())]
     IndexNotFound { path: PathBuf },
 
@@ -76,6 +82,22 @@ mod tests {
     fn config_variant_formats() {
         let err = Error::Config("bad key".into());
         assert_eq!(err.to_string(), "configuration error: bad key");
+    }
+
+    #[test]
+    fn shard_variant_formats() {
+        let err = Error::Shard("invalid path".into());
+        assert_eq!(err.to_string(), "shard error: invalid path");
+    }
+
+    #[test]
+    fn config_busy_variant_formats() {
+        let err = Error::ConfigBusy {
+            path: PathBuf::from("/tmp/.markdownvdb/config.yaml"),
+        };
+        let message = err.to_string();
+        assert!(message.contains("updating the project configuration"));
+        assert!(message.contains("/tmp/.markdownvdb/config.yaml"));
     }
 
     #[test]
@@ -177,7 +199,10 @@ mod tests {
     #[test]
     fn fts_variant_formats() {
         let err = Error::Fts("tokenization failed".into());
-        assert_eq!(err.to_string(), "full-text search error: tokenization failed");
+        assert_eq!(
+            err.to_string(),
+            "full-text search error: tokenization failed"
+        );
     }
 
     #[test]

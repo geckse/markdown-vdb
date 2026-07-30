@@ -19,6 +19,7 @@ mdvdb tree [OPTIONS]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--path <PREFIX>` | *(none)* | Restrict tree to files under this path prefix |
+| `--shard <ID>` | *(none)* | Restrict tree to a configured named Shard (conflicts with `--path`) |
 
 ### Option Details
 
@@ -262,7 +263,7 @@ When `--path` is used, the JSON output has the same structure but rooted at the 
 
 - The `tree` command opens the index in **read-only** mode. It never modifies the index.
 - File discovery respects `.gitignore`, `.mdvdbignore`, and `MDVDB_IGNORE_PATTERNS` -- excluded files do not appear in the tree.
-- The summary counts in `--path` mode still reflect the **full** tree counts, not just the filtered subtree. The tree structure is filtered but the aggregate counts come from the full scan.
+- Summary counts in `--path` and `--shard` mode are recomputed from the visible subtree.
 - Deleted files appear in the tree even though they no longer exist on disk. They will be removed from the index on the next [`mdvdb ingest`](./ingest.md).
 - The content hash comparison reads files from disk, so the `tree` command may be slightly slower than `status` for large projects.
 

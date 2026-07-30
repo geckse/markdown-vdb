@@ -17,6 +17,8 @@ pub mod path_util;
 pub mod relations;
 pub mod schema;
 pub mod search;
+pub mod shard_analysis;
+pub mod shards;
 pub mod tree;
 pub mod watcher;
 
@@ -30,6 +32,12 @@ pub use schema::{FieldType, FormulaResultType, Schema, SchemaField, ScopedSchema
 pub use search::{
     EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse,
     SearchResult, SearchResultChunk, SearchResultFile, SearchTimings, SortOrder,
+};
+pub use shard_analysis::{
+    ClusterAnalysisStatus, GraphAnalysisContext, GraphAnalysisInfo, TopicAnalysisStatus,
+};
+pub use shards::{
+    ShardDefinition, ShardInfo, ShardList, ShardMutation, ShardStore, ShardTopicMutation,
 };
 // Additional re-exports for library consumers.
 pub use clustering::{
@@ -602,6 +610,9 @@ pub struct GraphData {
     /// User-defined custom clusters, if available.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_clusters: Vec<GraphCluster>,
+    /// Analysis source and readiness for Shard-native graph responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<GraphAnalysisInfo>,
 }
 
 /// Wire-efficient graph response for visualization clients.
@@ -633,6 +644,9 @@ pub struct CompactGraphData {
     /// User-defined custom clusters, if available.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub custom_clusters: Vec<GraphCluster>,
+    /// Analysis source and readiness for Shard-native graph responses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<GraphAnalysisInfo>,
 }
 
 /// An edge in the compact graph wire contract.
@@ -675,6 +689,7 @@ impl From<GraphData> for CompactGraphData {
             level,
             edge_clusters,
             custom_clusters,
+            analysis,
         } = data;
 
         // Own each unique context exactly once while building the index. Move
@@ -720,6 +735,7 @@ impl From<GraphData> for CompactGraphData {
             level,
             edge_clusters,
             custom_clusters,
+            analysis,
         }
     }
 }
@@ -729,6 +745,112 @@ struct DocumentGraphScaffold {
     nodes: Vec<GraphNode>,
     clusters: Vec<GraphCluster>,
     custom_clusters: Vec<GraphCluster>,
+}
+
+impl DocumentGraphScaffold {
+    fn empty() -> Self {
+        Self {
+            indexed_paths: HashSet::new(),
+            nodes: Vec::new(),
+            clusters: Vec::new(),
+            custom_clusters: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ShardDerivedAnalysis {
+    shard: ShardInfo,
+    clusters: Option<clustering::ClusterState>,
+    topics: Option<clustering::CustomClusterState>,
+    info: GraphAnalysisInfo,
+}
+
+fn cluster_summaries(state: Option<&clustering::ClusterState>) -> Vec<ClusterSummary> {
+    state
+        .map(|state| {
+            state
+                .clusters
+                .iter()
+                .map(|cluster| ClusterSummary {
+                    id: cluster.id,
+                    document_count: cluster.members.len(),
+                    label: (!cluster.label.is_empty()).then(|| cluster.label.clone()),
+                    keywords: cluster.keywords.clone(),
+                    parent_id: cluster.parent_id,
+                    representative: cluster.representative.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn custom_cluster_summaries(
+    state: Option<&clustering::CustomClusterState>,
+) -> Vec<CustomClusterSummary> {
+    state
+        .map(|state| {
+            state
+                .clusters
+                .iter()
+                .map(|cluster| CustomClusterSummary {
+                    id: cluster.id,
+                    name: cluster.name.clone(),
+                    description: cluster.description.clone(),
+                    seed_phrases: cluster.seed_phrases.clone(),
+                    threshold: cluster.threshold,
+                    document_count: cluster.members.len(),
+                    mean_score: (!cluster.members.is_empty()).then(|| {
+                        cluster
+                            .members
+                            .iter()
+                            .map(|member| member.score)
+                            .sum::<f32>()
+                            / cluster.members.len() as f32
+                    }),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn topic_centroids_if_compatible(
+    state: &clustering::CustomClusterState,
+    definitions: &[clustering::CustomClusterDef],
+    fingerprint: &str,
+    dimensions: usize,
+) -> Option<Vec<Vec<f32>>> {
+    if state.fingerprint != fingerprint || state.clusters.len() != definitions.len() {
+        return None;
+    }
+    state
+        .clusters
+        .iter()
+        .zip(definitions)
+        .all(|(cluster, definition)| {
+            cluster.name == definition.name && cluster.centroid.len() == dimensions
+        })
+        .then(|| {
+            state
+                .clusters
+                .iter()
+                .map(|cluster| cluster.centroid.clone())
+                .collect()
+        })
+}
+
+fn shard_visible_scope(shard_path: &str, visible_path: Option<&str>) -> Option<String> {
+    let Some(visible_path) = visible_path else {
+        return Some(shard_path.to_string());
+    };
+    let visible_path = path_util::normalize_path_input(visible_path);
+    if path_util::path_is_in_scope(&visible_path, shard_path) {
+        Some(visible_path.trim_end_matches('/').to_string())
+    } else if path_util::path_is_in_scope(shard_path, &visible_path) {
+        Some(shard_path.to_string())
+    } else {
+        None
+    }
 }
 
 /// Map each document path to its topic memberships `(id, score)`, sorted by
@@ -769,6 +891,21 @@ fn graph_cluster_from_auto(cluster: &clustering::ClusterInfo) -> GraphCluster {
     }
 }
 
+fn graph_cluster_from_auto_visible(
+    cluster: &clustering::ClusterInfo,
+    visible_paths: &HashSet<String>,
+) -> Option<GraphCluster> {
+    let member_count = cluster
+        .members
+        .iter()
+        .filter(|path| visible_paths.contains(*path))
+        .count();
+    (member_count > 0).then(|| GraphCluster {
+        member_count,
+        ..graph_cluster_from_auto(cluster)
+    })
+}
+
 /// Convert a topic (custom cluster) to its graph representation.
 fn graph_cluster_from_topic(cluster: &clustering::CustomClusterInfo) -> GraphCluster {
     GraphCluster {
@@ -782,21 +919,46 @@ fn graph_cluster_from_topic(cluster: &clustering::CustomClusterInfo) -> GraphClu
     }
 }
 
-fn graph_edge_clusters(link_graph: Option<&links::LinkGraph>) -> Vec<GraphCluster> {
+fn graph_cluster_from_topic_visible(
+    cluster: &clustering::CustomClusterInfo,
+    visible_paths: &HashSet<String>,
+) -> Option<GraphCluster> {
+    let member_count = cluster
+        .members
+        .iter()
+        .filter(|member| visible_paths.contains(&member.path))
+        .count();
+    (member_count > 0).then(|| GraphCluster {
+        member_count,
+        ..graph_cluster_from_topic(cluster)
+    })
+}
+
+fn graph_edge_clusters(
+    link_graph: Option<&links::LinkGraph>,
+    visible_edge_ids: &HashSet<String>,
+) -> Vec<GraphCluster> {
     link_graph
         .and_then(|graph| graph.edge_cluster_state.as_ref())
         .map(|state| {
             state
                 .clusters
                 .iter()
-                .map(|cluster| GraphCluster {
-                    id: cluster.id,
-                    label: cluster.label.clone(),
-                    keywords: cluster.keywords.clone(),
-                    member_count: cluster.members.len(),
-                    description: None,
-                    threshold: None,
-                    parent_id: None,
+                .filter_map(|cluster| {
+                    let member_count = cluster
+                        .members
+                        .iter()
+                        .filter(|edge_id| visible_edge_ids.contains(*edge_id))
+                        .count();
+                    (member_count > 0).then(|| GraphCluster {
+                        id: cluster.id,
+                        label: cluster.label.clone(),
+                        keywords: cluster.keywords.clone(),
+                        member_count,
+                        description: None,
+                        threshold: None,
+                        parent_id: None,
+                    })
                 })
                 .collect()
         })
@@ -1030,7 +1192,7 @@ impl MarkdownVdb {
             for (path, stored) in self.index.get_all_files() {
                 if prefix
                     .as_ref()
-                    .is_some_and(|prefix| !path.starts_with(prefix))
+                    .is_some_and(|scope| !path_util::path_is_in_scope(&path, scope))
                 {
                     continue;
                 }
@@ -1073,7 +1235,7 @@ impl MarkdownVdb {
         for (path, file) in self.index.get_all_files() {
             if prefix
                 .as_ref()
-                .is_some_and(|prefix| !path.starts_with(prefix))
+                .is_some_and(|scope| !path_util::path_is_in_scope(&path, scope))
             {
                 continue;
             }
@@ -1915,6 +2077,11 @@ impl MarkdownVdb {
             self.index.update_custom_clusters(None);
         }
 
+        // Shard-local topic centroids and assignments live in disposable
+        // sidecars. Refresh them only during ingest; read APIs never create an
+        // embedding provider.
+        self.refresh_shard_topics_after_ingest().await;
+
         // Persist global and scoped schemas.
         // For single-file ingest, skip schema recomputation.
         if options.file.is_none() {
@@ -1949,6 +2116,19 @@ impl MarkdownVdb {
                     scope_names.insert(scope.clone());
                 }
             }
+            match shards::ShardStore::new(&self.root).list() {
+                Ok(list) => {
+                    for shard in list.shards {
+                        scope_names.insert(shard.path);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "ignoring malformed Shard definitions while caching scoped schemas"
+                    );
+                }
+            }
 
             if !scope_names.is_empty() {
                 let mut scoped_schemas = Vec::new();
@@ -1966,8 +2146,9 @@ impl MarkdownVdb {
                     });
                 }
                 self.index.set_scoped_schemas(Some(scoped_schemas));
+            } else {
+                self.index.set_scoped_schemas(None);
             }
-
         }
 
         // Derived-data hooks always run after raw/schema mutations and before
@@ -2209,7 +2390,7 @@ impl MarkdownVdb {
         let discovered = disco.discover()?;
         let existing_hashes = self.index.get_file_hashes();
 
-        let in_scope = |p: &str| is_whole_vault || p.starts_with(scope.as_str());
+        let in_scope = |path: &str| is_whole_vault || path_util::path_is_in_scope(path, &scope);
 
         let mut sync = SyncBreakdown::default();
         let mut file_count: usize = 0;
@@ -2532,43 +2713,447 @@ sources:
             .unwrap_or_default())
     }
 
+    /// Return automatic clusters computed from only the documents in a Shard.
+    ///
+    /// Analysis is derived lazily from existing collection vectors and cached
+    /// outside the index. No embedding provider is created by this read.
+    pub fn clusters_for_shard(&self, shard_id: &str) -> Result<Vec<ClusterSummary>> {
+        let analysis = self.shard_analysis(shard_id)?;
+        Ok(cluster_summaries(analysis.clusters.as_ref()))
+    }
+
+    /// Return local topic summaries for one Shard.
+    ///
+    /// Stale topic definitions/model settings require ingest and therefore
+    /// yield no computed assignments on this provider-free read.
+    pub fn custom_clusters_for_shard(&self, shard_id: &str) -> Result<Vec<CustomClusterSummary>> {
+        shards::ShardStore::new(&self.root).topics(shard_id)?;
+        let analysis = self.shard_analysis(shard_id)?;
+        Ok(custom_cluster_summaries(analysis.topics.as_ref()))
+    }
+
+    /// Return the Shard-local topic Unassigned bucket.
+    pub fn topic_unassigned_for_shard(&self, shard_id: &str) -> Result<Vec<String>> {
+        shards::ShardStore::new(&self.root).topics(shard_id)?;
+        let analysis = self.shard_analysis(shard_id)?;
+        Ok(analysis
+            .topics
+            .map(|state| state.unassigned)
+            .unwrap_or_default())
+    }
+
+    fn shard_analysis(&self, shard_id: &str) -> Result<ShardDerivedAnalysis> {
+        use shard_analysis::{
+            cluster_fingerprint, cluster_settings_fingerprint, clusterable_document_count,
+            corpus_fingerprint, effective_shard_knn, full_fingerprint, scoped_maps,
+            topic_fingerprint, ShardAnalysisCache, ShardAnalysisCacheStore,
+            SHARD_ANALYSIS_CACHE_FORMAT, SHARD_ANALYSIS_CACHE_VERSION,
+        };
+
+        let shard_store = shards::ShardStore::new(&self.root);
+        let shard = shard_store.get(shard_id)?;
+        let topic_definitions = shard_store.topics(shard_id);
+        let topic_error = topic_definitions.as_ref().err().map(ToString::to_string);
+        let topics_are_malformed = topic_error.is_some();
+        let topic_definitions = topic_definitions.unwrap_or_default();
+
+        if !shard.exists {
+            return Ok(ShardDerivedAnalysis {
+                info: GraphAnalysisInfo {
+                    context: GraphAnalysisContext::Shard,
+                    shard_id: Some(shard.id.clone()),
+                    shard_path: Some(shard.path.clone()),
+                    clusters: ClusterAnalysisStatus::Disabled,
+                    topics: if topic_error.is_some() {
+                        TopicAnalysisStatus::Error
+                    } else if topic_definitions.is_empty() {
+                        TopicAnalysisStatus::None
+                    } else {
+                        TopicAnalysisStatus::NeedsIngest
+                    },
+                    message: Some(format!(
+                        "Shard folder '{}' is missing; restore or retarget it",
+                        shard.path
+                    )),
+                },
+                shard,
+                clusters: None,
+                topics: None,
+            });
+        }
+
+        let file_hashes = self.index.get_file_hashes();
+        let all_vectors = self.index.get_document_vectors();
+        let all_documents = self.index.get_document_contents();
+        let (vectors, documents) = scoped_maps(&shard.path, &all_vectors, &all_documents);
+        let corpus_fp = corpus_fingerprint(&shard.path, &file_hashes);
+        let effective_knn =
+            if self.config.clustering_algorithm == config::ClusteringAlgorithm::Leiden {
+                effective_shard_knn(
+                    self.config.clustering_knn,
+                    clusterable_document_count(&vectors),
+                )
+            } else {
+                self.config.clustering_knn
+            };
+        let cluster_settings_fp = cluster_settings_fingerprint(&self.config, effective_knn);
+        let cluster_fp = cluster_fingerprint(&corpus_fp, &cluster_settings_fp);
+        let topic_fp = topic_fingerprint(&self.config, &topic_definitions);
+        let full_fp = full_fingerprint(&shard.id, &shard.path, &corpus_fp, &cluster_fp, &topic_fp);
+        let cache_store = ShardAnalysisCacheStore::new(&self.root, shard_id);
+        let shard_for_update = shard.clone();
+        let mut config = self.config.clone();
+        config.clustering_knn = effective_knn;
+
+        cache_store.update(move |current| {
+            // A retargeted Shard deliberately invalidates all derived state.
+            let current = current.filter(|cache| cache.shard_path == shard_for_update.path);
+            let mut messages = Vec::new();
+
+            let (clusters, cluster_status) = if !config.clustering_enabled {
+                (None, ClusterAnalysisStatus::Disabled)
+            } else if vectors.len() < 2 {
+                (None, ClusterAnalysisStatus::TooSmall)
+            } else if let Some(state) = current
+                .as_ref()
+                .filter(|cache| cache.cluster_fingerprint == cluster_fp)
+                .and_then(|cache| cache.clusters.clone())
+            {
+                (Some(state), ClusterAnalysisStatus::Ready)
+            } else {
+                let previous = current.as_ref().and_then(|cache| {
+                    (cache.cluster_settings_fingerprint == cluster_settings_fp)
+                        .then_some(cache.clusters.as_ref())
+                        .flatten()
+                });
+                match clustering::Clusterer::new(&config)
+                    .cluster_all(&vectors, &documents, previous)
+                {
+                    Ok(state) => (Some(state), ClusterAnalysisStatus::Ready),
+                    Err(error) => {
+                        messages.push(format!("Shard clustering failed: {error}"));
+                        (None, ClusterAnalysisStatus::Error)
+                    }
+                }
+            };
+
+            let (topics, topic_status, stored_topic_fp) = if let Some(error) = topic_error {
+                messages.push(error);
+                (
+                    None,
+                    TopicAnalysisStatus::Error,
+                    current
+                        .as_ref()
+                        .map(|cache| cache.topic_fingerprint.clone())
+                        .unwrap_or_else(|| topic_fp.clone()),
+                )
+            } else if topic_definitions.is_empty() {
+                (None, TopicAnalysisStatus::None, topic_fp.clone())
+            } else {
+                let cached_centroids = current.as_ref().and_then(|cache| {
+                    topic_centroids_if_compatible(
+                        cache.topics.as_ref()?,
+                        &topic_definitions,
+                        &topic_fp,
+                        config.embedding_dimensions,
+                    )
+                });
+                if current
+                    .as_ref()
+                    .is_some_and(|cache| cache.topic_corpus_fingerprint == corpus_fp)
+                {
+                    if let Some(state) = current.as_ref().and_then(|cache| {
+                        cached_centroids
+                            .is_some()
+                            .then(|| cache.topics.clone())
+                            .flatten()
+                    }) {
+                        (Some(state), TopicAnalysisStatus::Ready, topic_fp.clone())
+                    } else {
+                        (None, TopicAnalysisStatus::NeedsIngest, topic_fp.clone())
+                    }
+                } else if let Some(centroids) = cached_centroids {
+                    match clustering::Clusterer::new(&config).assign_all_to_custom(
+                        &topic_definitions,
+                        &centroids,
+                        &vectors,
+                        topic_fp.clone(),
+                    ) {
+                        Ok(state) => (Some(state), TopicAnalysisStatus::Ready, topic_fp.clone()),
+                        Err(error) => {
+                            messages.push(format!("Shard topic assignment failed: {error}"));
+                            (None, TopicAnalysisStatus::Error, topic_fp.clone())
+                        }
+                    }
+                } else {
+                    (None, TopicAnalysisStatus::NeedsIngest, topic_fp.clone())
+                }
+            };
+            if topic_status == TopicAnalysisStatus::NeedsIngest {
+                messages.push(
+                    "Shard Topics need ingest before local centroids and assignments are available"
+                        .to_string(),
+                );
+            }
+            // Keep previously valid centroids recoverable while malformed YAML
+            // is being repaired, but never expose its stale assignments.
+            let topics_for_cache = if topics_are_malformed {
+                current.as_ref().and_then(|cache| cache.topics.clone())
+            } else {
+                topics.clone()
+            };
+            let topic_corpus_fp = if topics_are_malformed && topics_for_cache.is_some() {
+                current
+                    .as_ref()
+                    .map(|cache| cache.topic_corpus_fingerprint.clone())
+                    .unwrap_or_else(|| corpus_fp.clone())
+            } else {
+                corpus_fp.clone()
+            };
+
+            let cache = ShardAnalysisCache {
+                format: SHARD_ANALYSIS_CACHE_FORMAT.to_string(),
+                version: SHARD_ANALYSIS_CACHE_VERSION,
+                shard_id: shard_for_update.id.clone(),
+                shard_path: shard_for_update.path.clone(),
+                fingerprint: full_fp,
+                corpus_fingerprint: corpus_fp,
+                cluster_fingerprint: cluster_fp,
+                cluster_settings_fingerprint: cluster_settings_fp,
+                topic_fingerprint: stored_topic_fp,
+                topic_corpus_fingerprint: topic_corpus_fp,
+                clusters: clusters.clone(),
+                topics: topics_for_cache,
+            };
+            let output = ShardDerivedAnalysis {
+                shard: shard_for_update.clone(),
+                clusters,
+                topics,
+                info: GraphAnalysisInfo {
+                    context: GraphAnalysisContext::Shard,
+                    shard_id: Some(shard_for_update.id.clone()),
+                    shard_path: Some(shard_for_update.path.clone()),
+                    clusters: cluster_status,
+                    topics: topic_status,
+                    message: (!messages.is_empty()).then(|| messages.join("; ")),
+                },
+            };
+            Ok((cache, output))
+        })
+    }
+
+    async fn refresh_shard_topics_after_ingest(&self) {
+        use shard_analysis::{
+            cluster_fingerprint, cluster_settings_fingerprint, clusterable_document_count,
+            corpus_fingerprint, effective_shard_knn, full_fingerprint, scoped_maps,
+            topic_fingerprint, ShardAnalysisCache, ShardAnalysisCacheStore,
+            SHARD_ANALYSIS_CACHE_FORMAT, SHARD_ANALYSIS_CACHE_VERSION,
+        };
+
+        let store = shards::ShardStore::new(&self.root);
+        let list = match store.list() {
+            Ok(list) => list,
+            Err(error) => {
+                warn!(%error, "skipping Shard topic refresh because Shard YAML is malformed");
+                return;
+            }
+        };
+        if list.shards.is_empty() {
+            return;
+        }
+
+        let file_hashes = self.index.get_file_hashes();
+        let all_vectors = self.index.get_document_vectors();
+        let all_documents = self.index.get_document_contents();
+        // Reuse identical local-topic centroids across Shards during this
+        // ingest, but never seed this pool from collection-level Topics.
+        let mut centroid_pool: HashMap<String, Vec<Vec<f32>>> = HashMap::new();
+
+        for shard in list.shards {
+            if !shard.exists {
+                continue;
+            }
+            let definitions = match store.topics(&shard.id) {
+                Ok(definitions) => definitions,
+                Err(error) => {
+                    warn!(
+                        shard = %shard.id,
+                        %error,
+                        "skipping malformed Shard-local topics"
+                    );
+                    continue;
+                }
+            };
+
+            let cache_store = ShardAnalysisCacheStore::new(&self.root, &shard.id);
+            let current = match cache_store.load() {
+                Ok(cache) => cache.filter(|cache| cache.shard_path == shard.path),
+                Err(error) => {
+                    warn!(shard = %shard.id, %error, "ignoring unreadable Shard analysis cache");
+                    None
+                }
+            };
+            let corpus_fp = corpus_fingerprint(&shard.path, &file_hashes);
+            let topic_fp = topic_fingerprint(&self.config, &definitions);
+            let (vectors, _documents) = scoped_maps(&shard.path, &all_vectors, &all_documents);
+            let effective_knn =
+                if self.config.clustering_algorithm == config::ClusteringAlgorithm::Leiden {
+                    effective_shard_knn(
+                        self.config.clustering_knn,
+                        clusterable_document_count(&vectors),
+                    )
+                } else {
+                    self.config.clustering_knn
+                };
+            let settings_fp = cluster_settings_fingerprint(&self.config, effective_knn);
+            let cluster_fp = cluster_fingerprint(&corpus_fp, &settings_fp);
+
+            let topics = if definitions.is_empty() {
+                None
+            } else {
+                if !centroid_pool.contains_key(&topic_fp) {
+                    if let Some(centroids) = current.as_ref().and_then(|cache| {
+                        topic_centroids_if_compatible(
+                            cache.topics.as_ref()?,
+                            &definitions,
+                            &topic_fp,
+                            self.config.embedding_dimensions,
+                        )
+                    }) {
+                        centroid_pool.insert(topic_fp.clone(), centroids);
+                    }
+                }
+
+                let centroids = if let Some(centroids) = centroid_pool.get(&topic_fp) {
+                    Ok(centroids.clone())
+                } else {
+                    match self.ensure_provider() {
+                        Ok(provider) => {
+                            clustering::embed_topic_centroids(&definitions, provider.as_ref()).await
+                        }
+                        Err(error) => Err(error),
+                    }
+                };
+                match centroids.and_then(|centroids| {
+                    centroid_pool.insert(topic_fp.clone(), centroids.clone());
+                    clustering::Clusterer::new(&self.config).assign_all_to_custom(
+                        &definitions,
+                        &centroids,
+                        &vectors,
+                        topic_fp.clone(),
+                    )
+                }) {
+                    Ok(state) => Some(state),
+                    Err(error) => {
+                        warn!(
+                            shard = %shard.id,
+                            %error,
+                            "Shard-local topic refresh failed (non-fatal)"
+                        );
+                        continue;
+                    }
+                }
+            };
+
+            let write_result = cache_store.update(|latest| {
+                let latest = latest.filter(|cache| cache.shard_path == shard.path);
+                // Topic refresh advances the topic corpus, but must not erase a
+                // compatible previous auto-cluster state. Keep the
+                // fingerprints that actually produced those clusters so the
+                // next lazy graph read detects corpus staleness and supplies
+                // the state to `cluster_all` for stable IDs/colors.
+                let (clusters, stored_cluster_fp, stored_settings_fp) = latest
+                    .as_ref()
+                    .and_then(|cache| {
+                        cache.clusters.clone().map(|clusters| {
+                            (
+                                Some(clusters),
+                                cache.cluster_fingerprint.clone(),
+                                cache.cluster_settings_fingerprint.clone(),
+                            )
+                        })
+                    })
+                    .unwrap_or_else(|| (None, cluster_fp.clone(), settings_fp.clone()));
+                let stored_full_fp = full_fingerprint(
+                    &shard.id,
+                    &shard.path,
+                    &corpus_fp,
+                    &stored_cluster_fp,
+                    &topic_fp,
+                );
+                let cache = ShardAnalysisCache {
+                    format: SHARD_ANALYSIS_CACHE_FORMAT.to_string(),
+                    version: SHARD_ANALYSIS_CACHE_VERSION,
+                    shard_id: shard.id.clone(),
+                    shard_path: shard.path.clone(),
+                    fingerprint: stored_full_fp,
+                    corpus_fingerprint: corpus_fp.clone(),
+                    cluster_fingerprint: stored_cluster_fp,
+                    cluster_settings_fingerprint: stored_settings_fp,
+                    topic_fingerprint: topic_fp,
+                    topic_corpus_fingerprint: corpus_fp,
+                    clusters,
+                    topics,
+                };
+                Ok((cache, ()))
+            });
+            if let Err(error) = write_result {
+                warn!(
+                    shard = %shard.id,
+                    %error,
+                    "failed to save Shard-local topic analysis (non-fatal)"
+                );
+            }
+        }
+    }
+
     fn document_graph_scaffold(&self, path_filter: Option<&str>) -> DocumentGraphScaffold {
+        let clusters = self.index.get_clusters();
+        let topics = self.index.get_custom_clusters();
+        self.document_graph_scaffold_with_analysis(path_filter, clusters.as_ref(), topics.as_ref())
+    }
+
+    fn document_graph_scaffold_with_analysis(
+        &self,
+        path_filter: Option<&str>,
+        cluster_state: Option<&clustering::ClusterState>,
+        custom_cluster_state: Option<&clustering::CustomClusterState>,
+    ) -> DocumentGraphScaffold {
         let file_hashes = self.index.get_file_hashes();
         let indexed_paths: HashSet<String> = file_hashes
             .keys()
             .filter(|p| match path_filter {
-                Some(prefix) => p.starts_with(prefix),
+                Some(scope) => path_util::path_is_in_scope(p, scope),
                 None => true,
             })
             .cloned()
             .collect();
 
-        let cluster_state = self.index.get_clusters();
         let mut path_to_cluster: HashMap<String, usize> = HashMap::new();
         let mut clusters = Vec::new();
-        if let Some(ref state) = cluster_state {
+        if let Some(state) = cluster_state {
             for cluster in &state.clusters {
                 for member in &cluster.members {
                     path_to_cluster.insert(member.clone(), cluster.id);
                 }
-                clusters.push(graph_cluster_from_auto(cluster));
+                if let Some(cluster) = graph_cluster_from_auto_visible(cluster, &indexed_paths) {
+                    clusters.push(cluster);
+                }
             }
         }
 
-        let custom_cluster_state = self.index.get_custom_clusters();
-        let path_to_topics = topic_membership_map(custom_cluster_state.as_ref());
+        let path_to_topics = topic_membership_map(custom_cluster_state);
         let custom_clusters = custom_cluster_state
-            .as_ref()
             .map(|state| {
                 state
                     .clusters
                     .iter()
-                    .map(graph_cluster_from_topic)
+                    .filter_map(|cluster| graph_cluster_from_topic_visible(cluster, &indexed_paths))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
 
-        let nodes: Vec<GraphNode> = indexed_paths
+        let mut nodes: Vec<GraphNode> = indexed_paths
             .iter()
             .map(|path| {
                 let topics = path_to_topics.get(path);
@@ -2589,6 +3174,11 @@ sources:
                 }
             })
             .collect();
+        nodes.sort_unstable_by(|left, right| {
+            left.id
+                .cmp(&right.id)
+                .then_with(|| left.path.cmp(&right.path))
+        });
 
         DocumentGraphScaffold {
             indexed_paths,
@@ -2600,18 +3190,28 @@ sources:
 
     /// Return graph data combining indexed files, link edges, and cluster membership.
     pub fn graph_data(&self, path_filter: Option<&str>) -> Result<GraphData> {
+        let scaffold = self.document_graph_scaffold(path_filter);
+        self.graph_data_from_scaffold(scaffold, None)
+    }
+
+    fn graph_data_from_scaffold(
+        &self,
+        scaffold: DocumentGraphScaffold,
+        analysis: Option<GraphAnalysisInfo>,
+    ) -> Result<GraphData> {
         let DocumentGraphScaffold {
             indexed_paths,
             nodes,
             clusters,
             custom_clusters,
-        } = self.document_graph_scaffold(path_filter);
+        } = scaffold;
 
         // Project the stored graph while borrowing it under one read lock. The
         // previous implementation cloned the complete semantic graph twice,
         // including every context string, before building this response.
         let (edges, edge_clusters) = self.index.with_link_graph(|link_graph| {
             let mut edges = Vec::new();
+            let mut visible_edge_ids = HashSet::new();
             if let Some(link_graph) = link_graph {
                 for (source, entries) in &link_graph.forward {
                     if !indexed_paths.contains(source) {
@@ -2626,6 +3226,7 @@ sources:
                                 .semantic_edges
                                 .as_ref()
                                 .and_then(|se| se.get(&edge_id));
+                            visible_edge_ids.insert(edge_id);
                             edges.push(GraphEdge {
                                 source: source.clone(),
                                 target: entry.target.clone(),
@@ -2642,7 +3243,7 @@ sources:
                 }
             }
 
-            let edge_clusters = graph_edge_clusters(link_graph);
+            let edge_clusters = graph_edge_clusters(link_graph, &visible_edge_ids);
 
             (edges, edge_clusters)
         });
@@ -2654,6 +3255,7 @@ sources:
             level: "document".to_string(),
             edge_clusters,
             custom_clusters,
+            analysis,
         })
     }
 
@@ -2661,16 +3263,26 @@ sources:
     /// clients. Full edge contexts are deduplicated into a response-level
     /// string table and are never cloned once per rendered edge.
     pub fn graph_data_compact(&self, path_filter: Option<&str>) -> Result<CompactGraphData> {
+        let scaffold = self.document_graph_scaffold(path_filter);
+        self.graph_data_compact_from_scaffold(scaffold, None)
+    }
+
+    fn graph_data_compact_from_scaffold(
+        &self,
+        scaffold: DocumentGraphScaffold,
+        analysis: Option<GraphAnalysisInfo>,
+    ) -> Result<CompactGraphData> {
         let DocumentGraphScaffold {
             indexed_paths,
             nodes,
             clusters,
             custom_clusters,
-        } = self.document_graph_scaffold(path_filter);
+        } = scaffold;
 
         let (edges, contexts, edge_clusters) = self.index.with_link_graph(|link_graph| {
             let mut edges = Vec::new();
             let mut contexts = Vec::new();
+            let mut visible_edge_ids = HashSet::new();
 
             if let Some(link_graph) = link_graph {
                 // The keys borrow the already-stored semantic contexts, while
@@ -2691,6 +3303,7 @@ sources:
                             .semantic_edges
                             .as_ref()
                             .and_then(|semantic_edges| semantic_edges.get(&edge_id));
+                        visible_edge_ids.insert(edge_id);
                         let context_index = semantic.map(|semantic_edge| {
                             let context = semantic_edge.context_text.as_str();
                             if let Some(index) = context_indices.get(context) {
@@ -2718,7 +3331,7 @@ sources:
                 }
             }
 
-            let edge_clusters = graph_edge_clusters(link_graph);
+            let edge_clusters = graph_edge_clusters(link_graph, &visible_edge_ids);
             (edges, contexts, edge_clusters)
         });
 
@@ -2732,7 +3345,59 @@ sources:
             level: "document".to_string(),
             edge_clusters,
             custom_clusters,
+            analysis,
         })
+    }
+
+    /// Return a document graph whose cluster/topic identities are computed
+    /// from the full Shard while `visible_path` only projects visible nodes.
+    pub fn graph_data_for_shard(
+        &self,
+        shard_id: &str,
+        visible_path: Option<&str>,
+    ) -> Result<GraphData> {
+        let analysis = self.shard_analysis(shard_id)?;
+        let scope = analysis
+            .shard
+            .exists
+            .then(|| shard_visible_scope(&analysis.shard.path, visible_path))
+            .flatten();
+        let scaffold = scope
+            .as_deref()
+            .map(|scope| {
+                self.document_graph_scaffold_with_analysis(
+                    Some(scope),
+                    analysis.clusters.as_ref(),
+                    analysis.topics.as_ref(),
+                )
+            })
+            .unwrap_or_else(DocumentGraphScaffold::empty);
+        self.graph_data_from_scaffold(scaffold, Some(analysis.info))
+    }
+
+    /// Compact equivalent of [`graph_data_for_shard`](Self::graph_data_for_shard).
+    pub fn graph_data_compact_for_shard(
+        &self,
+        shard_id: &str,
+        visible_path: Option<&str>,
+    ) -> Result<CompactGraphData> {
+        let analysis = self.shard_analysis(shard_id)?;
+        let scope = analysis
+            .shard
+            .exists
+            .then(|| shard_visible_scope(&analysis.shard.path, visible_path))
+            .flatten();
+        let scaffold = scope
+            .as_deref()
+            .map(|scope| {
+                self.document_graph_scaffold_with_analysis(
+                    Some(scope),
+                    analysis.clusters.as_ref(),
+                    analysis.topics.as_ref(),
+                )
+            })
+            .unwrap_or_else(DocumentGraphScaffold::empty);
+        self.graph_data_compact_from_scaffold(scaffold, Some(analysis.info))
     }
 
     /// Return chunk-level graph data with embedding-similarity edges.
@@ -2740,6 +3405,25 @@ sources:
     /// Each chunk becomes a node, and edges represent the top-k most similar
     /// chunks across different files (intra-file edges are excluded).
     pub fn graph_data_chunks(&self, k: usize, path_filter: Option<&str>) -> Result<GraphData> {
+        let clusters = self.index.get_clusters();
+        let topics = self.index.get_custom_clusters();
+        self.graph_data_chunks_with_analysis(
+            k,
+            path_filter,
+            clusters.as_ref(),
+            topics.as_ref(),
+            None,
+        )
+    }
+
+    fn graph_data_chunks_with_analysis(
+        &self,
+        k: usize,
+        path_filter: Option<&str>,
+        cluster_state: Option<&clustering::ClusterState>,
+        custom_cluster_state: Option<&clustering::CustomClusterState>,
+        analysis: Option<GraphAnalysisInfo>,
+    ) -> Result<GraphData> {
         use std::collections::HashSet;
 
         let mut chunk_vectors: Vec<_> = self
@@ -2747,7 +3431,7 @@ sources:
             .get_chunk_vectors()
             .into_iter()
             .filter(|cv| match path_filter {
-                Some(prefix) => cv.source_path.starts_with(prefix),
+                Some(scope) => path_util::path_is_in_scope(&cv.source_path, scope),
                 None => true,
             })
             .collect();
@@ -2762,32 +3446,37 @@ sources:
                 level: "chunk".to_string(),
                 edge_clusters: Vec::new(),
                 custom_clusters: Vec::new(),
+                analysis,
             });
         }
 
+        let visible_paths: HashSet<String> = chunk_vectors
+            .iter()
+            .map(|chunk| chunk.source_path.clone())
+            .collect();
+
         // Build path → cluster_id map from ClusterState
-        let cluster_state = self.index.get_clusters();
         let mut path_to_cluster: HashMap<String, usize> = HashMap::new();
         let mut clusters = Vec::new();
-        if let Some(ref state) = cluster_state {
+        if let Some(state) = cluster_state {
             for cluster in &state.clusters {
                 for member in &cluster.members {
                     path_to_cluster.insert(member.clone(), cluster.id);
                 }
-                clusters.push(graph_cluster_from_auto(cluster));
+                if let Some(cluster) = graph_cluster_from_auto_visible(cluster, &visible_paths) {
+                    clusters.push(cluster);
+                }
             }
         }
 
         // Build path → topic memberships map (multi-label, score-sorted)
-        let custom_cluster_state = self.index.get_custom_clusters();
-        let path_to_topics = topic_membership_map(custom_cluster_state.as_ref());
+        let path_to_topics = topic_membership_map(custom_cluster_state);
         let custom_clusters = custom_cluster_state
-            .as_ref()
             .map(|state| {
                 state
                     .clusters
                     .iter()
-                    .map(graph_cluster_from_topic)
+                    .filter_map(|cluster| graph_cluster_from_topic_visible(cluster, &visible_paths))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -2893,7 +3582,41 @@ sources:
             level: "chunk".to_string(),
             edge_clusters: Vec::new(),
             custom_clusters,
+            analysis,
         })
+    }
+
+    /// Return a chunk graph with Shard-local document cluster/topic identity.
+    pub fn graph_data_chunks_for_shard(
+        &self,
+        k: usize,
+        shard_id: &str,
+        visible_path: Option<&str>,
+    ) -> Result<GraphData> {
+        let analysis = self.shard_analysis(shard_id)?;
+        let scope = analysis
+            .shard
+            .exists
+            .then(|| shard_visible_scope(&analysis.shard.path, visible_path))
+            .flatten();
+        let Some(scope) = scope else {
+            return Ok(GraphData {
+                nodes: Vec::new(),
+                edges: Vec::new(),
+                clusters: Vec::new(),
+                level: "chunk".to_string(),
+                edge_clusters: Vec::new(),
+                custom_clusters: Vec::new(),
+                analysis: Some(analysis.info),
+            });
+        };
+        self.graph_data_chunks_with_analysis(
+            k,
+            Some(&scope),
+            analysis.clusters.as_ref(),
+            analysis.topics.as_ref(),
+            Some(analysis.info),
+        )
     }
 
     /// Return graph data at the specified level.
@@ -3298,10 +4021,12 @@ sources:
             let remainder = if is_whole_vault {
                 path
             } else {
-                match path.strip_prefix(scope) {
-                    Some(r) => r,
-                    None => return false,
+                if !path_util::path_is_in_scope(path, scope) {
+                    return false;
                 }
+                path.strip_prefix(scope.trim_end_matches('/'))
+                    .unwrap_or(path)
+                    .trim_start_matches('/')
             };
             recursive || !remainder.contains('/')
         };
@@ -3696,6 +4421,10 @@ sources:
         // references are vault content, not index health.
         checks.push(self.doctor_relations_check());
 
+        // 9. Shards: malformed definitions and missing target folders are
+        // repairable configuration warnings, not collection/index failures.
+        checks.push(self.doctor_shards_check());
+
         let passed = checks
             .iter()
             .filter(|c| c.status == CheckStatus::Pass)
@@ -3778,9 +4507,10 @@ sources:
             }
             let ghosts: Vec<String> = targets
                 .into_iter()
-                .filter(|t| {
-                    let prefix = format!("{t}/");
-                    !known.iter().any(|f| f.starts_with(&prefix))
+                .filter(|target| {
+                    !known
+                        .iter()
+                        .any(|path| path_util::path_is_in_scope(path, target))
                 })
                 .collect();
             if !ghosts.is_empty() {
@@ -3847,6 +4577,75 @@ sources:
                 name: "Relations".to_string(),
                 status: CheckStatus::Warn,
                 detail: issues.join("; "),
+            }
+        }
+    }
+
+    fn doctor_shards_check(&self) -> DoctorCheck {
+        let store = shards::ShardStore::new(&self.root);
+        match store.list() {
+            Err(error) => DoctorCheck {
+                name: "Shards".to_string(),
+                status: CheckStatus::Warn,
+                detail: format!("invalid Shard definitions: {error}"),
+            },
+            Ok(list) => {
+                let malformed_topics: Vec<_> = list
+                    .shards
+                    .iter()
+                    .filter_map(|shard| {
+                        store
+                            .topics(&shard.id)
+                            .err()
+                            .map(|error| format!("{}: {}", shard.id, error))
+                    })
+                    .collect();
+                let missing: Vec<_> = list.shards.iter().filter(|shard| !shard.exists).collect();
+                if missing.is_empty() && malformed_topics.is_empty() {
+                    let detail = if list.total_shards == 0 {
+                        "no Shards configured".to_string()
+                    } else {
+                        format!(
+                            "{} Shard(s) configured, all folders exist",
+                            list.total_shards
+                        )
+                    };
+                    DoctorCheck {
+                        name: "Shards".to_string(),
+                        status: CheckStatus::Pass,
+                        detail,
+                    }
+                } else {
+                    let missing_paths = missing
+                        .iter()
+                        .map(|shard| format!("{} ({})", shard.id, shard.path))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let mut issues = Vec::new();
+                    if !missing.is_empty() {
+                        issues.push(format!(
+                            "{} missing folder(s): {}",
+                            missing.len(),
+                            missing_paths
+                        ));
+                    }
+                    if !malformed_topics.is_empty() {
+                        issues.push(format!(
+                            "{} malformed local Topic definition(s): {}",
+                            malformed_topics.len(),
+                            malformed_topics.join(", ")
+                        ));
+                    }
+                    DoctorCheck {
+                        name: "Shards".to_string(),
+                        status: CheckStatus::Warn,
+                        detail: format!(
+                            "{} Shard(s) configured; {}",
+                            list.total_shards,
+                            issues.join("; ")
+                        ),
+                    }
+                }
             }
         }
     }

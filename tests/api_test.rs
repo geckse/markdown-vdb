@@ -51,10 +51,10 @@ fn mock_config() -> Config {
         search_expand_limit: 3,
         vector_quantization: mdvdb::VectorQuantization::F16,
         index_compression: true,
-            edge_embeddings: true,
-            edge_boost_weight: 0.15,
-            edge_cluster_rebalance: 50,
-            custom_cluster_defs: Vec::new(),
+        edge_embeddings: true,
+        edge_boost_weight: 0.15,
+        edge_cluster_rebalance: 50,
+        custom_cluster_defs: Vec::new(),
     }
 }
 
@@ -96,7 +96,11 @@ fn setup_project() -> (TempDir, MarkdownVdb) {
 fn test_open_with_mock_config() {
     let dir = TempDir::new().unwrap();
     fs::create_dir_all(dir.path().join(".markdownvdb")).unwrap();
-    fs::write(dir.path().join(".markdownvdb").join("config.yaml"), "embedding:\n  provider: mock\n").unwrap();
+    fs::write(
+        dir.path().join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n",
+    )
+    .unwrap();
 
     let vdb = MarkdownVdb::open_with_config(dir.path().to_path_buf(), mock_config());
     assert!(vdb.is_ok(), "should open with mock config: {:?}", vdb.err());
@@ -124,9 +128,47 @@ async fn test_ingest_populates_index() {
     assert_eq!(result.files_failed, 0, "no files should fail");
 
     let status = vdb.status();
-    assert!(status.document_count > 0, "should have documents after ingest");
+    assert!(
+        status.document_count > 0,
+        "should have documents after ingest"
+    );
     assert!(status.chunk_count > 0, "should have chunks after ingest");
     assert!(status.vector_count > 0, "should have vectors after ingest");
+}
+
+#[tokio::test]
+async fn doctor_warns_for_malformed_local_topics_without_breaking_shards() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::write(
+        root.join(".markdownvdb/config.yaml"),
+        r#"
+embedding:
+  provider: mock
+  dimensions: 8
+shards:
+  docs:
+    name: Documents
+    path: docs
+    topics: not-a-list
+"#,
+    )
+    .unwrap();
+
+    let store = mdvdb::ShardStore::new(root);
+    assert_eq!(store.list().unwrap().total_shards, 1);
+    assert!(store.topics("docs").is_err());
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    let doctor = vdb.doctor().await.unwrap();
+    let shards = doctor
+        .checks
+        .iter()
+        .find(|check| check.name == "Shards")
+        .unwrap();
+    assert_eq!(shards.status, CheckStatus::Warn);
+    assert!(shards.detail.contains("malformed local Topic"));
 }
 
 #[tokio::test]
@@ -137,7 +179,10 @@ async fn test_search_returns_results() {
     let query = SearchQuery::new("rust programming");
     let results = vdb.search(query).await.unwrap().results;
 
-    assert!(!results.is_empty(), "search should return results after ingest");
+    assert!(
+        !results.is_empty(),
+        "search should return results after ingest"
+    );
     let r = &results[0];
     assert!(r.score > 0.0, "results should have positive scores");
     assert!(!r.chunk.content.is_empty(), "results should have content");
@@ -262,12 +307,25 @@ async fn test_links_api() {
 
     let result = vdb.links("alpha.md").unwrap();
     assert_eq!(result.file, "alpha.md");
-    assert!(result.outgoing.len() >= 2, "alpha.md should have at least 2 outgoing links");
+    assert!(
+        result.outgoing.len() >= 2,
+        "alpha.md should have at least 2 outgoing links"
+    );
 
     // Check that beta.md and gamma.md are among targets
-    let targets: Vec<&str> = result.outgoing.iter().map(|l| l.entry.target.as_str()).collect();
-    assert!(targets.contains(&"beta.md"), "should link to beta.md, got: {targets:?}");
-    assert!(targets.contains(&"gamma.md"), "should link to gamma.md, got: {targets:?}");
+    let targets: Vec<&str> = result
+        .outgoing
+        .iter()
+        .map(|l| l.entry.target.as_str())
+        .collect();
+    assert!(
+        targets.contains(&"beta.md"),
+        "should link to beta.md, got: {targets:?}"
+    );
+    assert!(
+        targets.contains(&"gamma.md"),
+        "should link to gamma.md, got: {targets:?}"
+    );
 }
 
 #[tokio::test]
@@ -277,7 +335,10 @@ async fn test_orphans_api() {
 
     let orphans = vdb.orphans().unwrap();
     let paths: Vec<&str> = orphans.iter().map(|o| o.path.as_str()).collect();
-    assert!(paths.contains(&"orphan.md"), "orphan.md should be in orphans list, got: {paths:?}");
+    assert!(
+        paths.contains(&"orphan.md"),
+        "orphan.md should be in orphans list, got: {paths:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +382,10 @@ async fn test_clusters_returns_data_after_ingest() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let clusters = vdb.clusters().unwrap();
-    assert!(!clusters.is_empty(), "should have clusters after ingest with clustering enabled");
+    assert!(
+        !clusters.is_empty(),
+        "should have clusters after ingest with clustering enabled"
+    );
 
     // All documents should be distributed across clusters.
     let total_docs: usize = clusters.iter().map(|c| c.document_count).sum();
@@ -358,7 +422,10 @@ async fn test_search_hybrid_mode_via_api() {
     let results = vdb.search(query).await.unwrap().results;
 
     assert!(!results.is_empty(), "hybrid search should return results");
-    assert!(results[0].score > 0.0, "results should have positive scores");
+    assert!(
+        results[0].score > 0.0,
+        "results should have positive scores"
+    );
 }
 
 #[tokio::test]
@@ -380,7 +447,10 @@ async fn test_search_lexical_mode_via_api() {
     let query = SearchQuery::new("systems programming language").with_mode(SearchMode::Lexical);
     let results = vdb.search(query).await.unwrap().results;
 
-    assert!(!results.is_empty(), "lexical search should return results for matching terms");
+    assert!(
+        !results.is_empty(),
+        "lexical search should return results for matching terms"
+    );
 }
 
 #[tokio::test]
@@ -390,7 +460,10 @@ async fn test_fts_index_populated_after_ingest() {
 
     let fts = vdb.fts_index();
     let num = fts.num_docs().unwrap();
-    assert!(num > 0, "FTS index should have documents after ingest, got {num}");
+    assert!(
+        num > 0,
+        "FTS index should have documents after ingest, got {num}"
+    );
 }
 
 #[tokio::test]
@@ -402,7 +475,10 @@ async fn test_search_default_mode_is_hybrid() {
     let query = SearchQuery::new("rust");
     let results = vdb.search(query).await.unwrap().results;
 
-    assert!(!results.is_empty(), "default mode search should return results");
+    assert!(
+        !results.is_empty(),
+        "default mode search should return results"
+    );
 }
 
 #[tokio::test]
@@ -412,12 +488,19 @@ async fn test_fts_auto_rebuild_from_rkyv() {
     // First ingest: populates both vector and FTS indexes.
     vdb.ingest(IngestOptions::default()).await.unwrap();
     let fts_docs_before = vdb.fts_index().num_docs().unwrap();
-    assert!(fts_docs_before > 0, "FTS should have docs after initial ingest");
+    assert!(
+        fts_docs_before > 0,
+        "FTS should have docs after initial ingest"
+    );
 
     // Simulate a stale FTS index by deleting all FTS docs.
     vdb.fts_index().delete_all().unwrap();
     vdb.fts_index().commit().unwrap();
-    assert_eq!(vdb.fts_index().num_docs().unwrap(), 0, "FTS should be empty after delete_all");
+    assert_eq!(
+        vdb.fts_index().num_docs().unwrap(),
+        0,
+        "FTS should be empty after delete_all"
+    );
 
     // Re-ingest (incremental — files unchanged, so vector skips them).
     // Consistency guard should detect FTS=0 + vector>0 and rebuild FTS.
@@ -439,7 +522,10 @@ async fn test_full_ingest_rebuilds_fts() {
     assert!(fts_before > 0, "FTS should have docs after ingest");
 
     // Full ingest: should clear and rebuild FTS.
-    let opts = IngestOptions { full: true, ..Default::default() };
+    let opts = IngestOptions {
+        full: true,
+        ..Default::default()
+    };
     vdb.ingest(opts).await.unwrap();
     let fts_after = vdb.fts_index().num_docs().unwrap();
     assert!(
@@ -489,7 +575,11 @@ async fn test_file_tree_returns_structure() {
 
     // Should have entries covering our files
     assert!(tree.total_files > 0, "file tree should have files");
-    assert!(tree.total_files >= 3, "should have at least 3 files, got {}", tree.total_files);
+    assert!(
+        tree.total_files >= 3,
+        "should have at least 3 files, got {}",
+        tree.total_files
+    );
 }
 
 #[tokio::test]
@@ -620,6 +710,75 @@ async fn test_doctor_source_dirs_check() {
 }
 
 #[tokio::test]
+async fn test_doctor_warns_for_missing_and_malformed_shards() {
+    let (dir, vdb) = setup_project();
+    let config_path = dir.path().join(".markdownvdb").join("config.yaml");
+    fs::write(
+        &config_path,
+        "embedding:\n  provider: mock\n  dimensions: 8\nshards:\n  missing:\n    name: Missing\n    path: absent/folder\n",
+    )
+    .unwrap();
+
+    let result = vdb.doctor().await.unwrap();
+    let shards = result
+        .checks
+        .iter()
+        .find(|check| check.name == "Shards")
+        .expect("doctor should include the Shards check");
+    assert_eq!(shards.status, CheckStatus::Warn);
+    assert!(shards.detail.contains("missing"));
+    assert!(shards.detail.contains("absent/folder"));
+
+    fs::write(
+        &config_path,
+        "embedding:\n  provider: mock\n  dimensions: 8\nshards:\n  - not-a-map\n",
+    )
+    .unwrap();
+    let result = vdb.doctor().await.unwrap();
+    let shards = result
+        .checks
+        .iter()
+        .find(|check| check.name == "Shards")
+        .expect("doctor should include the Shards check");
+    assert_eq!(shards.status, CheckStatus::Warn);
+    assert!(shards.detail.contains("invalid Shard definitions"));
+}
+
+#[tokio::test]
+async fn test_ingest_caches_schema_for_nested_configured_shard() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::create_dir_all(root.join("work/research")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\nshards:\n  research:\n    name: Research\n    path: work/research\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("work/research/paper.md"),
+        "---\ntitle: Paper\nreviewed: true\n---\n\n# Paper\n\nResearch notes.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let scoped = vdb
+        .index()
+        .get_scoped_schema("work/research")
+        .expect("configured nested Shard should have a persisted scoped schema");
+    let fields: Vec<_> = scoped
+        .schema
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    assert!(fields.contains(&"reviewed"));
+    assert!(fields.contains(&"title"));
+}
+
+#[tokio::test]
 async fn test_init_global_creates_and_rejects() {
     let tmp = TempDir::new().unwrap();
     let config_path = tmp.path().join("config");
@@ -629,7 +788,10 @@ async fn test_init_global_creates_and_rejects() {
     assert!(config_path.exists(), "config file should be created");
 
     let content = fs::read_to_string(&config_path).unwrap();
-    assert!(content.contains("OPENAI_API_KEY"), "template should mention API key");
+    assert!(
+        content.contains("OPENAI_API_KEY"),
+        "template should mention API key"
+    );
 
     // Second call should fail.
     let result = MarkdownVdb::init_global(&config_path);
@@ -667,13 +829,22 @@ async fn test_ingest_with_progress_callback() {
     vdb.ingest(opts).await.unwrap();
 
     let collected = phases.lock().unwrap();
-    assert!(collected.contains(&"Discovering".to_string()), "should have Discovering phase, got: {collected:?}");
+    assert!(
+        collected.contains(&"Discovering".to_string()),
+        "should have Discovering phase, got: {collected:?}"
+    );
     assert!(
         collected.contains(&"Parsing".to_string()) || collected.contains(&"Skipped".to_string()),
         "should have Parsing or Skipped phase, got: {collected:?}"
     );
-    assert!(collected.contains(&"Saving".to_string()), "should have Saving phase, got: {collected:?}");
-    assert!(collected.contains(&"Done".to_string()), "should have Done phase, got: {collected:?}");
+    assert!(
+        collected.contains(&"Saving".to_string()),
+        "should have Saving phase, got: {collected:?}"
+    );
+    assert!(
+        collected.contains(&"Done".to_string()),
+        "should have Done phase, got: {collected:?}"
+    );
 }
 
 #[test]
@@ -712,15 +883,22 @@ async fn test_preview_reindex_marks_all_changed() {
 
     // Preview with reindex=true — all files should be marked Changed
     let preview = vdb.preview(true, None).unwrap();
-    assert_eq!(preview.files_to_process, preview.total_files, "reindex should process all files");
-    assert_eq!(preview.files_unchanged, 0, "reindex should have no unchanged files");
+    assert_eq!(
+        preview.files_to_process, preview.total_files,
+        "reindex should process all files"
+    );
+    assert_eq!(
+        preview.files_unchanged, 0,
+        "reindex should have no unchanged files"
+    );
 
     for file in &preview.files {
         assert_eq!(
             file.status,
             mdvdb::PreviewFileStatus::Changed,
             "file {} should be Changed with reindex=true, got {:?}",
-            file.path, file.status
+            file.path,
+            file.status
         );
     }
 }
@@ -777,6 +955,12 @@ async fn test_info_scoped_folder() {
     fs::create_dir_all(dir.path().join("blog")).unwrap();
     fs::write(dir.path().join("blog/a.md"), "# A\n\nBlog alpha.\n").unwrap();
     fs::write(dir.path().join("blog/b.md"), "# B\n\nBlog beta.\n").unwrap();
+    fs::create_dir_all(dir.path().join("blog-old")).unwrap();
+    fs::write(
+        dir.path().join("blog-old/archive.md"),
+        "# Archive\n\nNot in the blog scope.\n",
+    )
+    .unwrap();
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let plain = vdb.info(Some("blog")).unwrap();
@@ -911,17 +1095,29 @@ async fn test_search_works_after_full_reindex() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
     let query = SearchQuery::new("rust programming");
     let results1 = vdb.search(query).await.unwrap().results;
-    assert!(!results1.is_empty(), "search should return results after first ingest");
+    assert!(
+        !results1.is_empty(),
+        "search should return results after first ingest"
+    );
 
     // Full reindex
-    let opts = IngestOptions { full: true, ..Default::default() };
+    let opts = IngestOptions {
+        full: true,
+        ..Default::default()
+    };
     vdb.ingest(opts).await.unwrap();
 
     // Search again — should still work
     let query2 = SearchQuery::new("rust programming");
     let results2 = vdb.search(query2).await.unwrap().results;
-    assert!(!results2.is_empty(), "search should return results after full reindex");
-    assert!(results2[0].score > 0.0, "results should have positive scores after reindex");
+    assert!(
+        !results2.is_empty(),
+        "search should return results after full reindex"
+    );
+    assert!(
+        results2[0].score > 0.0,
+        "results should have positive scores after reindex"
+    );
 }
 
 #[tokio::test]
@@ -933,17 +1129,29 @@ async fn test_multiple_reindex_cycles() {
 
     // Run 3 consecutive full reindexes
     for cycle in 0..3 {
-        let opts = IngestOptions { full: true, ..Default::default() };
+        let opts = IngestOptions {
+            full: true,
+            ..Default::default()
+        };
         vdb.ingest(opts).await.unwrap();
 
         let status = vdb.status();
-        assert!(status.document_count > 0, "cycle {cycle}: should have documents");
+        assert!(
+            status.document_count > 0,
+            "cycle {cycle}: should have documents"
+        );
         assert!(status.chunk_count > 0, "cycle {cycle}: should have chunks");
-        assert!(status.vector_count > 0, "cycle {cycle}: should have vectors");
+        assert!(
+            status.vector_count > 0,
+            "cycle {cycle}: should have vectors"
+        );
 
         let query = SearchQuery::new("test document");
         let results = vdb.search(query).await.unwrap().results;
-        assert!(!results.is_empty(), "cycle {cycle}: search should return results");
+        assert!(
+            !results.is_empty(),
+            "cycle {cycle}: search should return results"
+        );
     }
 }
 
@@ -960,11 +1168,17 @@ async fn test_search_with_decay_enabled() {
     let results = vdb.search(query).await.unwrap().results;
 
     // Decay should not break search.
-    assert!(!results.is_empty(), "search with decay should return results");
+    assert!(
+        !results.is_empty(),
+        "search with decay should return results"
+    );
     for r in &results {
         assert!(r.score >= 0.0, "score should be non-negative");
         assert!(r.score <= 1.0, "score should be <= 1");
-        assert!(r.file.modified_at.is_some(), "modified_at should be populated");
+        assert!(
+            r.file.modified_at.is_some(),
+            "modified_at should be populated"
+        );
     }
 }
 
@@ -978,7 +1192,10 @@ async fn test_search_with_decay_disabled() {
 
     assert!(!results.is_empty());
     for r in &results {
-        assert!(r.file.modified_at.is_some(), "modified_at should still be populated");
+        assert!(
+            r.file.modified_at.is_some(),
+            "modified_at should still be populated"
+        );
     }
 }
 
@@ -988,8 +1205,14 @@ async fn test_get_document_includes_modified_at() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let doc = vdb.get_document("hello.md").unwrap();
-    assert!(doc.modified_at.is_some(), "modified_at should be populated after ingest");
-    assert!(doc.modified_at.unwrap() > 0, "modified_at should be non-zero");
+    assert!(
+        doc.modified_at.is_some(),
+        "modified_at should be populated after ingest"
+    );
+    assert!(
+        doc.modified_at.unwrap() > 0,
+        "modified_at should be non-zero"
+    );
 }
 
 #[tokio::test]
@@ -1050,7 +1273,10 @@ async fn test_search_returns_search_response() {
     let _total = response.timings.total_secs;
     let _search = response.timings.vector_search_secs;
     // graph_context should be empty when expand_graph is 0 (default).
-    assert!(response.graph_context.is_empty(), "graph_context should be empty without expansion");
+    assert!(
+        response.graph_context.is_empty(),
+        "graph_context should be empty without expansion"
+    );
 }
 
 #[tokio::test]
@@ -1062,17 +1288,28 @@ async fn test_search_response_json_serialization() {
     let response = vdb.search(query).await.unwrap();
 
     // Serialize to JSON.
-    let json_str = serde_json::to_string(&response).expect("SearchResponse should serialize to JSON");
+    let json_str =
+        serde_json::to_string(&response).expect("SearchResponse should serialize to JSON");
 
     // Deserialize back to serde_json::Value and verify structure.
-    let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("serialized JSON should parse back");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&json_str).expect("serialized JSON should parse back");
     assert!(parsed.is_object(), "top-level should be an object");
     assert!(parsed.get("results").is_some(), "should have 'results' key");
     assert!(parsed["results"].is_array(), "'results' should be an array");
     assert!(parsed.get("timings").is_some(), "should have 'timings' key");
-    assert!(parsed["timings"].is_object(), "'timings' should be an object");
-    assert!(parsed["timings"].get("total_secs").is_some(), "timings should have 'total_secs'");
-    assert!(parsed["timings"].get("embed_secs").is_some(), "timings should have 'embed_secs'");
+    assert!(
+        parsed["timings"].is_object(),
+        "'timings' should be an object"
+    );
+    assert!(
+        parsed["timings"].get("total_secs").is_some(),
+        "timings should have 'total_secs'"
+    );
+    assert!(
+        parsed["timings"].get("embed_secs").is_some(),
+        "timings should have 'embed_secs'"
+    );
 
     // graph_context is empty, so it should be skipped due to skip_serializing_if.
     assert!(
@@ -1094,13 +1331,20 @@ fn test_with_boost_hops_builder() {
 
     // Default should be None.
     let query_default = SearchQuery::new("test query");
-    assert_eq!(query_default.boost_hops, None, "default boost_hops should be None");
+    assert_eq!(
+        query_default.boost_hops, None,
+        "default boost_hops should be None"
+    );
 }
 
 #[test]
 fn test_with_expand_graph_builder() {
     let query = SearchQuery::new("test query").with_expand_graph(1);
-    assert_eq!(query.expand_graph, Some(1), "expand_graph should be set to 1");
+    assert_eq!(
+        query.expand_graph,
+        Some(1),
+        "expand_graph should be set to 1"
+    );
 
     let query0 = SearchQuery::new("test query").with_expand_graph(0);
     assert_eq!(query0.expand_graph, Some(0), "expand_graph should accept 0");
@@ -1110,7 +1354,10 @@ fn test_with_expand_graph_builder() {
 
     // Default should be None.
     let query_default = SearchQuery::new("test query");
-    assert_eq!(query_default.expand_graph, None, "default expand_graph should be None");
+    assert_eq!(
+        query_default.expand_graph, None,
+        "default expand_graph should be None"
+    );
 }
 
 #[tokio::test]
@@ -1165,8 +1412,14 @@ async fn test_search_with_expansion() {
         // The mock provider produces deterministic embeddings, so results depend on similarity.
         // At minimum, verify graph_context items have valid structure.
         for ctx in &response.graph_context {
-            assert!(!ctx.chunk.content.is_empty(), "graph context chunk should have content");
-            assert!(!ctx.linked_from.is_empty(), "graph context should have linked_from");
+            assert!(
+                !ctx.chunk.content.is_empty(),
+                "graph context chunk should have content"
+            );
+            assert!(
+                !ctx.linked_from.is_empty(),
+                "graph context should have linked_from"
+            );
             assert!(ctx.hop_distance >= 1, "hop_distance should be >= 1");
         }
     }
@@ -1193,22 +1446,41 @@ async fn custom_clusters_full_pipeline() {
 
     // Create config dir and markdown files
     std::fs::create_dir_all(root.join(".markdownvdb")).unwrap();
-    std::fs::write(root.join("ai.md"), "# AI\nMachine learning and neural networks").unwrap();
-    std::fs::write(root.join("web.md"), "# Web\nHTML CSS and JavaScript frontend").unwrap();
-    std::fs::write(root.join("ops.md"), "# Ops\nDocker and Kubernetes deployments").unwrap();
+    std::fs::write(
+        root.join("ai.md"),
+        "# AI\nMachine learning and neural networks",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("web.md"),
+        "# Web\nHTML CSS and JavaScript frontend",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("ops.md"),
+        "# Ops\nDocker and Kubernetes deployments",
+    )
+    .unwrap();
 
     let mut config = mock_config();
     config.custom_cluster_defs = vec![
         mdvdb::CustomClusterDef {
             name: "AI".to_string(),
             description: None,
-            seeds: vec!["machine learning".to_string(), "neural networks".to_string()],
+            seeds: vec![
+                "machine learning".to_string(),
+                "neural networks".to_string(),
+            ],
             threshold: None,
         },
         mdvdb::CustomClusterDef {
             name: "Web".to_string(),
             description: None,
-            seeds: vec!["html".to_string(), "css".to_string(), "javascript".to_string()],
+            seeds: vec![
+                "html".to_string(),
+                "css".to_string(),
+                "javascript".to_string(),
+            ],
             threshold: None,
         },
     ];

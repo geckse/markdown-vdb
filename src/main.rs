@@ -136,6 +136,9 @@ enum Commands {
     /// Show document clusters
     Clusters(ClustersArgs),
 
+    /// Manage named recursive folder scopes
+    Shards(ShardsArgs),
+
     /// Show file tree with sync status indicators
     Tree(TreeArgs),
 
@@ -227,8 +230,12 @@ struct SearchArgs {
     edge_search: bool,
 
     /// Restrict search to files under this path prefix
-    #[arg(long)]
+    #[arg(long, conflicts_with = "shard")]
     path: Option<String>,
+
+    /// Restrict search to a configured Shard
+    #[arg(long, conflicts_with = "path")]
+    shard: Option<String>,
 
     /// Enable time decay (favor recently modified files)
     #[arg(long, conflicts_with = "no_decay")]
@@ -288,15 +295,82 @@ struct StatusArgs {}
 #[derive(Parser)]
 struct InfoArgs {
     /// Folder path to scope stats to (relative). Defaults to the whole vault.
-    #[arg(default_value = ".")]
-    path: String,
+    #[arg(conflicts_with = "shard")]
+    path: Option<String>,
+
+    /// Restrict stats to a configured Shard
+    #[arg(long, conflicts_with = "path")]
+    shard: Option<String>,
 }
 
 #[derive(Parser)]
 struct SchemaArgs {
     /// Restrict schema to files under this path prefix
-    #[arg(long)]
+    #[arg(long, conflicts_with = "shard")]
     path: Option<String>,
+
+    /// Restrict schema to a configured Shard
+    #[arg(long, conflicts_with = "path")]
+    shard: Option<String>,
+}
+
+#[derive(Parser)]
+struct ShardsArgs {
+    #[command(subcommand)]
+    action: ShardAction,
+}
+
+#[derive(Subcommand)]
+enum ShardAction {
+    /// List configured Shards
+    List,
+    /// Show one configured Shard
+    Get {
+        /// Immutable Shard ID
+        id: String,
+    },
+    /// Add a Shard definition
+    #[command(visible_alias = "create")]
+    Add {
+        /// Immutable kebab-case Shard ID
+        id: String,
+        /// Collection-relative folder path
+        #[arg(long)]
+        path: String,
+        /// Display name (defaults to a title-cased ID)
+        #[arg(long)]
+        name: Option<String>,
+        /// Create the folder if it does not exist
+        #[arg(long)]
+        create_dir: bool,
+    },
+    /// Update a Shard's display name or path
+    Update {
+        /// Immutable Shard ID
+        id: String,
+        /// Replacement display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Replacement collection-relative folder path
+        #[arg(long)]
+        path: Option<String>,
+        /// Create the replacement folder if it does not exist
+        #[arg(long)]
+        create_dir: bool,
+    },
+    /// Remove a Shard definition without deleting files
+    #[command(visible_alias = "delete")]
+    Remove {
+        /// Immutable Shard ID
+        id: String,
+    },
+    /// Retarget every Shard at or below a renamed folder
+    Retarget {
+        /// Previous collection-relative folder prefix
+        old_prefix: String,
+        /// New collection-relative folder prefix
+        new_prefix: String,
+    },
 }
 
 #[derive(Parser)]
@@ -304,6 +378,10 @@ struct ClustersArgs {
     /// Show custom clusters instead of auto clusters
     #[arg(long)]
     custom: bool,
+
+    /// Compute/manage clusters and Topics local to a configured Shard
+    #[arg(long, global = true)]
+    shard: Option<String>,
 
     /// Manage custom cluster definitions
     #[command(subcommand)]
@@ -357,8 +435,12 @@ enum ClusterAction {
 #[derive(Parser)]
 struct TreeArgs {
     /// Restrict tree to files under this path prefix
-    #[arg(long)]
+    #[arg(long, conflicts_with = "shard")]
     path: Option<String>,
+
+    /// Restrict tree to a configured Shard
+    #[arg(long, conflicts_with = "path")]
+    shard: Option<String>,
 }
 
 #[derive(Parser)]
@@ -374,8 +456,12 @@ struct GetArgs {
 #[derive(Parser)]
 struct CollectionArgs {
     /// Folder path prefix (relative). Defaults to the whole vault.
-    #[arg(default_value = ".")]
-    path: String,
+    #[arg(conflicts_with = "shard")]
+    path: Option<String>,
+
+    /// Restrict collection rows to a configured Shard
+    #[arg(long, conflicts_with = "path")]
+    shard: Option<String>,
 
     /// Include files in all nested subfolders (default: direct children only)
     #[arg(short, long)]
@@ -435,16 +521,22 @@ enum ModuleAction {
         /// Module id (`formula`)
         module: String,
         /// Optional folder scope
-        #[arg(long)]
+        #[arg(long, conflicts_with = "shard")]
         path: Option<String>,
+        /// Optional configured Shard scope
+        #[arg(long, conflicts_with = "path")]
+        shard: Option<String>,
     },
     /// Show persisted diagnostics for a module
     Status {
         /// Module id (`formula`)
         module: String,
         /// Optional folder scope
-        #[arg(long)]
+        #[arg(long, conflicts_with = "shard")]
         path: Option<String>,
+        /// Optional configured Shard scope
+        #[arg(long, conflicts_with = "path")]
+        shard: Option<String>,
     },
 }
 
@@ -486,6 +578,10 @@ struct GraphArgs {
     /// Restrict graph to files under this path prefix
     #[arg(long)]
     path: Option<String>,
+
+    /// Restrict graph to a configured Shard
+    #[arg(long)]
+    shard: Option<String>,
 
     /// Emit the versioned app wire format with response-level interned contexts
     #[arg(long, visible_alias = "intern-contexts", requires = "json")]
@@ -577,6 +673,170 @@ fn parse_filter(s: &str) -> anyhow::Result<MetadataFilter> {
     Ok(MetadataFilter::Equals { field: key, value })
 }
 
+/// Resolve a configured Shard to the same path string accepted by existing
+/// scoped APIs. Clap enforces mutual exclusion; this helper also remains safe
+/// for direct callers and tests.
+fn resolve_shard_or_path(
+    root: &std::path::Path,
+    path: Option<&str>,
+    shard: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    match (path, shard) {
+        (Some(_), Some(_)) => anyhow::bail!("--path and --shard cannot be used together"),
+        (Some(path), None) => Ok(Some(mdvdb::path_util::normalize_path_input(path))),
+        (None, Some(id)) => Ok(Some(mdvdb::ShardStore::new(root).resolve_path(id)?)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn default_shard_name(id: &str) -> String {
+    id.split('-')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn print_shard_info(shard: &mdvdb::ShardInfo, indent: usize) {
+    let branch = "  ".repeat(indent);
+    let missing = if shard.exists { "" } else { " (missing)" };
+    println!(
+        "{branch}{} [{}] — {}{}",
+        shard.name, shard.id, shard.path, missing
+    );
+}
+
+fn print_shard_list(list: &mdvdb::ShardList) {
+    if list.shards.is_empty() {
+        println!("No Shards configured.");
+        return;
+    }
+
+    println!("Shards ({}):", list.total_shards);
+    let by_id: std::collections::HashMap<&str, &mdvdb::ShardInfo> = list
+        .shards
+        .iter()
+        .map(|shard| (shard.id.as_str(), shard))
+        .collect();
+    for shard in &list.shards {
+        let mut depth = 0;
+        let mut parent = shard.parent_id.as_deref();
+        while let Some(parent_id) = parent {
+            depth += 1;
+            if depth >= list.shards.len() {
+                break;
+            }
+            parent = by_id
+                .get(parent_id)
+                .and_then(|ancestor| ancestor.parent_id.as_deref());
+        }
+        print_shard_info(shard, depth);
+    }
+}
+
+fn run_shard_command(root: &std::path::Path, args: &ShardsArgs, json: bool) -> anyhow::Result<()> {
+    let store = mdvdb::ShardStore::new(root);
+    match &args.action {
+        ShardAction::List => {
+            let list = store.list()?;
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &list)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                print_shard_list(&list);
+            }
+        }
+        ShardAction::Get { id } => {
+            let shard = store.get(id)?;
+            if json {
+                serde_json::to_writer_pretty(std::io::stdout(), &shard)?;
+                writeln!(std::io::stdout())?;
+            } else {
+                print_shard_info(&shard, 0);
+                if let Some(parent) = &shard.parent_id {
+                    println!("Parent: {parent}");
+                }
+            }
+        }
+        ShardAction::Add {
+            id,
+            path,
+            name,
+            create_dir,
+        } => {
+            let mutation = store.add(
+                mdvdb::ShardDefinition {
+                    id: id.clone(),
+                    name: name.clone().unwrap_or_else(|| default_shard_name(id)),
+                    path: path.clone(),
+                },
+                *create_dir,
+            )?;
+            print_shard_mutation(&mutation, json)?;
+        }
+        ShardAction::Update {
+            id,
+            name,
+            path,
+            create_dir,
+        } => {
+            if name.is_none() && path.is_none() && !*create_dir {
+                anyhow::bail!("shards update requires --name, --path, or --create-dir");
+            }
+            let mutation = store.update(id, name.clone(), path.clone(), *create_dir)?;
+            print_shard_mutation(&mutation, json)?;
+        }
+        ShardAction::Remove { id } => {
+            let mutation = store.remove(id)?;
+            print_shard_mutation(&mutation, json)?;
+        }
+        ShardAction::Retarget {
+            old_prefix,
+            new_prefix,
+        } => {
+            let mutation = store.retarget(old_prefix, new_prefix)?;
+            print_shard_mutation(&mutation, json)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_shard_mutation(mutation: &mdvdb::ShardMutation, json: bool) -> anyhow::Result<()> {
+    if json {
+        serde_json::to_writer_pretty(std::io::stdout(), mutation)?;
+        writeln!(std::io::stdout())?;
+    } else {
+        println!("Shard {}:", mutation.action);
+        for shard in &mutation.shards {
+            print_shard_info(shard, 0);
+        }
+    }
+    Ok(())
+}
+
+fn empty_file_tree() -> mdvdb::tree::FileTree {
+    mdvdb::tree::FileTree {
+        root: mdvdb::tree::FileTreeNode {
+            name: ".".to_string(),
+            path: ".".to_string(),
+            is_dir: true,
+            state: None,
+            children: Vec::new(),
+        },
+        total_files: 0,
+        indexed_count: 0,
+        modified_count: 0,
+        new_count: 0,
+        deleted_count: 0,
+    }
+}
+
 /// Run the main logic, returning Result for error handling. Errors are printed to stderr.
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -621,9 +881,21 @@ async fn run() -> anyhow::Result<()> {
         Some(root) => root.clone(),
         None => std::env::current_dir()?,
     };
-    let config = mdvdb::config::Config::load(&cwd)?;
     let json = cli.json;
     let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some();
+
+    // Shards are deliberately read from the raw project YAML rather than the
+    // merged runtime Config. Handle them before Config::load so management is
+    // available before ingest and cannot inherit user-level definitions.
+    if let Some(Commands::Shards(args)) = cli.command.as_ref() {
+        run_shard_command(&cwd, args, json)?;
+        if let Ok(Some(msg)) = update_handle.await {
+            eprintln!("{msg}");
+        }
+        return Ok(());
+    }
+
+    let config = mdvdb::config::Config::load(&cwd)?;
 
     match cli.command {
         Some(Commands::Search(args)) => {
@@ -640,6 +912,8 @@ async fn run() -> anyhow::Result<()> {
                 config.search_default_mode
             };
 
+            let scope_path =
+                resolve_shard_or_path(&cwd, args.path.as_deref(), args.shard.as_deref())?;
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
 
             let mut query = SearchQuery::new(&args.query);
@@ -658,7 +932,7 @@ async fn run() -> anyhow::Result<()> {
                 query = query.with_boost_links(false);
             }
             query = query.with_mode(mode);
-            if let Some(ref path) = args.path {
+            if let Some(ref path) = scope_path {
                 query = query.with_path_prefix(path);
             }
             if args.decay {
@@ -903,8 +1177,11 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Info(args)) => {
+            let scope_path =
+                resolve_shard_or_path(&cwd, args.path.as_deref(), args.shard.as_deref())?
+                    .unwrap_or_else(|| ".".to_string());
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let info = vdb.info(Some(&args.path))?;
+            let info = vdb.info(Some(&scope_path))?;
 
             if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &info)?;
@@ -914,9 +1191,11 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Schema(args)) => {
+            let scope_path =
+                resolve_shard_or_path(&cwd, args.path.as_deref(), args.shard.as_deref())?;
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
 
-            if let Some(ref prefix) = args.path {
+            if let Some(ref prefix) = scope_path {
                 let scoped = vdb.schema_scoped(prefix)?;
 
                 if json {
@@ -941,6 +1220,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Clusters(args)) => {
+            let shard_id = args.shard.clone();
             match args.action {
                 Some(ClusterAction::Add {
                     name,
@@ -952,27 +1232,37 @@ async fn run() -> anyhow::Result<()> {
                     let description = normalize_description(description);
                     validate_topic_fields(&name, &seed_list, description.as_deref(), threshold)?;
 
-                    // Read existing defs, add new one, write back.
-                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
-                    let mut defs = read_custom_clusters_from_yaml(&yaml_config_path);
-
-                    // Check for duplicate name.
-                    if defs.iter().any(|d| d.name == name) {
-                        anyhow::bail!("topic '{}' already exists", name);
-                    }
-
-                    defs.push(mdvdb::CustomClusterDef {
+                    let definition = mdvdb::CustomClusterDef {
                         name: name.clone(),
                         description,
                         seeds: seed_list,
                         threshold,
-                    });
-
-                    write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
+                    };
+                    if let Some(shard_id) = shard_id.as_deref() {
+                        let mutation =
+                            mdvdb::ShardStore::new(&cwd).add_topic(shard_id, definition)?;
+                        if json {
+                            serde_json::to_writer_pretty(std::io::stdout(), &mutation)?;
+                            writeln!(std::io::stdout())?;
+                        }
+                    } else {
+                        let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                        mutate_custom_clusters_in_yaml(&yaml_config_path, |defs| {
+                            if defs.iter().any(|d| d.name == name) {
+                                anyhow::bail!("topic '{}' already exists", name);
+                            }
+                            defs.push(definition);
+                            Ok(())
+                        })?;
+                    }
 
                     if !json {
+                        let location = shard_id
+                            .as_deref()
+                            .map(|id| format!(" in Shard '{id}'"))
+                            .unwrap_or_default();
                         eprintln!(
-                            "Added topic '{name}'. Run `mdvdb ingest` to compute assignments."
+                            "Added topic '{name}'{location}. Run `mdvdb ingest` to compute assignments."
                         );
                     }
                 }
@@ -983,67 +1273,123 @@ async fn run() -> anyhow::Result<()> {
                     threshold,
                     rename,
                 }) => {
-                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
-                    let mut defs = read_custom_clusters_from_yaml(&yaml_config_path);
+                    if let Some(shard_id) = shard_id.as_deref() {
+                        let store = mdvdb::ShardStore::new(&cwd);
+                        let definitions = store.topics(shard_id)?;
+                        let Some(mut definition) = definitions
+                            .into_iter()
+                            .find(|definition| definition.name == name)
+                        else {
+                            anyhow::bail!("topic '{}' not found in Shard '{}'", name, shard_id);
+                        };
+                        if let Some(seeds) = seeds.as_deref() {
+                            definition.seeds = parse_seed_list(Some(seeds))?;
+                        }
+                        if let Some(description) = description {
+                            definition.description = normalize_description(Some(description));
+                        }
+                        if let Some(value) = threshold {
+                            definition.threshold = (value >= 0.0).then_some(value);
+                        }
+                        if let Some(rename) = rename {
+                            definition.name = rename;
+                        }
+                        validate_topic_fields(
+                            &definition.name,
+                            &definition.seeds,
+                            definition.description.as_deref(),
+                            definition.threshold,
+                        )?;
+                        let updated_name = definition.name.clone();
+                        let mutation = store.update_topic(shard_id, &name, definition)?;
+                        if json {
+                            serde_json::to_writer_pretty(std::io::stdout(), &mutation)?;
+                            writeln!(std::io::stdout())?;
+                        } else {
+                            eprintln!(
+                                "Updated topic '{updated_name}' in Shard '{shard_id}'. Run `mdvdb ingest` to recompute assignments."
+                            );
+                        }
+                    } else {
+                        let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                        let def_snapshot =
+                            mutate_custom_clusters_in_yaml(&yaml_config_path, |defs| {
+                                let Some(def) = defs.iter_mut().find(|d| d.name == name) else {
+                                    anyhow::bail!("topic '{}' not found", name);
+                                };
 
-                    let Some(def) = defs.iter_mut().find(|d| d.name == name) else {
-                        anyhow::bail!("topic '{}' not found", name);
-                    };
+                                if let Some(seeds) = seeds.as_deref() {
+                                    def.seeds = parse_seed_list(Some(seeds))?;
+                                }
+                                if let Some(desc) = description {
+                                    def.description = normalize_description(Some(desc));
+                                }
+                                if let Some(t) = threshold {
+                                    def.threshold = if t < 0.0 { None } else { Some(t) };
+                                }
+                                if let Some(new_name) = rename {
+                                    def.name = new_name;
+                                }
+                                let def_snapshot = def.clone();
+                                validate_topic_fields(
+                                    &def_snapshot.name,
+                                    &def_snapshot.seeds,
+                                    def_snapshot.description.as_deref(),
+                                    def_snapshot.threshold,
+                                )?;
+                                let duplicates =
+                                    defs.iter().filter(|d| d.name == def_snapshot.name).count();
+                                if duplicates > 1 {
+                                    anyhow::bail!("topic '{}' already exists", def_snapshot.name);
+                                }
+                                Ok(def_snapshot)
+                            })?;
 
-                    if let Some(seeds) = seeds.as_deref() {
-                        def.seeds = parse_seed_list(Some(seeds))?;
-                    }
-                    if let Some(desc) = description {
-                        def.description = normalize_description(Some(desc));
-                    }
-                    if let Some(t) = threshold {
-                        def.threshold = if t < 0.0 { None } else { Some(t) };
-                    }
-                    if let Some(new_name) = rename {
-                        def.name = new_name;
-                    }
-                    let def_snapshot = def.clone();
-                    validate_topic_fields(
-                        &def_snapshot.name,
-                        &def_snapshot.seeds,
-                        def_snapshot.description.as_deref(),
-                        def_snapshot.threshold,
-                    )?;
-                    let duplicates = defs.iter().filter(|d| d.name == def_snapshot.name).count();
-                    if duplicates > 1 {
-                        anyhow::bail!("topic '{}' already exists", def_snapshot.name);
-                    }
-
-                    write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
-
-                    if !json {
-                        eprintln!(
-                            "Updated topic '{}'. Run `mdvdb ingest` to recompute assignments.",
-                            def_snapshot.name
-                        );
+                        if !json {
+                            eprintln!(
+                                "Updated topic '{}'. Run `mdvdb ingest` to recompute assignments.",
+                                def_snapshot.name
+                            );
+                        }
                     }
                 }
                 Some(ClusterAction::Remove { name }) => {
-                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
-                    let mut defs = read_custom_clusters_from_yaml(&yaml_config_path);
-                    let before_len = defs.len();
-                    defs.retain(|d| d.name != name);
-
-                    if defs.len() == before_len {
-                        anyhow::bail!("topic '{}' not found", name);
+                    if let Some(shard_id) = shard_id.as_deref() {
+                        let mutation =
+                            mdvdb::ShardStore::new(&cwd).remove_topic(shard_id, &name)?;
+                        if json {
+                            serde_json::to_writer_pretty(std::io::stdout(), &mutation)?;
+                            writeln!(std::io::stdout())?;
+                        }
+                    } else {
+                        let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                        mutate_custom_clusters_in_yaml(&yaml_config_path, |defs| {
+                            let before_len = defs.len();
+                            defs.retain(|d| d.name != name);
+                            if defs.len() == before_len {
+                                anyhow::bail!("topic '{}' not found", name);
+                            }
+                            Ok(())
+                        })?;
                     }
 
-                    write_custom_clusters_to_yaml(&yaml_config_path, &defs)?;
-
                     if !json {
+                        let location = shard_id
+                            .as_deref()
+                            .map(|id| format!(" in Shard '{id}'"))
+                            .unwrap_or_default();
                         eprintln!(
-                            "Removed topic '{name}'. Run `mdvdb ingest` to update assignments."
+                            "Removed topic '{name}'{location}. Run `mdvdb ingest` to update assignments."
                         );
                     }
                 }
                 Some(ClusterAction::List) => {
-                    let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
-                    let defs = read_custom_clusters_from_yaml(&yaml_config_path);
+                    let defs = if let Some(shard_id) = shard_id.as_deref() {
+                        mdvdb::ShardStore::new(&cwd).topics(shard_id)?
+                    } else {
+                        let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                        read_custom_clusters_from_yaml(&yaml_config_path)
+                    };
 
                     if json {
                         serde_json::to_writer_pretty(std::io::stdout(), &defs)?;
@@ -1051,7 +1397,11 @@ async fn run() -> anyhow::Result<()> {
                     } else if defs.is_empty() {
                         println!("No topic definitions.");
                     } else {
-                        println!("Topic definitions:");
+                        let location = shard_id
+                            .as_deref()
+                            .map(|id| format!(" for Shard '{id}'"))
+                            .unwrap_or_default();
+                        println!("Topic definitions{location}:");
                         for (i, def) in defs.iter().enumerate() {
                             println!("  {}. {}", i + 1, def.name);
                             if let Some(desc) = &def.description {
@@ -1068,7 +1418,11 @@ async fn run() -> anyhow::Result<()> {
                 }
                 Some(ClusterAction::Unassigned) => {
                     let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-                    let paths = vdb.topic_unassigned()?;
+                    let paths = if let Some(shard_id) = shard_id.as_deref() {
+                        vdb.topic_unassigned_for_shard(shard_id)?
+                    } else {
+                        vdb.topic_unassigned()?
+                    };
 
                     if json {
                         #[derive(serde::Serialize)]
@@ -1093,15 +1447,43 @@ async fn run() -> anyhow::Result<()> {
                 }
                 None => {
                     if args.custom {
-                        let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-                        let custom = vdb.custom_clusters()?;
-                        let unassigned_count = vdb.topic_unassigned()?.len();
+                        let vdb =
+                            MarkdownVdb::open_readonly_with_config(cwd.clone(), config)?;
+                        let (custom, unassigned_count) = if let Some(shard_id) = shard_id.as_deref()
+                        {
+                            (
+                                vdb.custom_clusters_for_shard(shard_id)?,
+                                vdb.topic_unassigned_for_shard(shard_id)?.len(),
+                            )
+                        } else {
+                            (vdb.custom_clusters()?, vdb.topic_unassigned()?.len())
+                        };
 
                         if json {
                             serde_json::to_writer_pretty(std::io::stdout(), &custom)?;
                             writeln!(std::io::stdout())?;
                         } else if custom.is_empty() {
-                            println!("No topics. Use `mdvdb clusters add` or define them in .markdownvdb/config.yaml and run ingest.");
+                            if let Some(shard_id) = shard_id.as_deref() {
+                                let store = mdvdb::ShardStore::new(&cwd);
+                                let shard = store.get(shard_id)?;
+                                let definitions = store.topics(shard_id)?;
+                                if !shard.exists {
+                                    println!(
+                                        "Shard '{}' folder '{}' is missing; restore or retarget it.",
+                                        shard.id, shard.path
+                                    );
+                                } else if definitions.is_empty() {
+                                    println!(
+                                        "No local Topics in Shard '{shard_id}'. Use `mdvdb clusters --shard {shard_id} add`."
+                                    );
+                                } else {
+                                    println!(
+                                        "Shard '{shard_id}' Topics need ingest. Run `mdvdb ingest` to compute local centroids and assignments."
+                                    );
+                                }
+                            } else {
+                                println!("No topics. Use `mdvdb clusters add` or define them in .markdownvdb/config.yaml and run ingest.");
+                            }
                         } else {
                             let total_docs: usize = custom.iter().map(|c| c.document_count).sum();
                             println!(
@@ -1128,12 +1510,30 @@ async fn run() -> anyhow::Result<()> {
                             println!("  Unassigned: {unassigned_count} documents");
                         }
                     } else {
-                        let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-                        let clusters = vdb.clusters()?;
+                        let vdb =
+                            MarkdownVdb::open_readonly_with_config(cwd.clone(), config)?;
+                        let clusters = if let Some(shard_id) = shard_id.as_deref() {
+                            vdb.clusters_for_shard(shard_id)?
+                        } else {
+                            vdb.clusters()?
+                        };
 
                         if json {
                             serde_json::to_writer_pretty(std::io::stdout(), &clusters)?;
                             writeln!(std::io::stdout())?;
+                        } else if clusters.is_empty()
+                            && shard_id.as_deref().is_some_and(|id| {
+                                mdvdb::ShardStore::new(&cwd)
+                                    .get(id)
+                                    .is_ok_and(|shard| !shard.exists)
+                            })
+                        {
+                            let shard =
+                                mdvdb::ShardStore::new(&cwd).get(shard_id.as_deref().unwrap())?;
+                            println!(
+                                "Shard '{}' folder '{}' is missing; local clusters are disabled.",
+                                shard.id, shard.path
+                            );
                         } else {
                             format::print_clusters(&clusters);
                         }
@@ -1142,62 +1542,24 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Tree(args)) => {
+            let scope_path =
+                resolve_shard_or_path(&cwd, args.path.as_deref(), args.shard.as_deref())?;
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let tree = vdb.file_tree()?;
 
             if json {
-                if let Some(ref prefix) = args.path {
-                    if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
-                        let filtered = mdvdb::tree::FileTree {
-                            root: subtree,
-                            ..tree
-                        };
-                        serde_json::to_writer_pretty(std::io::stdout(), &filtered)?;
-                    } else {
-                        let empty = mdvdb::tree::FileTree {
-                            root: mdvdb::tree::FileTreeNode {
-                                name: ".".to_string(),
-                                path: ".".to_string(),
-                                is_dir: true,
-                                state: None,
-                                children: Vec::new(),
-                            },
-                            total_files: 0,
-                            indexed_count: 0,
-                            modified_count: 0,
-                            new_count: 0,
-                            deleted_count: 0,
-                        };
-                        serde_json::to_writer_pretty(std::io::stdout(), &empty)?;
-                    }
+                if let Some(ref prefix) = scope_path {
+                    let filtered = mdvdb::tree::filter_file_tree(&tree, prefix)
+                        .unwrap_or_else(empty_file_tree);
+                    serde_json::to_writer_pretty(std::io::stdout(), &filtered)?;
                 } else {
                     serde_json::to_writer_pretty(std::io::stdout(), &tree)?;
                 }
                 writeln!(std::io::stdout())?;
-            } else if let Some(ref prefix) = args.path {
-                if let Some(subtree) = mdvdb::tree::filter_subtree(&tree.root, prefix) {
-                    let filtered = mdvdb::tree::FileTree {
-                        root: subtree,
-                        ..tree
-                    };
-                    format::print_file_tree(&filtered, !no_color);
-                } else {
-                    let empty = mdvdb::tree::FileTree {
-                        root: mdvdb::tree::FileTreeNode {
-                            name: ".".to_string(),
-                            path: ".".to_string(),
-                            is_dir: true,
-                            state: None,
-                            children: Vec::new(),
-                        },
-                        total_files: 0,
-                        indexed_count: 0,
-                        modified_count: 0,
-                        new_count: 0,
-                        deleted_count: 0,
-                    };
-                    format::print_file_tree(&empty, !no_color);
-                }
+            } else if let Some(ref prefix) = scope_path {
+                let filtered =
+                    mdvdb::tree::filter_file_tree(&tree, prefix).unwrap_or_else(empty_file_tree);
+                format::print_file_tree(&filtered, !no_color);
             } else {
                 format::print_file_tree(&tree, !no_color);
             }
@@ -1219,6 +1581,9 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Collection(args)) => {
+            let scope_path =
+                resolve_shard_or_path(&cwd, args.path.as_deref(), args.shard.as_deref())?
+                    .unwrap_or_else(|| ".".to_string());
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
 
             let mut filters = Vec::new();
@@ -1227,7 +1592,7 @@ async fn run() -> anyhow::Result<()> {
             }
 
             let opts = CollectionQuery {
-                path: mdvdb::path_util::normalize_path_input(&args.path),
+                path: mdvdb::path_util::normalize_path_input(&scope_path),
                 recursive: args.recursive,
                 sort_by: args.sort,
                 order: args.order,
@@ -1333,6 +1698,10 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Graph(args)) => {
+            let scope_path = args
+                .path
+                .as_deref()
+                .map(mdvdb::path_util::normalize_path_input);
             let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
             let level = match args.level {
                 GraphLevelArg::Document => GraphLevel::Document,
@@ -1344,18 +1713,58 @@ async fn run() -> anyhow::Result<()> {
                     // The compact contract is also serialized without JSON
                     // indentation to minimize bytes copied across the app's
                     // process boundary.
-                    let data = vdb.graph_compact(level, args.path.as_deref())?;
+                    let data = if let Some(shard_id) = args.shard.as_deref() {
+                        match level {
+                            GraphLevel::Document => {
+                                vdb.graph_data_compact_for_shard(shard_id, scope_path.as_deref())?
+                            }
+                            GraphLevel::Chunk => vdb
+                                .graph_data_chunks_for_shard(5, shard_id, scope_path.as_deref())?
+                                .into(),
+                        }
+                    } else {
+                        vdb.graph_compact(level, scope_path.as_deref())?
+                    };
                     serde_json::to_writer(std::io::stdout(), &data)?;
                 } else {
                     // Preserve the existing public CLI JSON byte shape and
                     // pretty-printing unless compact output is explicitly set.
-                    let data = vdb.graph(level, args.path.as_deref())?;
+                    let data = if let Some(shard_id) = args.shard.as_deref() {
+                        match level {
+                            GraphLevel::Document => {
+                                vdb.graph_data_for_shard(shard_id, scope_path.as_deref())?
+                            }
+                            GraphLevel::Chunk => {
+                                vdb.graph_data_chunks_for_shard(5, shard_id, scope_path.as_deref())?
+                            }
+                        }
+                    } else {
+                        vdb.graph(level, scope_path.as_deref())?
+                    };
                     serde_json::to_writer_pretty(std::io::stdout(), &data)?;
                 }
                 writeln!(std::io::stdout())?;
             } else {
-                let data = vdb.graph(level, args.path.as_deref())?;
+                let data = if let Some(shard_id) = args.shard.as_deref() {
+                    match level {
+                        GraphLevel::Document => {
+                            vdb.graph_data_for_shard(shard_id, scope_path.as_deref())?
+                        }
+                        GraphLevel::Chunk => {
+                            vdb.graph_data_chunks_for_shard(5, shard_id, scope_path.as_deref())?
+                        }
+                    }
+                } else {
+                    vdb.graph(level, scope_path.as_deref())?
+                };
                 format::print_graph_summary(&data);
+                if let Some(message) = data
+                    .analysis
+                    .as_ref()
+                    .and_then(|analysis| analysis.message.as_deref())
+                {
+                    println!("  Note: {message}");
+                }
             }
         }
         Some(Commands::Watch(_args)) => {
@@ -1447,9 +1856,14 @@ async fn run() -> anyhow::Result<()> {
                     }
                 }
             }
-            ModuleAction::Run { module, path } => {
+            ModuleAction::Run {
+                module,
+                path,
+                shard,
+            } => {
+                let scope_path = resolve_shard_or_path(&cwd, path.as_deref(), shard.as_deref())?;
                 let vdb = MarkdownVdb::open_with_config(cwd, config)?;
-                let report = vdb.run_module(&module, path.as_deref())?;
+                let report = vdb.run_module(&module, scope_path.as_deref())?;
                 if json {
                     serde_json::to_writer_pretty(std::io::stdout(), &report)?;
                     writeln!(std::io::stdout())?;
@@ -1463,9 +1877,14 @@ async fn run() -> anyhow::Result<()> {
                     );
                 }
             }
-            ModuleAction::Status { module, path } => {
+            ModuleAction::Status {
+                module,
+                path,
+                shard,
+            } => {
+                let scope_path = resolve_shard_or_path(&cwd, path.as_deref(), shard.as_deref())?;
                 let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-                let diagnostics = vdb.module_status(&module, path.as_deref())?;
+                let diagnostics = vdb.module_status(&module, scope_path.as_deref())?;
                 if json {
                     serde_json::to_writer_pretty(std::io::stdout(), &diagnostics)?;
                     writeln!(std::io::stdout())?;
@@ -1582,7 +2001,7 @@ _mdvdb() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="search ingest status info schema clusters tree get collection watch modules init config doctor links backlinks orphans completions"
+    commands="search ingest status info schema clusters shards tree get collection watch modules init config doctor links backlinks orphans edges graph completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands --help --version --verbose --root --json --no-color" -- "$cur"))
@@ -1593,19 +2012,36 @@ _mdvdb() {
             COMPREPLY=($(compgen -W "--reindex --preview --file --full --help" -- "$cur"))
             ;;
         search)
-            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --decay --no-decay --decay-half-life --decay-exclude --decay-include --hops --expand --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --shard --decay --no-decay --decay-half-life --decay-exclude --decay-include --hops --expand --help" -- "$cur"))
             ;;
         tree)
-            COMPREPLY=($(compgen -W "--path --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--path --shard --help" -- "$cur"))
             ;;
         get)
             COMPREPLY=($(compgen -f -- "$cur"))
             ;;
         info)
-            COMPREPLY=($(compgen -d -- "$cur"))
+            COMPREPLY=($(compgen -W "--shard --help" -- "$cur"))
             ;;
         collection|list)
-            COMPREPLY=($(compgen -W "--recursive --sort --order --filter --limit --offset --help" -- "$cur"))
+            COMPREPLY=($(compgen -W "--shard --recursive --sort --order --filter --limit --offset --help" -- "$cur"))
+            ;;
+        schema|graph)
+            COMPREPLY=($(compgen -W "--path --shard --help" -- "$cur"))
+            ;;
+        clusters)
+            COMPREPLY=($(compgen -W "add update remove list unassigned --custom --shard --help" -- "$cur"))
+            ;;
+        shards)
+            COMPREPLY=($(compgen -W "list get add create update remove delete retarget --help" -- "$cur"))
+            ;;
+        run)
+            COMPREPLY=($(compgen -W "--path --shard --help" -- "$cur"))
+            ;;
+        status)
+            if [ "${COMP_WORDS[1]}" = "modules" ]; then
+                COMPREPLY=($(compgen -W "--path --shard --help" -- "$cur"))
+            fi
             ;;
         init)
             COMPREPLY=($(compgen -W "--global --help" -- "$cur"))
@@ -1628,6 +2064,7 @@ _mdvdb() {
         'info:Show vault or folder stats'
         'schema:Show inferred metadata schema'
         'clusters:Show document clusters'
+        'shards:Manage named recursive folder scopes'
         'tree:Show file tree with sync status indicators'
         'get:Get metadata for a specific file'
         'collection:List a folder'\''s documents as a table'
@@ -1639,6 +2076,8 @@ _mdvdb() {
         'links:Show links originating from a file'
         'backlinks:Show backlinks pointing to a file'
         'orphans:Find orphan files with no links'
+        'edges:Show semantic edges between linked files'
+        'graph:Show graph data for visualization'
     )
 
     _arguments \
@@ -1675,6 +2114,7 @@ _mdvdb() {
                         '--semantic[Shorthand for --mode=semantic]' \
                         '--lexical[Shorthand for --mode=lexical]' \
                         '--path[Restrict to path prefix]:path:' \
+                        '--shard[Restrict to a configured Shard]:shard:' \
                         '--decay[Enable time decay]' \
                         '--no-decay[Disable time decay]' \
                         '--decay-half-life[Half-life in days]:days:' \
@@ -1685,17 +2125,39 @@ _mdvdb() {
                     ;;
                 info)
                     _arguments \
-                        '1:path:_directories'
+                        '1:path:_directories' \
+                        '--shard[Restrict to a configured Shard]:shard:'
                     ;;
                 collection|list)
                     _arguments \
                         '1:path:_directories' \
+                        '--shard[Restrict to a configured Shard]:shard:' \
                         '(-r --recursive)'{-r,--recursive}'[Include nested subfolders]' \
                         '--sort[Frontmatter field to sort by]:field:' \
                         '--order[Sort direction]:order:(asc desc)' \
                         '(-f --filter)'{-f,--filter}'[Metadata filter (KEY=VALUE)]:filter:' \
                         '--limit[Maximum rows to return]:number:' \
                         '--offset[Rows to skip]:number:'
+                    ;;
+                schema|tree|graph)
+                    _arguments \
+                        '--path[Restrict to path prefix]:path:' \
+                        '--shard[Restrict to a configured Shard]:shard:'
+                    ;;
+                clusters)
+                    _arguments \
+                        '1:action:(add update remove list unassigned)' \
+                        '--custom[Show Shard-local Topics instead of auto clusters]' \
+                        '--shard[Use analysis and Topics local to a configured Shard]:shard:'
+                    ;;
+                shards)
+                    _arguments '1:action:(list get add create update remove delete retarget)'
+                    ;;
+                modules)
+                    _arguments \
+                        '1:action:(list validate run status)' \
+                        '--path[Restrict to path prefix]:path:' \
+                        '--shard[Restrict to a configured Shard]:shard:'
                     ;;
             esac
             ;;
@@ -1711,6 +2173,7 @@ complete -c mdvdb -n '__fish_use_subcommand' -a status -d 'Show index status and
 complete -c mdvdb -n '__fish_use_subcommand' -a info -d 'Show vault or folder stats'
 complete -c mdvdb -n '__fish_use_subcommand' -a schema -d 'Show inferred metadata schema'
 complete -c mdvdb -n '__fish_use_subcommand' -a clusters -d 'Show document clusters'
+complete -c mdvdb -n '__fish_use_subcommand' -a shards -d 'Manage named recursive folder scopes'
 complete -c mdvdb -n '__fish_use_subcommand' -a tree -d 'Show file tree with sync status indicators'
 complete -c mdvdb -n '__fish_use_subcommand' -a get -d 'Get metadata for a specific file'
 complete -c mdvdb -n '__fish_use_subcommand' -a collection -d 'List a folder'\''s documents as a table'
@@ -1722,6 +2185,8 @@ complete -c mdvdb -n '__fish_use_subcommand' -a doctor -d 'Run diagnostic checks
 complete -c mdvdb -n '__fish_use_subcommand' -a links -d 'Show links originating from a file'
 complete -c mdvdb -n '__fish_use_subcommand' -a backlinks -d 'Show backlinks pointing to a file'
 complete -c mdvdb -n '__fish_use_subcommand' -a orphans -d 'Find orphan files with no links'
+complete -c mdvdb -n '__fish_use_subcommand' -a edges -d 'Show semantic edges between linked files'
+complete -c mdvdb -n '__fish_use_subcommand' -a graph -d 'Show graph data for visualization'
 complete -c mdvdb -n '__fish_use_subcommand' -a completions -d 'Generate shell completions'
 
 # Global flags
@@ -1746,6 +2211,7 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l mode -d 'Search mod
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l semantic -d 'Shorthand for --mode=semantic'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l lexical -d 'Shorthand for --mode=lexical'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l path -d 'Restrict to path prefix'
+complete -c mdvdb -n '__fish_seen_subcommand_from search' -l shard -d 'Restrict to a configured Shard' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay -d 'Enable time decay'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l no-decay -d 'Disable time decay'
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-half-life -d 'Half-life in days' -r
@@ -1756,11 +2222,22 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l expand -d 'Graph ex
 
 # Collection subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l recursive -s r -d 'Include nested subfolders'
+complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l shard -d 'Restrict to a configured Shard' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l sort -d 'Frontmatter field to sort by' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l order -d 'Sort direction' -r -a 'asc desc'
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l filter -s f -d 'Metadata filter (KEY=VALUE)' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l limit -d 'Maximum rows to return' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l offset -d 'Rows to skip' -r
+
+# Shard-aware inspection flags
+complete -c mdvdb -n '__fish_seen_subcommand_from info schema tree graph' -l shard -d 'Restrict to a configured Shard' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from schema tree graph' -l path -d 'Restrict to path prefix' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from clusters' -l shard -d 'Use analysis and Topics local to a configured Shard' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from clusters' -l custom -d 'Show Shard-local Topics instead of auto clusters'
+complete -c mdvdb -n '__fish_seen_subcommand_from clusters' -a 'add update remove list unassigned'
+complete -c mdvdb -n '__fish_seen_subcommand_from shards' -a 'list get add create update remove delete retarget'
+complete -c mdvdb -n '__fish_seen_subcommand_from modules' -l path -d 'Restrict module operation to a path prefix' -r
+complete -c mdvdb -n '__fish_seen_subcommand_from modules' -l shard -d 'Restrict module operation to a configured Shard' -r
 
 # Init subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from init' -l global -d 'Create global config'
@@ -1779,6 +2256,7 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
         @{ Name = 'info'; Tooltip = 'Show vault or folder stats' },
         @{ Name = 'schema'; Tooltip = 'Show inferred metadata schema' },
         @{ Name = 'clusters'; Tooltip = 'Show document clusters' },
+        @{ Name = 'shards'; Tooltip = 'Manage named recursive folder scopes' },
         @{ Name = 'tree'; Tooltip = 'Show file tree with sync status indicators' },
         @{ Name = 'get'; Tooltip = 'Get metadata for a specific file' },
         @{ Name = 'collection'; Tooltip = 'List a folder''s documents as a table' },
@@ -1789,7 +2267,9 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
         @{ Name = 'doctor'; Tooltip = 'Run diagnostic checks' },
         @{ Name = 'links'; Tooltip = 'Show links originating from a file' },
         @{ Name = 'backlinks'; Tooltip = 'Show backlinks pointing to a file' },
-        @{ Name = 'orphans'; Tooltip = 'Find orphan files with no links' }
+        @{ Name = 'orphans'; Tooltip = 'Find orphan files with no links' },
+        @{ Name = 'edges'; Tooltip = 'Show semantic edges between linked files' },
+        @{ Name = 'graph'; Tooltip = 'Show graph data for visualization' }
     )
     $commands | Where-Object { $_.Name -like "$wordToComplete*" } | ForEach-Object {
         [System.Management.Automation.CompletionResult]::new($_.Name, $_.Name, 'ParameterValue', $_.Tooltip)
@@ -1800,6 +2280,7 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
             write!(std::io::stdout(), "{}", script)?;
             writeln!(std::io::stdout())?;
         }
+        Some(Commands::Shards(_)) => unreachable!("Shard commands return before Config::load"),
         None => {
             format::print_logo();
             println!("{}", "  Run `mdvdb --help` for usage information.".dimmed());
@@ -1895,52 +2376,73 @@ fn read_custom_clusters_from_yaml(yaml_path: &std::path::Path) -> Vec<mdvdb::Cus
         .collect()
 }
 
-/// Write custom cluster definitions to a YAML config file, preserving other settings.
-fn write_custom_clusters_to_yaml(
-    yaml_path: &std::path::Path,
-    defs: &[mdvdb::CustomClusterDef],
-) -> anyhow::Result<()> {
-    let clusters: Vec<serde_yaml::Value> = defs
-        .iter()
-        .map(|d| {
-            let mut map = serde_yaml::Mapping::new();
-            map.insert(
-                serde_yaml::Value::String("name".into()),
-                serde_yaml::Value::String(d.name.clone()),
-            );
-            if let Some(desc) = &d.description {
-                map.insert(
-                    serde_yaml::Value::String("description".into()),
-                    serde_yaml::Value::String(desc.clone()),
-                );
-            }
-            if !d.seeds.is_empty() {
-                map.insert(
-                    serde_yaml::Value::String("seeds".into()),
-                    serde_yaml::Value::Sequence(
-                        d.seeds
-                            .iter()
-                            .map(|s| serde_yaml::Value::String(s.clone()))
-                            .collect(),
-                    ),
-                );
-            }
-            if let Some(t) = d.threshold {
-                map.insert(
-                    serde_yaml::Value::String("threshold".into()),
-                    serde_yaml::Value::Number(serde_yaml::Number::from(t as f64)),
-                );
-            }
-            serde_yaml::Value::Mapping(map)
+fn custom_clusters_from_yaml_value(
+    value: Option<&serde_yaml::Value>,
+) -> Vec<mdvdb::CustomClusterDef> {
+    let clusters: Vec<mdvdb::config::YamlCustomCluster> = value
+        .cloned()
+        .and_then(|value| serde_yaml::from_value(value).ok())
+        .unwrap_or_default();
+    clusters
+        .into_iter()
+        .map(|cluster| mdvdb::CustomClusterDef {
+            name: cluster.name,
+            description: cluster.description,
+            seeds: cluster.seeds,
+            threshold: cluster.threshold,
         })
-        .collect();
+        .collect()
+}
 
-    mdvdb::config::update_yaml_config_value(
-        yaml_path,
-        "clustering.custom",
-        serde_yaml::Value::Sequence(clusters),
-    )?;
-    Ok(())
+fn custom_clusters_to_yaml_value(defs: &[mdvdb::CustomClusterDef]) -> serde_yaml::Value {
+    serde_yaml::Value::Sequence(
+        defs.iter()
+            .map(|d| {
+                let mut map = serde_yaml::Mapping::new();
+                map.insert(
+                    serde_yaml::Value::String("name".into()),
+                    serde_yaml::Value::String(d.name.clone()),
+                );
+                if let Some(desc) = &d.description {
+                    map.insert(
+                        serde_yaml::Value::String("description".into()),
+                        serde_yaml::Value::String(desc.clone()),
+                    );
+                }
+                if !d.seeds.is_empty() {
+                    map.insert(
+                        serde_yaml::Value::String("seeds".into()),
+                        serde_yaml::Value::Sequence(
+                            d.seeds
+                                .iter()
+                                .map(|s| serde_yaml::Value::String(s.clone()))
+                                .collect(),
+                        ),
+                    );
+                }
+                if let Some(t) = d.threshold {
+                    map.insert(
+                        serde_yaml::Value::String("threshold".into()),
+                        serde_yaml::Value::Number(serde_yaml::Number::from(t as f64)),
+                    );
+                }
+                serde_yaml::Value::Mapping(map)
+            })
+            .collect(),
+    )
+}
+
+/// Mutate topic definitions while holding the shared project config lock for
+/// the complete read-modify-write transaction.
+fn mutate_custom_clusters_in_yaml<T>(
+    yaml_path: &std::path::Path,
+    mutate: impl FnOnce(&mut Vec<mdvdb::CustomClusterDef>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    mdvdb::config::mutate_yaml_config_value(yaml_path, "clustering.custom", |current| {
+        let mut definitions = custom_clusters_from_yaml_value(current);
+        let output = mutate(&mut definitions)?;
+        Ok((custom_clusters_to_yaml_value(&definitions), output))
+    })
 }
 
 #[tokio::main]

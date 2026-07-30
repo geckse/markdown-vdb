@@ -34,6 +34,7 @@ mdvdb search [OPTIONS] <QUERY>
 | `--lexical` | | | | Shorthand for `--mode=lexical` |
 | `--edge-search` | | | | Shorthand for `--mode=edge` (search edge embeddings) |
 | `--path` | | `<PREFIX>` | | Restrict search to files under this path prefix |
+| `--shard` | | `<ID>` | | Restrict search to a configured named Shard (conflicts with `--path`) |
 | `--decay` | | | `false` | Enable time decay (favor recently modified files) |
 | `--no-decay` | | | | Disable time decay (even if enabled in config) |
 | `--decay-half-life` | | `<DAYS>` | `90.0` | Half-life in days for time decay (how many days until score is halved) |

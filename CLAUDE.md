@@ -100,6 +100,26 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Config:** YAML config files with deep merge strategy. Resolution: shell env `MDVDB_*` > `.markdownvdb/config.yaml` (project) > `.env` (secrets only) > `~/.mdvdb/config.yaml` (user) > defaults. Legacy dotenv configs are auto-migrated on first load. **Secrets** (`OPENAI_API_KEY`, `OLLAMA_HOST`) never live in YAML — they resolve shell env > `<root>/.env` > `<root>/.markdownvdb/.env` > `~/.mdvdb/.env` > legacy `~/.mdvdb/config` (all via dotenvy, non-overriding; `MDVDB_*` keys introduced by these files are stripped). Dotenv migration preserves non-MDVDB keys into a sibling `.env` instead of dropping them. The YAML config is organized into 7 domains: `embedding` (provider, model, dimensions, batch size), `search` (default limit, mode, weights, decay settings), `chunking` (max tokens, overlap), `clustering` (algorithm, knn, resolution, min_cluster_size, topics defaults, custom topic definitions), `watch` (debounce interval), `index` (directory path), and `sources` (ignore patterns). Multiple YAML files are deep-merged recursively (maps merged key-by-key, scalars overwritten by higher-priority source).
 - **Index directory:** `.markdownvdb/` contains `config.yaml` + `index` (binary: `[64B header][rkyv metadata][usearch HNSW]`; unreadable/outdated index files are deleted and rebuilt on open) + `fts/` (Tantivy BM25 segments). Configured via `MDVDB_INDEX_DIR` or `index.dir` in YAML.
 - **Paths:** ALL file paths in the index are relative to project root. Never absolute.
+- **Shards (phase 33):** A Shard is a project-local named recursive folder lens stored under
+  `shards:` in the raw `.markdownvdb/config.yaml`. It reuses the Collection's one index, watcher,
+  link graph, and root-relative document identities; it is not an index partition or access
+  boundary. Never read Shards from merged user config. All path scopes use
+  `path_util::path_is_in_scope` so `docs` cannot match `docs-old`. Shard/config/topic/settings
+  YAML mutations share `.markdownvdb/config.lock`, preserve unrelated keys, and write atomically.
+  Management never touches the index and therefore requires no index/version bump. Full spec:
+  `docs/prds/phase-33-named-shards.md` (app counterpart:
+  `app/docs/prds/phase-47-named-shards.md`).
+- **Shard-native analysis (phase 34):** Shards remain shared-index lenses, but their graph analysis
+  is independent: strict in-Shard topology, automatic clusters recomputed from only in-Shard
+  stored document vectors, and local Topic definitions stored as `shards.<id>.topics` in raw
+  project YAML with no Collection/ancestor/sibling inheritance. Disposable state lives in
+  `.markdownvdb/cache/shards/<id>.json`; it may contain derived cluster/Topic state and centroids,
+  never document embeddings or topology. Read-only graph/cluster requests never initialize an
+  embedding provider. A stale Topic centroid reports `needs_ingest`, while corpus-only changes
+  reuse compatible centroids. `graph --shard ID --path DESCENDANT` analyzes the complete Shard and
+  only projects visible topology. No index or compact-wire version changes. Full spec:
+  `docs/prds/phase-34-shard-native-graph-analysis.md` (app counterpart:
+  `app/docs/prds/phase-48-shard-native-graph-analysis.md`).
 - **Errors:** `thiserror` for typed library errors, `anyhow` only at CLI boundary in `main.rs`
 - **Concurrency:** `parking_lot::RwLock` (not std). Read lock for queries, write lock only during upsert.
 - **Writes:** Always atomic — write to `.tmp`, fsync, rename. Never write directly to index file.
@@ -109,7 +129,15 @@ docs/prds/               # PRD specifications for all 18 phases (reference)
 - **Ignore files:** `.gitignore` respected automatically. `.mdvdbignore` (same syntax) for index-only exclusions. 15 built-in dir ignores always applied. `MDVDB_IGNORE_PATTERNS` env var for additional patterns.
 - **Chunking:** Primary split by headings, secondary token-count size guard. Deterministic `"path#index"` IDs.
 - **Clustering:** Document-level vectors (averaged chunk vectors per file, unit-normalized; cosine everywhere). Default algorithm is **Leiden community detection** on an exact cosine k-NN graph (`clustering.algorithm: leiden`, seeded → deterministic); K-means remains as `kmeans` fallback. Cluster ids are **stable across re-clustering** (Jaccard member-overlap matching against the previous state, fresh ids minted from a persisted counter) but NOT contiguous — treat as opaque. One derived parent hierarchy level (`parent_id`/`parent_clusters`) when >6 clusters. Labels via cross-cluster TF-IDF with bigrams and smoothed IDF; each cluster stores a `representative` doc. Zero-norm docs land in `unclustered`.
-- **Topics (custom clusters):** User-defined via `clustering.custom` in YAML (`name` + optional `description` + optional `seeds` + optional `threshold`) or `MDVDB_CUSTOM_CLUSTERS` env var (legacy pipe format or JSON). Centroid = normalize(0.6·embed("name: description") + 0.4·mean(normalized seed embeddings)). Assignment is **multi-label**: a doc joins every topic with cosine ≥ max(topic.threshold, `clustering.topics.min_similarity` [default 0.30]); docs matching nothing go to the explicit **Unassigned** bucket; per-membership similarity scores are persisted. A SHA-256 fingerprint of (defs, floor, model, dims) is stored in the state — any ingest detects definition changes and recomputes centroids/assignments; unchanged defs reuse stored centroids (no provider calls).
+- **Topics (custom clusters):** Collection Topics are user-defined via `clustering.custom` in YAML
+  (`name` + optional `description` + optional `seeds` + optional `threshold`) or
+  `MDVDB_CUSTOM_CLUSTERS`. Shard-local Topics use the same shape under
+  `shards.<id>.topics` and never inherit. Centroid =
+  normalize(0.6·embed("name: description") + 0.4·mean(normalized seed embeddings)). Assignment is
+  **multi-label**: a doc joins every topic with cosine ≥ max(topic.threshold,
+  `clustering.topics.min_similarity` [default 0.30]); docs matching nothing go to the explicit
+  **Unassigned** bucket; per-membership similarity scores are persisted. Fingerprints cover
+  definitions, floor, model, and dimensions; unchanged compatible centroids are reused.
 - **CLI:** `mdvdb clusters add|update|remove|list|unassigned` manage topics in `config.yaml`; `mdvdb clusters --custom` shows computed topics; `mdvdb config set <dotted.key> <value>` writes any YAML config key (used by the Tesseract app GUI).
 - **CLI output:** stdout for data (JSON with `--json`, human-readable otherwise), stderr for errors/logs. Search JSON uses wrapped format: `{"results": [...], "query": "...", "total_results": N}`. When `--expand` is used, includes `"graph_context": [...]` with linked-file chunks.
 
@@ -166,7 +194,12 @@ vdb.watch(cancel)       // File watcher with CancellationToken
 vdb.config()            // Access current config
 ```
 
-Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `SearchResponse`, `GraphContextItem`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `CustomClusterDef`, `CustomClusterInfo`, `CustomClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `VaultInfo`, `SyncBreakdown`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`, `NeighborhoodNode`, `NeighborhoodResult`, `RelationValue`, `ReferencedBy`, `RelationContext`, `FrontmatterLink`.
+Project-local Shards are managed through `ShardStore::new(root)` with
+`list/get/resolve_path/add/update/remove/retarget`; local Topic CRUD operates on the same locked
+raw-YAML entry. Shard-aware analysis methods mirror cluster, Topic, unassigned, standard graph,
+compact graph, and chunk graph queries while leaving Collection methods unchanged.
+
+Key re-exports: `Config`, `SearchQuery`, `SearchResult`, `SearchResultFile`, `SearchResponse`, `GraphContextItem`, `GraphAnalysisInfo`, `GraphAnalysisContext`, `ClusterAnalysisStatus`, `TopicAnalysisStatus`, `MetadataFilter`, `Schema`, `SchemaField`, `FieldType`, `ClusterInfo`, `ClusterState`, `CustomClusterDef`, `CustomClusterInfo`, `CustomClusterState`, `IndexStatus`, `IngestOptions`, `IngestResult`, `VaultInfo`, `SyncBreakdown`, `SearchMode`, `FileTree`, `FileTreeNode`, `FileState`, `LinkGraph`, `LinkEntry`, `ResolvedLink`, `OrphanFile`, `NeighborhoodNode`, `NeighborhoodResult`, `RelationValue`, `ReferencedBy`, `RelationContext`, `FrontmatterLink`, `ShardDefinition`, `ShardInfo`, `ShardList`, `ShardMutation`, `ShardTopicMutation`, `ShardStore`.
 
 ## Development Workflow
 
@@ -235,3 +268,4 @@ Full specifications for all 18 phases live in `docs/prds/`. These document the d
 | 30 | `phase-30-leiden-clustering-and-topics.md` | Leiden auto-clustering (stable ids, hierarchy, seeded determinism) + multi-label topics (descriptions, thresholds, Unassigned, fingerprint). Supersedes semantics of phases 9 & 27; app counterpart: app repo `phase-40-topics-and-graph-coloring.md` |
 | 31 | `phase-31-frontmatter-relations.md` | Frontmatter relations (wiki-link foreign keys): `FieldType::Relation` + overlay `target:`, field-tagged link-graph edges, `--populate` (RelationValue + referenced_by), relation-aware filters, doctor Relations check. App counterpart: app repo `phase-42-frontmatter-relations.md` |
 | 32 | `phase-32-vault-info-command.md` | Read-only whole-vault/folder statistics, sync breakdown, reindex cost estimate, edge-aware status, and doctor index invariant fix. App counterpart: app repo `phase-45-collection-info-modal.md` |
+| 33 | `phase-33-named-shards.md` | Project-local named recursive folder lenses over one shared Collection index; CRUD, `--shard`, segment-safe scoping, config locking, and Tesseract tree selection. App counterpart: `app/docs/prds/phase-47-named-shards.md` |

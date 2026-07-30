@@ -6,7 +6,49 @@ category: "guides"
 
 # Configuration
 
-mdvdb uses dotenv-style configuration files and environment variables. No TOML, no YAML config -- just `KEY=VALUE` pairs that can live in config files or be set directly as shell environment variables.
+> Current releases use YAML at `.markdownvdb/config.yaml`. Legacy dotenv files described below
+> are migrated and remain documented for compatibility.
+
+## Project-local Shards
+
+Named Shards are the one project-local configuration domain that is intentionally not merged with
+user defaults. This prevents a Shard from another project appearing in the current Collection.
+
+```yaml
+shards:
+  research:
+    name: Research
+    path: work/research
+    topics:
+      - name: Methods
+        description: Research methods and experiments
+        seeds: [methodology, experiment]
+        threshold: 0.35
+  papers:
+    name: Papers
+    path: work/research/papers
+```
+
+The key (`research`) is an immutable kebab-case ID. `name` and `path` can be updated through
+[`mdvdb shards`](./commands/shards.md). Paths are collection-relative recursive folder scopes:
+they do not create another index or isolate links. Shard, topic, and `config set` mutations share
+an advisory `.markdownvdb/config.lock` and preserve unrelated YAML keys.
+
+The optional `topics` list belongs only to that Shard. It uses the same definition shape as
+`clustering.custom`, but Collection, parent-Shard, and sibling Topics are not inherited. Topic names
+need only be unique inside their owner. Automatic clustering settings and
+`clustering.topics.min_similarity` remain Collection-wide. During Shard-local Leiden analysis,
+the configured `clustering.knn` is an upper bound: the effective KNN is capped at
+`max(2, ceil(sqrt(document_count)))` to preserve meaningful communities in small Shards. This
+adaptive cap does not change Collection clustering.
+
+Shard graph analysis writes only disposable derived state to
+`.markdownvdb/cache/shards/<ID>.json`. These files can be removed safely and never contain document
+embeddings or graph topology. New or changed Shard Topic definitions need one ingest to create
+their centroids; read-only graph and cluster commands never contact an embedding provider.
+
+Runtime settings support YAML plus legacy dotenv-style files and environment variables. The
+sections below explain the legacy `KEY=VALUE` compatibility path as well as resolution priority.
 
 ## Config Resolution Order
 

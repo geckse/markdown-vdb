@@ -64,6 +64,8 @@ After installation, pressing `Tab` will complete:
 - Subcommands: `mdvdb se<Tab>` completes to `mdvdb search`
 - Global flags: `mdvdb --<Tab>` shows `--help`, `--version`, `--verbose`, `--root`, `--json`, `--no-color`
 - Command-specific flags: `mdvdb search --<Tab>` shows `--limit`, `--filter`, `--mode`, `--path`, etc.
+- Shard actions and selectors: `mdvdb shards <Tab>` shows the management actions, and scoped
+  commands complete `--shard`.
 - File paths: `mdvdb get <Tab>` completes file paths
 - Shell types: `mdvdb completions <Tab>` shows `bash`, `zsh`, `fish`, `power-shell`
 - Init flags: `mdvdb init --<Tab>` shows `--global`, `--help`
@@ -155,6 +157,8 @@ Fish completions provide rich descriptions for all subcommands and flags:
 - Subcommands with descriptions: `mdvdb <Tab>` shows all commands with tooltips
 - Global flags: `--verbose`, `--root`, `--json`, `--no-color` available on every subcommand
 - Search flags: `--limit`, `--filter`, `--mode`, `--semantic`, `--lexical`, `--path`, `--decay`, `--boost-links`, `--hops`, `--expand`, and more
+- Shard actions plus `--shard` on search, tree, info, schema, collection, clusters, graph, and
+  module commands. Graph completion permits a descendant `--path` together with `--shard`.
 - Init flags: `--global`
 - Completions shell types: `bash`, `zsh`, `fish`, `power-shell`
 

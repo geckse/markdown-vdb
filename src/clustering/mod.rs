@@ -24,7 +24,7 @@ pub(crate) mod leiden;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ndarray::Array2;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::config::{ClusteringAlgorithm, Config};
@@ -48,7 +48,7 @@ const TOPIC_DESC_WEIGHT: f32 = 0.6;
 const TOPIC_SEED_WEIGHT: f32 = 0.4;
 
 /// Information about a single cluster, stored in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct ClusterInfo {
     /// Numeric cluster identifier — stable across re-clustering, not contiguous.
@@ -71,7 +71,7 @@ pub struct ClusterInfo {
 }
 
 /// Cluster state persisted in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct ClusterState {
     /// All clusters.
@@ -109,7 +109,7 @@ impl ClusterState {
 
 /// User-defined custom cluster (topic) definition — config-layer only, not
 /// persisted in the index.
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CustomClusterDef {
     /// User-provided topic name.
     pub name: String,
@@ -128,7 +128,7 @@ pub struct CustomClusterDef {
 }
 
 /// One document's membership in a topic, with its cosine similarity score.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct TopicMember {
     /// File path (relative).
@@ -138,7 +138,7 @@ pub struct TopicMember {
 }
 
 /// Information about a single user-defined topic, stored in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct CustomClusterInfo {
     /// Numeric cluster identifier (0-based, = definition order).
@@ -160,7 +160,7 @@ pub struct CustomClusterInfo {
 }
 
 /// Custom cluster (topics) state persisted in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize)]
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
 #[rkyv(derive(Debug))]
 pub struct CustomClusterState {
     /// All topics.

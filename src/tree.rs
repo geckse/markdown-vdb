@@ -66,7 +66,10 @@ pub fn build_file_tree(root: &Path, config: &Config, index: &Index) -> Result<Fi
             // File exists in index — compare hashes
             let full_path = root.join(rel_path);
             let content = std::fs::read_to_string(&full_path).map_err(|e| {
-                Error::Io(std::io::Error::new(e.kind(), format!("{}: {}", rel_path, e)))
+                Error::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {}", rel_path, e),
+                ))
             })?;
             let disk_hash = compute_content_hash(&content);
             if disk_hash == *expected_hash {
@@ -248,7 +251,8 @@ fn render_node_children(children: &[FileTreeNode], prefix: &str, colored: bool, 
 /// Walks the tree looking for the directory matching `prefix`. Returns the matching
 /// subtree node, or `None` if no match is found.
 pub fn filter_subtree(tree: &FileTreeNode, prefix: &str) -> Option<FileTreeNode> {
-    let prefix = prefix.trim_end_matches('/');
+    let normalized = crate::path_util::normalize_path_input(prefix);
+    let prefix = normalized.trim_end_matches('/');
 
     // Check if this node matches
     if tree.path == prefix || (tree.path == "." && prefix == ".") {
@@ -262,7 +266,7 @@ pub fn filter_subtree(tree: &FileTreeNode, prefix: &str) -> Option<FileTreeNode>
                 return Some(child.clone());
             }
             // Check if the prefix is deeper within this child
-            if prefix.starts_with(&format!("{}/", child.path)) {
+            if crate::path_util::path_is_in_scope(prefix, &child.path) {
                 return filter_subtree(child, prefix);
             }
         }
@@ -271,14 +275,49 @@ pub fn filter_subtree(tree: &FileTreeNode, prefix: &str) -> Option<FileTreeNode>
     None
 }
 
+/// Filter a complete file tree and recompute its summary for the selected subtree.
+///
+/// The returned counts describe only the files below `prefix`; callers should
+/// use this instead of replacing [`FileTree::root`] while retaining the
+/// collection-wide counters.
+pub fn filter_file_tree(tree: &FileTree, prefix: &str) -> Option<FileTree> {
+    fn count_states(node: &FileTreeNode, counts: &mut [usize; 4]) {
+        if node.is_dir {
+            for child in &node.children {
+                count_states(child, counts);
+            }
+            return;
+        }
+
+        match node.state {
+            Some(FileState::Indexed) => counts[0] += 1,
+            Some(FileState::Modified) => counts[1] += 1,
+            Some(FileState::New) => counts[2] += 1,
+            Some(FileState::Deleted) => counts[3] += 1,
+            None => {}
+        }
+    }
+
+    let root = filter_subtree(&tree.root, prefix)?;
+    let mut counts = [0usize; 4];
+    count_states(&root, &mut counts);
+
+    Some(FileTree {
+        root,
+        total_files: counts.iter().sum(),
+        indexed_count: counts[0],
+        modified_count: counts[1],
+        new_count: counts[2],
+        deleted_count: counts[3],
+    })
+}
+
 /// Recursively sort children: directories first (alphabetical), then files (alphabetical).
 fn sort_children(node: &mut FileTreeNode) {
-    node.children.sort_by(|a, b| {
-        match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        }
+    node.children.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
     });
     for child in &mut node.children {
         if child.is_dir {
@@ -290,11 +329,11 @@ fn sort_children(node: &mut FileTreeNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-    use std::path::PathBuf;
     use crate::config::EmbeddingProviderType;
-    use crate::index::Index;
     use crate::index::types::EmbeddingConfig;
+    use crate::index::Index;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
 
     const DIMS: usize = 8;
 
@@ -589,10 +628,35 @@ mod tests {
     }
 
     #[test]
-    fn test_render_tree_deleted_suffix() {
+    fn test_filter_file_tree_recomputes_summary_counts() {
         let entries = vec![
-            ("old.md".to_string(), FileState::Deleted),
+            ("docs/api/auth.md".to_string(), FileState::Indexed),
+            ("docs/guide.md".to_string(), FileState::Modified),
+            ("docs/new.md".to_string(), FileState::New),
+            ("docs-old/deleted.md".to_string(), FileState::Deleted),
+            ("root.md".to_string(), FileState::Indexed),
         ];
+        let tree = FileTree {
+            root: build_tree_from_entries(&entries),
+            total_files: 5,
+            indexed_count: 2,
+            modified_count: 1,
+            new_count: 1,
+            deleted_count: 1,
+        };
+
+        let scoped = filter_file_tree(&tree, "docs").unwrap();
+        assert_eq!(scoped.root.path, "docs");
+        assert_eq!(scoped.total_files, 3);
+        assert_eq!(scoped.indexed_count, 1);
+        assert_eq!(scoped.modified_count, 1);
+        assert_eq!(scoped.new_count, 1);
+        assert_eq!(scoped.deleted_count, 0);
+    }
+
+    #[test]
+    fn test_render_tree_deleted_suffix() {
+        let entries = vec![("old.md".to_string(), FileState::Deleted)];
         let root = build_tree_from_entries(&entries);
         let tree = FileTree {
             root,

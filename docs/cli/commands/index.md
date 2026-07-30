@@ -16,7 +16,8 @@ This page lists all available `mdvdb` commands. Click a command name for its ful
 | [`mdvdb ingest`](./ingest.md) | Ingest markdown files into the index |
 | [`mdvdb status`](./status.md) | Show index status and configuration |
 | [`mdvdb schema`](./schema.md) | Show inferred metadata schema |
-| [`mdvdb clusters`](./clusters.md) | Show document clusters |
+| [`mdvdb clusters`](./clusters.md) | Inspect automatic communities and manage Collection or Shard Topics |
+| [`mdvdb shards`](./shards.md) | Manage named recursive folder scopes |
 | [`mdvdb tree`](./tree.md) | Show file tree with sync status indicators |
 | [`mdvdb get`](./get.md) | Get metadata for a specific file |
 | [`mdvdb watch`](./watch.md) | Watch for file changes and re-index automatically |
@@ -27,7 +28,7 @@ This page lists all available `mdvdb` commands. Click a command name for its ful
 | [`mdvdb backlinks`](./backlinks.md) | Show backlinks pointing to a file |
 | [`mdvdb orphans`](./orphans.md) | Find orphan files with no links |
 | [`mdvdb edges`](./edges.md) | Show semantic edges between linked files |
-| [`mdvdb graph`](./graph.md) | Show graph data (nodes, edges, clusters) for visualization |
+| [`mdvdb graph`](./graph.md) | Show Collection- or Shard-native graph analysis for visualization |
 
 ## Commands by Category
 
@@ -49,6 +50,7 @@ See [Configuration](../configuration.md) for the full environment variable and c
 |---------|---------|
 | [`init`](./init.md) | Create a `.markdownvdb` config file (project or global) |
 | [`config`](./config.md) | Display the fully resolved configuration with all values |
+| [`shards`](./shards.md) | Create and manage project-local named folder scopes |
 | [`doctor`](./doctor.md) | Diagnose issues with config, embedding provider, and index |
 
 ### Data Inspection
@@ -58,7 +60,7 @@ See [Clustering](../concepts/clustering.md) for how clusters are computed and [I
 | Command | Purpose |
 |---------|---------|
 | [`schema`](./schema.md) | View auto-inferred frontmatter metadata schema |
-| [`clusters`](./clusters.md) | View document clusters with TF-IDF keyword labels |
+| [`clusters`](./clusters.md) | View automatic communities or manage independent scoped Topics |
 | [`tree`](./tree.md) | View file tree with per-file sync status (New/Modified/Synced/Deleted) |
 | [`get`](./get.md) | Retrieve metadata and frontmatter for a single file |
 
@@ -72,7 +74,7 @@ See [Link Graph](../concepts/link-graph.md) for how links are extracted and the 
 | [`backlinks`](./backlinks.md) | Show files that link to a given file |
 | [`orphans`](./orphans.md) | Find files with no incoming or outgoing links |
 | [`edges`](./edges.md) | Show semantic edges (relationship labels) between linked files |
-| [`graph`](./graph.md) | Export full graph data for visualization tools |
+| [`graph`](./graph.md) | Export Collection or Shard-local graph analysis |
 
 ### Automation
 

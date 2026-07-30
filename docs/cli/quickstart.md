@@ -304,6 +304,21 @@ mdvdb search "deploy" --decay
 
 # Restrict search to a specific directory
 mdvdb search "deploy" --path docs/
+
+# Reuse that folder scope by name (no second index is created)
+mdvdb shards add docs --name Docs --path docs
+mdvdb search "deploy" --shard docs
+
+# Inspect communities derived only from that Shard's indexed documents
+mdvdb clusters --shard docs
+mdvdb graph --shard docs
+
+# Add an independent Topic to the Shard, then ingest its centroid
+mdvdb clusters --shard docs add Deployment --seeds docker,kubernetes
+mdvdb ingest
+
+# Keep Shard-wide cluster identities while viewing one descendant folder
+mdvdb graph --shard docs --path docs/api
 ```
 
 ## Quick Reference
@@ -315,6 +330,10 @@ mdvdb search "deploy" --path docs/
 | Re-index everything | `mdvdb ingest --reindex` |
 | Semantic search | `mdvdb search "query"` |
 | Search with JSON output | `mdvdb search "query" --json` |
+| Create a reusable folder scope | `mdvdb shards add <id> --path <folder>` |
+| Search a named Shard | `mdvdb search "query" --shard <id>` |
+| Analyze a Shard's own clusters | `mdvdb clusters --shard <id>` |
+| Manage a Shard's own Topics | `mdvdb clusters --shard <id> add <name> [...]` |
 | Check index status | `mdvdb status` |
 | Run diagnostics | `mdvdb doctor` |
 | Watch for changes | `mdvdb watch` |

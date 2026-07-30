@@ -24,8 +24,8 @@ All CLI commands are documented individually under [Commands](./commands/index.m
 | Category | Commands | Description |
 |----------|----------|-------------|
 | Core | [search](./commands/search.md), [ingest](./commands/ingest.md), [status](./commands/status.md) | Index files and search across them |
-| Setup | [init](./commands/init.md), [config](./commands/config.md), [doctor](./commands/doctor.md) | Initialize, configure, and diagnose |
-| Inspection | [schema](./commands/schema.md), [clusters](./commands/clusters.md), [tree](./commands/tree.md), [get](./commands/get.md) | Explore index contents and metadata |
+| Setup | [init](./commands/init.md), [config](./commands/config.md), [shards](./commands/shards.md), [doctor](./commands/doctor.md) | Initialize, configure, and diagnose |
+| Inspection | [schema](./commands/schema.md), [clusters](./commands/clusters.md), [tree](./commands/tree.md), [get](./commands/get.md) | Explore Collection or Shard analysis and metadata |
 | Graph | [links](./commands/links.md), [backlinks](./commands/backlinks.md), [orphans](./commands/orphans.md), [edges](./commands/edges.md), [graph](./commands/graph.md) | Navigate the link graph between files |
 | Automation | [watch](./commands/watch.md) | Automatically re-index on file changes |
 

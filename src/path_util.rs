@@ -5,6 +5,7 @@
 //! source of truth for converting OS paths (which use `\` on Windows) and
 //! caller-supplied path strings into that canonical form.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 /// Convert a path to a `/`-separated string (lossy on non-UTF-8).
@@ -21,6 +22,42 @@ pub fn to_slash(p: &Path) -> String {
 /// inputs match the `/`-separated keys stored in the index.
 pub fn normalize_path_input(s: &str) -> String {
     s.replace('\\', "/")
+}
+
+/// Return whether `path` is exactly `scope` or is a descendant of it.
+///
+/// Both arguments accept the collection's canonical `/` separators as well as
+/// Windows `\` separators. A trailing separator on the scope is ignored, and
+/// `""`, `"."`, and `"./"` represent the collection root.
+///
+/// This is deliberately segment-aware: the scope `docs` contains
+/// `docs/guide.md`, but never `docs-old/guide.md`.
+pub fn path_is_in_scope(path: &str, scope: &str) -> bool {
+    fn slash_normalized(value: &str) -> Cow<'_, str> {
+        if value.contains('\\') {
+            Cow::Owned(value.replace('\\', "/"))
+        } else {
+            Cow::Borrowed(value)
+        }
+    }
+
+    fn trim_relative_root(value: &str) -> &str {
+        value.strip_prefix("./").unwrap_or(value)
+    }
+
+    let path = slash_normalized(path);
+    let scope = slash_normalized(scope);
+    let path = trim_relative_root(&path).trim_end_matches('/');
+    let scope = trim_relative_root(&scope).trim_end_matches('/');
+
+    if scope.is_empty() || scope == "." {
+        return true;
+    }
+
+    path == scope
+        || path
+            .strip_prefix(scope)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -72,5 +109,33 @@ mod tests {
     #[test]
     fn normalize_path_input_empty() {
         assert_eq!(normalize_path_input(""), "");
+    }
+
+    #[test]
+    fn path_scope_matches_exact_path_and_descendants() {
+        assert!(path_is_in_scope("docs", "docs"));
+        assert!(path_is_in_scope("docs/guide.md", "docs"));
+        assert!(path_is_in_scope("docs/api/auth.md", "docs/"));
+    }
+
+    #[test]
+    fn path_scope_is_segment_safe() {
+        assert!(!path_is_in_scope("docs-old/guide.md", "docs"));
+        assert!(!path_is_in_scope("documentation/guide.md", "docs"));
+        assert!(!path_is_in_scope("nested/docs/guide.md", "docs"));
+    }
+
+    #[test]
+    fn path_scope_accepts_windows_separators() {
+        assert!(path_is_in_scope(r"docs\api\auth.md", r"docs\api"));
+        assert!(path_is_in_scope("docs/api/auth.md", r"docs\api\\"));
+        assert!(!path_is_in_scope(r"docs-old\auth.md", r"docs"));
+    }
+
+    #[test]
+    fn path_scope_root_forms_match_everything() {
+        for root in ["", ".", "./"] {
+            assert!(path_is_in_scope("docs/guide.md", root));
+        }
     }
 }

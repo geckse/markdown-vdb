@@ -49,6 +49,55 @@ Commands that output their library type directly:
 - [`config`](#config) - `Config` directly
 - [`ingest --preview`](#ingestpreview) - `IngestPreview` directly
 
+Shard management has its own stable contracts:
+
+- `shards list` emits `{"shards": ShardInfo[], "total_shards": number}`.
+- `shards get <ID>` emits one `ShardInfo`.
+- Mutations emit `{"action": string, "shards": ShardInfo[]}`.
+- `ShardInfo` always contains `id`, `name`, `path`, nullable `parent_id`, and `exists`.
+
+Shard-local Topic mutations use the same raw Shard owner and emit:
+
+```json
+{
+  "action": "add",
+  "shard_id": "research",
+  "topics": [
+    {
+      "name": "Methods",
+      "description": "Research methods and experiments",
+      "seeds": ["methodology", "experiment"],
+      "threshold": 0.35
+    }
+  ]
+}
+```
+
+`topics` is the complete post-mutation definition list for that Shard. Collection-level Topic
+mutation output remains unchanged.
+
+See [`mdvdb shards`](./commands/shards.md) for examples. Passing `--shard` to a scoped command
+does not wrap or otherwise change that command's existing JSON shape.
+
+Shard graph responses may add an optional `analysis` object without changing compact graph wire
+version 1:
+
+```json
+{
+  "context": "shard",
+  "shard_id": "research",
+  "shard_path": "work/research",
+  "clusters": "ready",
+  "topics": "needs_ingest",
+  "message": "Shard Topics need re-ingest"
+}
+```
+
+`clusters` is one of `ready`, `disabled`, `too_small`, or `error`. `topics` is one of `ready`,
+`none`, `needs_ingest`, or `error`. The field is additive and optional; Collection graph consumers
+that do not use it retain their existing contract. Cluster and Topic commands also keep their
+existing array/object JSON shapes when `--shard` is supplied.
+
 ---
 
 ## SearchOutput

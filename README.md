@@ -60,8 +60,11 @@ git clone https://github.com/geckse/markdown-vdb-skills.git skills
 - **Time decay** — `--decay` applies exponential recency weighting with configurable half-life
 - **File watching** — automatic re-indexing on changes
 - **Metadata filtering** — combine any search mode with frontmatter filters
-- **Auto-clustering** — K-means topic clusters with TF-IDF keyword labels
+- **Auto-clustering** — deterministic Leiden communities (with K-means fallback), stable IDs, and
+  TF-IDF labels
 - **Path-scoped search** — `--path` restricts results to a directory subtree
+- **Named Shards** — reusable, nestable sub-collection scopes over one shared index; each Shard can
+  compute its own finer graph clusters and own independent Topics
 - **File tree** — `mdvdb tree` shows sync status of every file at a glance
 - **Diagnostics** — `mdvdb doctor` checks config, provider connectivity, and index health
 - **Preview mode** — `mdvdb ingest --preview` shows what would change without touching the index
@@ -87,6 +90,11 @@ mdvdb search "deploy" --lexical
 
 # Search with filters and path scope
 mdvdb search "authentication" --filter status=published --path docs/ --limit 5
+
+# Reuse a folder as a named Shard and analyze its own local communities
+mdvdb shards add research --path work/research
+mdvdb graph --shard research --json
+mdvdb clusters --shard research
 
 # Time-decayed search (favor recent files)
 mdvdb search "auth" --decay --decay-half-life 30
@@ -149,6 +157,7 @@ See [PROJECT.md](PROJECT.md) for the full configuration reference.
 | `mdvdb status` | Show index health and stats |
 | `mdvdb schema` | List available metadata fields and types |
 | `mdvdb clusters` | Browse auto-generated topic clusters |
+| `mdvdb shards` | Create and manage named recursive folder scopes |
 | `mdvdb tree` | Show file tree with sync status indicators |
 | `mdvdb get <path>` | Retrieve a specific document's metadata and frontmatter |
 | `mdvdb links <path>` | Show outgoing links from a file |
@@ -217,7 +226,9 @@ Markdown files → Discovery → Parsing → Chunking → Embedding → Index (H
 
 **Index format:** `[64B header][rkyv metadata][usearch HNSW]` (memory-mapped) + `fts/` directory (Tantivy BM25 segments).
 
-**Key dependencies:** `usearch` (HNSW vectors), `tantivy` (BM25 lexical search), `rkyv` (zero-copy serde), `memmap2` (memory mapping), `tiktoken-rs` (tokenization), `pulldown-cmark` (markdown parsing), `linfa` (K-means clustering).
+**Key dependencies:** `usearch` (HNSW vectors), `tantivy` (BM25 lexical search), `rkyv`
+(zero-copy serde), `memmap2` (memory mapping), `tiktoken-rs` (tokenization), `pulldown-cmark`
+(Markdown parsing), `leiden-rs` (community detection), and `linfa` (K-means fallback).
 
 ## Comparison
 

@@ -23,7 +23,8 @@ This command takes no arguments.
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--level` | | `document` | Graph granularity level: `document` or `chunk` |
-| `--path` | | | Restrict graph to files under this path prefix |
+| `--path` | | | Restrict visible graph topology to this collection-relative folder |
+| `--shard` | | | Use a configured Shard as the graph analysis context |
 
 ### `--level <LEVEL>`
 
@@ -31,7 +32,7 @@ Controls the granularity of the graph nodes.
 
 | Level | Description |
 |-------|-------------|
-| `document` (default) | One node per indexed file. Edges are markdown links between files. Clusters are document-level k-means clusters. |
+| `document` (default) | One node per indexed file. Edges are markdown links between files. Clusters are document-level communities. |
 | `chunk` | One node per chunk within each file. Edges are the top-k most similar chunk pairs across different files (based on cosine similarity of embeddings). Intra-file edges are excluded. |
 
 At **document level**, edges come from the markdown link graph (explicit links between files). At **chunk level**, edges come from embedding similarity (the top 5 most similar cross-file chunks for each chunk).
@@ -47,6 +48,29 @@ mdvdb graph --path docs/
 # Graph only for API documentation
 mdvdb graph --path docs/api/
 ```
+
+### `--shard <ID>`
+
+Uses the named Shard as an independent analysis corpus. Only indexed documents below the Shard
+folder participate in automatic clustering, and only that Shard's local Topic definitions are
+used. Collection, parent-Shard, and sibling Topics do not leak into the response.
+
+`--path` may be used together with `--shard` to project a descendant folder without changing the
+Shard-wide cluster and Topic identities:
+
+```bash
+mdvdb graph --shard research
+mdvdb graph --shard research --path work/research/drafts
+```
+
+A descendant path narrows the visible graph, an ancestor path clamps to the Shard, and a disjoint
+path returns an empty graph. In every case, returned edges form a strict induced graph: both
+endpoints are visible.
+
+Shard automatic clusters are computed lazily from existing stored document embeddings and cached
+outside the index. Graph reads never initialize an embedding provider. When local Topic centroids
+need to be created after a definition change, topology and automatic clusters remain available and
+the optional `analysis.topics` status reports `needs_ingest`.
 
 ## Global Options
 
@@ -130,6 +154,9 @@ mdvdb graph --path docs/api/
 # Chunk-level graph for a specific directory as JSON
 mdvdb graph --level chunk --path src/ --json
 
+# Analyze a Shard, then project one descendant folder
+mdvdb graph --shard research --path work/research/drafts --json
+
 # Graph with debug logging
 mdvdb graph -vv
 ```
@@ -186,6 +213,13 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
     }
   ],
   "level": "document",
+  "analysis": {
+    "context": "shard",
+    "shard_id": "research",
+    "shard_path": "work/research",
+    "clusters": "ready",
+    "topics": "ready"
+  },
   "edge_clusters": [
     {
       "id": 0,
@@ -253,6 +287,22 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
 | `clusters` | `GraphCluster[]` | Document cluster groupings with labels |
 | `level` | `string` | Graph level: `"document"` or `"chunk"` |
 | `edge_clusters` | `GraphCluster[]` | Edge cluster groupings (semantic relationship types). Only present at document level when edge clustering has been performed. Omitted when empty. |
+| `analysis` | `GraphAnalysisInfo` | Optional analysis context and readiness metadata. Present for Shard-native analysis; additive in compact wire version 1. |
+
+### GraphAnalysisInfo
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `context` | `"collection" \| "shard"` | Owner of cluster and Topic identities |
+| `shard_id` | `string` | Shard ID; omitted for Collection analysis |
+| `shard_path` | `string` | Normalized Shard root; omitted for Collection analysis |
+| `clusters` | `"ready" \| "disabled" \| "too_small" \| "error"` | Automatic-cluster state |
+| `topics` | `"ready" \| "none" \| "needs_ingest" \| "error"` | Local Topic state |
+| `message` | `string` | Optional guidance or error detail |
+
+Cluster, Topic, and edge-type summaries are pruned to entries represented by the visible graph and
+recounted from unique visible documents (or visible edges for edge types). Chunk nodes inherit
+their parent document's assignments, so legend counts remain document counts.
 
 ### GraphNode Fields
 

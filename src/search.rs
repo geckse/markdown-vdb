@@ -391,11 +391,18 @@ pub fn apply_time_decay(score: f64, modified_at: u64, half_life_days: f64, now: 
 /// or if the include list is non-empty and the path matches no include prefix.
 fn should_apply_decay(path: &str, exclude: &[String], include: &[String]) -> bool {
     // Exclude takes precedence
-    if exclude.iter().any(|p| path.starts_with(p.as_str())) {
+    if exclude
+        .iter()
+        .any(|scope| crate::path_util::path_is_in_scope(path, scope))
+    {
         return false;
     }
     // If include is non-empty, path must match at least one
-    if !include.is_empty() && !include.iter().any(|p| path.starts_with(p.as_str())) {
+    if !include.is_empty()
+        && !include
+            .iter()
+            .any(|scope| crate::path_util::path_is_in_scope(path, scope))
+    {
         return false;
     }
     true
@@ -433,7 +440,7 @@ pub async fn search(
     let total_start = Instant::now();
 
     // Validate: empty query is a no-op.
-    if query.query.trim().is_empty() {
+    if query.query.trim().is_empty() || query.limit == 0 {
         debug!("empty query, returning no results");
         return Ok(SearchResponse {
             results: Vec::new(),
@@ -465,10 +472,12 @@ pub async fn search(
         mode => mode,
     };
 
-    // Over-fetch to account for filtering. 5x for hybrid (RRF needs more candidates), 3x otherwise.
+    // Over-fetch to account for filtering. 5x for hybrid (RRF needs more
+    // candidates), 3x otherwise. Scoped searches widen this progressively
+    // below when the first global candidate window does not fill the limit.
     let over_fetch = match effective_mode {
-        SearchMode::Hybrid => query.limit * 5,
-        _ => query.limit * 3,
+        SearchMode::Hybrid => query.limit.saturating_mul(5),
+        _ => query.limit.saturating_mul(3),
     };
 
     // Track per-phase timing.
@@ -477,70 +486,69 @@ pub async fn search(
     let mut lexical_search_secs = 0.0_f64;
     let mut fusion_secs = 0.0_f64;
 
-    // Get ranked candidates and query embedding based on mode.
-    let mut query_embedding: Option<Vec<f32>> = None;
-    let mut ranked_candidates: Vec<(String, f64)> = match effective_mode {
-        SearchMode::Edge | SearchMode::Semantic => {
-            let (candidates, qvec, es, vs) =
-                semantic_search(query, index, provider, over_fetch).await?;
-            embed_secs = es;
-            vector_search_secs = vs;
-            query_embedding = Some(qvec);
-            candidates
-        }
-        SearchMode::Lexical => {
-            let fts = fts_index.unwrap(); // safe: checked above
-            let (results, ls) = lexical_search(query, fts, over_fetch)?;
-            lexical_search_secs = ls;
-            // If graph expansion is needed, embed the query for HNSW lookup.
-            if effective_expand_graph > 0 {
-                let t0 = Instant::now();
-                let embeddings = provider
-                    .embed_batch(std::slice::from_ref(&query.query))
-                    .await?;
-                embed_secs = t0.elapsed().as_secs_f64();
-                query_embedding = Some(embeddings[0].clone());
-            }
-            results
-        }
-        SearchMode::Hybrid => {
-            let fts = fts_index.unwrap(); // safe: checked above
-            let (semantic_results, lexical_results) =
-                tokio::join!(semantic_search(query, index, provider, over_fetch), async {
-                    lexical_search(query, fts, over_fetch)
-                });
-            let (semantic, qvec, es, vs) = semantic_results?;
-            let (lexical, ls) = lexical_results?;
-            embed_secs = es;
-            vector_search_secs = vs;
-            lexical_search_secs = ls;
-            query_embedding = Some(qvec);
-
-            debug!(
-                semantic_count = semantic.len(),
-                lexical_count = lexical.len(),
-                rrf_k = rrf_k,
-                "fusing semantic and lexical results via RRF"
-            );
-
-            let fusion_start = Instant::now();
-            let fused = reciprocal_rank_fusion(&semantic, &lexical, rrf_k);
-            fusion_secs = fusion_start.elapsed().as_secs_f64();
-            fused
-        }
+    // Embed at most once. Progressive scoped retrieval reuses this vector.
+    let needs_embedding = effective_mode != SearchMode::Lexical || effective_expand_graph > 0;
+    let query_embedding: Option<Vec<f32>> = if needs_embedding {
+        let t0 = Instant::now();
+        let embeddings = provider
+            .embed_batch(std::slice::from_ref(&query.query))
+            .await?;
+        embed_secs = t0.elapsed().as_secs_f64();
+        Some(embeddings.into_iter().next().ok_or_else(|| {
+            Error::EmbeddingProvider("provider returned no query embedding".to_string())
+        })?)
+    } else {
+        None
     };
+
+    let status = index.status();
+    let fts_document_count = match (effective_mode, fts_index) {
+        (SearchMode::Lexical | SearchMode::Hybrid, Some(fts)) => fts.num_docs()? as usize,
+        _ => 0,
+    };
+    let candidate_ceiling = match effective_mode {
+        SearchMode::Edge => status.edge_count,
+        SearchMode::Semantic => status.chunk_count,
+        SearchMode::Lexical => fts_document_count,
+        SearchMode::Hybrid => status.chunk_count.max(fts_document_count),
+    };
+    let mut candidate_limit = over_fetch.min(candidate_ceiling);
 
     // --- Edge-first retrieval mode ---
     if effective_mode == SearchMode::Edge {
-        let assemble_start = Instant::now();
         let link_graph = index.get_link_graph();
-        let edge_results = if let Some(qe) = &query_embedding {
-            let edge_candidates = index.search_edges(qe, query.limit)?;
-            assemble_edge_results(&edge_candidates, link_graph.as_ref())
-        } else {
-            Vec::new()
-        };
-        let assemble_secs = assemble_start.elapsed().as_secs_f64();
+        let mut assemble_secs = 0.0_f64;
+        let mut edge_results = Vec::new();
+
+        loop {
+            if candidate_limit == 0 {
+                break;
+            }
+            let search_start = Instant::now();
+            let edge_candidates = index.search_edges(
+                require_query_embedding(query_embedding.as_deref())?,
+                candidate_limit,
+            )?;
+            vector_search_secs += search_start.elapsed().as_secs_f64();
+            let edge_assembly_start = Instant::now();
+            edge_results = assemble_edge_results(
+                &edge_candidates,
+                link_graph.as_ref(),
+                query.path_prefix.as_deref(),
+            );
+            edge_results.truncate(query.limit);
+            assemble_secs += edge_assembly_start.elapsed().as_secs_f64();
+
+            if edge_results.len() >= query.limit {
+                break;
+            }
+            let Some(next_limit) = widened_candidate_limit(candidate_limit, candidate_ceiling)
+            else {
+                break;
+            };
+            candidate_limit = next_limit;
+        }
+
         let total_secs = total_start.elapsed().as_secs_f64();
 
         info!(
@@ -565,20 +573,6 @@ pub async fn search(
         });
     }
 
-    // Normalize scores to [0, 1] for non-semantic modes.
-    match effective_mode {
-        SearchMode::Lexical => normalize_bm25_scores(&mut ranked_candidates, bm25_norm_k),
-        SearchMode::Hybrid => normalize_rrf_scores(&mut ranked_candidates, rrf_k, 2),
-        SearchMode::Edge | SearchMode::Semantic => {} // already [0, 1] cosine similarity
-    }
-
-    debug!(
-        candidates = ranked_candidates.len(),
-        limit = query.limit,
-        mode = %effective_mode,
-        "search returned candidates"
-    );
-
     // Resolve decay settings: per-query overrides take priority over config.
     let should_decay = query.decay.unwrap_or(decay_enabled);
     let effective_half_life = query.decay_half_life.unwrap_or(decay_half_life);
@@ -595,26 +589,116 @@ pub async fn search(
     let link_graph = index.get_link_graph();
     let backlinks = link_graph.as_ref().map(links::compute_backlinks);
 
-    // Filter, assemble results, and apply min_score + multi-hop link boost.
-    let assemble_start = Instant::now();
-    let results = assemble_results(&AssembleParams {
-        query,
-        index,
-        candidates: &ranked_candidates,
-        decay_enabled: should_decay,
-        decay_half_life: effective_half_life,
-        decay_exclude: effective_decay_exclude,
-        decay_include: effective_decay_include,
-        boost_links: effective_boost_links,
-        boost_hops: effective_boost_hops,
-        link_graph: link_graph.as_ref(),
-        backlinks: backlinks.as_ref(),
-        now,
-        query_embedding: query_embedding.as_deref(),
-        edge_boost_weight,
-    })?;
+    // Retrieve, filter, and assemble results. If a scoped query is starved by
+    // globally higher-ranked candidates, double the window until the requested
+    // limit is filled or every candidate has been considered.
+    let mut assemble_secs = 0.0_f64;
+    let results = loop {
+        let mut ranked_candidates = match effective_mode {
+            SearchMode::Semantic => {
+                let search_start = Instant::now();
+                let candidates = if candidate_limit == 0 {
+                    Vec::new()
+                } else {
+                    index.search_vectors(
+                        require_query_embedding(query_embedding.as_deref())?,
+                        candidate_limit,
+                    )?
+                };
+                vector_search_secs += search_start.elapsed().as_secs_f64();
+                candidates
+            }
+            SearchMode::Lexical => {
+                let fts = fts_index.unwrap(); // safe: checked above
+                if candidate_limit == 0 {
+                    Vec::new()
+                } else {
+                    let (candidates, elapsed) = lexical_search(query, fts, candidate_limit)?;
+                    lexical_search_secs += elapsed;
+                    candidates
+                }
+            }
+            SearchMode::Hybrid => {
+                let fts = fts_index.unwrap(); // safe: checked above
+
+                let vector_start = Instant::now();
+                let semantic = if candidate_limit == 0 {
+                    Vec::new()
+                } else {
+                    index.search_vectors(
+                        require_query_embedding(query_embedding.as_deref())?,
+                        candidate_limit,
+                    )?
+                };
+                vector_search_secs += vector_start.elapsed().as_secs_f64();
+
+                let lexical = if candidate_limit == 0 {
+                    Vec::new()
+                } else {
+                    let (candidates, elapsed) = lexical_search(query, fts, candidate_limit)?;
+                    lexical_search_secs += elapsed;
+                    candidates
+                };
+
+                debug!(
+                    semantic_count = semantic.len(),
+                    lexical_count = lexical.len(),
+                    rrf_k = rrf_k,
+                    "fusing semantic and lexical results via RRF"
+                );
+                let fusion_start = Instant::now();
+                let fused = reciprocal_rank_fusion(&semantic, &lexical, rrf_k);
+                fusion_secs += fusion_start.elapsed().as_secs_f64();
+                fused
+            }
+            SearchMode::Edge => unreachable!("edge mode returns above"),
+        };
+
+        // Normalize scores to [0, 1] for non-semantic modes.
+        match effective_mode {
+            SearchMode::Lexical => normalize_bm25_scores(&mut ranked_candidates, bm25_norm_k),
+            SearchMode::Hybrid => normalize_rrf_scores(&mut ranked_candidates, rrf_k, 2),
+            SearchMode::Edge | SearchMode::Semantic => {}
+        }
+
+        debug!(
+            candidates = ranked_candidates.len(),
+            candidate_limit,
+            limit = query.limit,
+            mode = %effective_mode,
+            "search returned candidates"
+        );
+
+        let result_assembly_start = Instant::now();
+        let results = assemble_results(&AssembleParams {
+            query,
+            index,
+            candidates: &ranked_candidates,
+            decay_enabled: should_decay,
+            decay_half_life: effective_half_life,
+            decay_exclude: effective_decay_exclude,
+            decay_include: effective_decay_include,
+            boost_links: effective_boost_links,
+            boost_hops: effective_boost_hops,
+            link_graph: link_graph.as_ref(),
+            backlinks: backlinks.as_ref(),
+            now,
+            query_embedding: query_embedding.as_deref(),
+            edge_boost_weight,
+        })?;
+        assemble_secs += result_assembly_start.elapsed().as_secs_f64();
+
+        if query.path_prefix.is_none() || results.len() >= query.limit {
+            break results;
+        }
+        let Some(next_limit) = widened_candidate_limit(candidate_limit, candidate_ceiling) else {
+            break results;
+        };
+        candidate_limit = next_limit;
+    };
 
     // Graph context expansion: find relevant chunks from linked files.
+    let graph_assembly_start = Instant::now();
     let graph_context = if effective_expand_graph > 0 {
         if let (Some(lg), Some(bl), Some(qe)) = (&link_graph, &backlinks, &query_embedding) {
             expand_graph_context(
@@ -632,7 +716,7 @@ pub async fn search(
     } else {
         Vec::new()
     };
-    let assemble_secs = assemble_start.elapsed().as_secs_f64();
+    assemble_secs += graph_assembly_start.elapsed().as_secs_f64();
 
     let total_secs = total_start.elapsed().as_secs_f64();
 
@@ -661,27 +745,17 @@ pub async fn search(
     })
 }
 
-/// Run semantic (HNSW) search and return ranked (chunk_id, score) pairs plus the query embedding and timing.
-///
-/// Returns `(candidates, query_vector, embed_secs, vector_search_secs)`.
-async fn semantic_search(
-    query: &SearchQuery,
-    index: &Index,
-    provider: &dyn EmbeddingProvider,
-    limit: usize,
-) -> Result<(Vec<(String, f64)>, Vec<f32>, f64, f64)> {
-    let t0 = Instant::now();
-    let embeddings = provider
-        .embed_batch(std::slice::from_ref(&query.query))
-        .await?;
-    let embed_secs = t0.elapsed().as_secs_f64();
+fn widened_candidate_limit(current: usize, ceiling: usize) -> Option<usize> {
+    if current >= ceiling {
+        return None;
+    }
+    Some(current.saturating_mul(2).max(current + 1).min(ceiling))
+}
 
-    let t1 = Instant::now();
-    let query_vector = embeddings[0].clone();
-    let candidates = index.search_vectors(&query_vector, limit)?;
-    let vector_search_secs = t1.elapsed().as_secs_f64();
-
-    Ok((candidates, query_vector, embed_secs, vector_search_secs))
+fn require_query_embedding(query_embedding: Option<&[f32]>) -> Result<&[f32]> {
+    query_embedding.ok_or_else(|| {
+        Error::EmbeddingProvider("search mode requires a query embedding".to_string())
+    })
 }
 
 /// Run lexical (BM25) search and return ranked (chunk_id, score) pairs plus timing.
@@ -759,7 +833,7 @@ fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
 
         // Apply path prefix filter (before file metadata lookup for early short-circuit).
         if let Some(ref prefix) = p.query.path_prefix {
-            if !chunk.source_path.starts_with(prefix.as_str()) {
+            if !crate::path_util::path_is_in_scope(&chunk.source_path, prefix) {
                 continue;
             }
         }
@@ -927,15 +1001,16 @@ fn assemble_results(p: &AssembleParams<'_>) -> Result<Vec<SearchResult>> {
 fn assemble_edge_results(
     candidates: &[(String, f64)],
     link_graph: Option<&links::LinkGraph>,
+    path_prefix: Option<&str>,
 ) -> Vec<EdgeSearchResult> {
     let semantic_edges = link_graph.and_then(|lg| lg.semantic_edges.as_ref());
 
     candidates
         .iter()
         .filter_map(|(edge_id, score)| {
-            if let Some(edges) = semantic_edges {
+            let result = if let Some(edges) = semantic_edges {
                 if let Some(edge) = edges.get(edge_id) {
-                    return Some(EdgeSearchResult {
+                    EdgeSearchResult {
                         score: *score,
                         edge_id: edge_id.clone(),
                         source_path: edge.source.clone(),
@@ -945,26 +1020,40 @@ fn assemble_edge_results(
                         relationship_type: edge.relationship_type.clone(),
                         cluster_id: edge.cluster_id,
                         strength: edge.strength,
-                    });
+                    }
+                } else {
+                    parse_edge_search_result(edge_id, *score)?
                 }
+            } else {
+                parse_edge_search_result(edge_id, *score)?
+            };
+
+            if path_prefix.is_some_and(|scope| {
+                !crate::path_util::path_is_in_scope(&result.source_path, scope)
+            }) {
+                return None;
             }
-            // Fallback: parse edge ID format "edge:source->target@line"
-            let stripped = edge_id.strip_prefix("edge:")?;
-            let (source, rest) = stripped.split_once("->")?;
-            let target = rest.split('@').next()?;
-            Some(EdgeSearchResult {
-                score: *score,
-                edge_id: edge_id.clone(),
-                source_path: source.to_string(),
-                target_path: target.to_string(),
-                link_text: String::new(),
-                context: String::new(),
-                relationship_type: None,
-                cluster_id: None,
-                strength: None,
-            })
+            Some(result)
         })
         .collect()
+}
+
+fn parse_edge_search_result(edge_id: &str, score: f64) -> Option<EdgeSearchResult> {
+    // Fallback format: "edge:source->target@line".
+    let stripped = edge_id.strip_prefix("edge:")?;
+    let (source, rest) = stripped.split_once("->")?;
+    let target = rest.split('@').next()?;
+    Some(EdgeSearchResult {
+        score,
+        edge_id: edge_id.to_string(),
+        source_path: source.to_string(),
+        target_path: target.to_string(),
+        link_text: String::new(),
+        context: String::new(),
+        relationship_type: None,
+        cluster_id: None,
+        strength: None,
+    })
 }
 
 /// Expand graph context by finding relevant chunks from files linked to top search results.
@@ -2611,7 +2700,7 @@ mod tests {
             edge_cluster_state: None,
         };
         let candidates = vec![("edge:a.md->b.md@5".to_string(), 0.85)];
-        let results = assemble_edge_results(&candidates, Some(&lg));
+        let results = assemble_edge_results(&candidates, Some(&lg), None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].score, 0.85);
         assert_eq!(results[0].source_path, "a.md");
@@ -2626,7 +2715,7 @@ mod tests {
     fn test_assemble_edge_results_fallback_parsing() {
         // No link graph — falls back to parsing edge ID
         let candidates = vec![("edge:x.md->y.md@10".to_string(), 0.7)];
-        let results = assemble_edge_results(&candidates, None);
+        let results = assemble_edge_results(&candidates, None, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].source_path, "x.md");
         assert_eq!(results[0].target_path, "y.md");
@@ -2637,14 +2726,28 @@ mod tests {
     #[test]
     fn test_assemble_edge_results_invalid_edge_id_skipped() {
         let candidates = vec![("not-an-edge-id".to_string(), 0.5)];
-        let results = assemble_edge_results(&candidates, None);
+        let results = assemble_edge_results(&candidates, None, None);
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_assemble_edge_results_empty_candidates() {
-        let results = assemble_edge_results(&[], None);
+        let results = assemble_edge_results(&[], None, None);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_assemble_edge_results_scopes_source_but_not_target() {
+        let candidates = vec![
+            ("edge:docs/a.md->outside/b.md@1".to_string(), 0.9),
+            ("edge:docs-old/a.md->docs/b.md@1".to_string(), 0.8),
+        ];
+
+        let results = assemble_edge_results(&candidates, None, Some("docs"));
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_path, "docs/a.md");
+        assert_eq!(results[0].target_path, "outside/b.md");
     }
 
     #[test]

@@ -53,11 +53,15 @@ fn collect_vector_search_indices(
     key_to_id_index: &HashMap<u64, usize>,
     query: &[f32],
     limit: usize,
+    search_limit: usize,
 ) -> Result<Vec<(usize, f64)>> {
-    // Over-fetch by 2x to compensate for semantic-edge vectors that are
-    // present in the shared HNSW index but excluded from chunk searches.
+    let chunk_count = key_to_id_index.len();
+    if limit == 0 || chunk_count == 0 {
+        return Ok(Vec::new());
+    }
+
     let results = hnsw
-        .search(query, limit * 2)
+        .search(query, search_limit.min(hnsw.size()))
         .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
 
     let mut output = Vec::with_capacity(results.keys.len());
@@ -91,18 +95,6 @@ fn chunk_id_projection(state: &IndexState) -> (Vec<&str>, HashMap<u64, usize>) {
         key_to_id_index.insert(key, index);
     }
     (ids, key_to_id_index)
-}
-
-fn path_is_in_scope(path: &str, scope: Option<&str>) -> bool {
-    let Some(scope) = scope else {
-        return true;
-    };
-    let scope = scope.trim_matches('/');
-    scope.is_empty()
-        || path == scope
-        || path
-            .strip_prefix(scope)
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// Internal mutable state protected by the RwLock.
@@ -269,8 +261,7 @@ impl Index {
                 if path.exists() {
                     let _ = std::fs::remove_file(path);
                 }
-                Self::create_with_options(path, config, write_options)
-                    .map(|index| (index, true))
+                Self::create_with_options(path, config, write_options).map(|index| (index, true))
             }
             Err(e) => Err(e),
         }
@@ -298,12 +289,12 @@ impl Index {
         // even when the raw file was re-indexed in the same operation.
         let previous_computed_fields =
             if let Some(old_file) = state.metadata.files.remove(&relative_path) {
-            for chunk_id in &old_file.chunk_ids {
-                if let Some(key) = state.id_to_key.remove(chunk_id) {
-                    let _ = state.hnsw.remove(key);
+                for chunk_id in &old_file.chunk_ids {
+                    if let Some(key) = state.id_to_key.remove(chunk_id) {
+                        let _ = state.hnsw.remove(key);
+                    }
+                    state.metadata.chunks.remove(chunk_id);
                 }
-                state.metadata.chunks.remove(chunk_id);
-            }
                 old_file.computed_fields
             } else {
                 HashMap::new()
@@ -558,7 +549,7 @@ impl Index {
         let mut removed = 0usize;
 
         for (path, file) in &mut state.metadata.files {
-            if !path_is_in_scope(path, scope) {
+            if scope.is_some_and(|scope| !crate::path_util::path_is_in_scope(path, scope)) {
                 continue;
             }
             let before = file.computed_fields.len();
@@ -619,7 +610,8 @@ impl Index {
     pub fn scoped_counts(&self, prefix: Option<&str>) -> ScopedCounts {
         let state = self.state.read();
 
-        let in_scope = |path: &str| prefix.is_none_or(|p| path.starts_with(p));
+        let in_scope =
+            |path: &str| prefix.is_none_or(|scope| crate::path_util::path_is_in_scope(path, scope));
 
         let mut counts = ScopedCounts::default();
         for (path, file) in &state.metadata.files {
@@ -645,8 +637,8 @@ impl Index {
     ///
     /// Converts usearch distance to cosine similarity: `score = 1.0 - distance`.
     /// Results are sorted by score descending (most similar first).
-    /// Edge vectors (IDs starting with `"edge:"`) are post-filtered out.
-    /// Over-fetches by 2x to compensate for filtered edge entries.
+    /// Edge vectors (IDs starting with `"edge:"`) are excluded from the
+    /// returned candidate window.
     pub fn search_vectors(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f64)>> {
         let state = self.state.read();
 
@@ -655,12 +647,22 @@ impl Index {
         }
 
         let (ids, key_to_id_index) = chunk_id_projection(&state);
-        collect_vector_search_indices(&state.hnsw, &key_to_id_index, query, limit).map(|matches| {
-            matches
-                .into_iter()
-                .map(|(id_index, score)| (ids[id_index].to_string(), score))
-                .collect()
-        })
+        // Keep normal candidate windows bounded. A caller requesting the full
+        // chunk corpus gets the full shared index so edge vectors cannot hide
+        // the final candidates during progressive scoped retrieval.
+        let requested = limit.min(ids.len());
+        let search_limit = if requested == ids.len() {
+            state.hnsw.size()
+        } else {
+            requested.saturating_mul(2).min(state.hnsw.size())
+        };
+        collect_vector_search_indices(&state.hnsw, &key_to_id_index, query, limit, search_limit)
+            .map(|matches| {
+                matches
+                    .into_iter()
+                    .map(|(id_index, score)| (ids[id_index].to_string(), score))
+                    .collect()
+            })
     }
 
     /// Search many chunk vectors while holding one index snapshot.
@@ -687,7 +689,18 @@ impl Index {
 
         let matches = queries
             .par_iter()
-            .map(|query| collect_vector_search_indices(&state.hnsw, &key_to_id_index, query, limit))
+            // Graph construction performs one query per chunk; retain bounded
+            // over-fetching here rather than scanning every semantic edge for
+            // every node.
+            .map(|query| {
+                collect_vector_search_indices(
+                    &state.hnsw,
+                    &key_to_id_index,
+                    query,
+                    limit,
+                    limit.saturating_mul(2),
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         let ids = ids.into_iter().map(str::to_string).collect();
 
@@ -926,19 +939,32 @@ impl Index {
 
     /// Search for nearest edge vectors, returning `(edge_id, cosine_similarity_score)` pairs.
     ///
-    /// Over-fetches by 2x from the HNSW index, then post-filters to only `"edge:"` prefix
-    /// IDs, and truncates to the requested limit. Results are sorted by score descending.
+    /// Chunk vectors sharing the HNSW index are excluded from the returned
+    /// candidate window. Results are sorted by score descending.
     pub fn search_edges(&self, query: &[f32], limit: usize) -> Result<Vec<(String, f64)>> {
         let state = self.state.read();
 
-        if state.hnsw.size() == 0 {
+        if state.hnsw.size() == 0 || limit == 0 {
             return Ok(Vec::new());
         }
 
-        let over_fetch = limit * 2;
+        let edge_count = state
+            .id_to_key
+            .keys()
+            .filter(|id| id.starts_with("edge:"))
+            .count();
+        if edge_count == 0 {
+            return Ok(Vec::new());
+        }
+        let requested = limit.min(edge_count);
+        let search_limit = if requested == edge_count {
+            state.hnsw.size()
+        } else {
+            requested.saturating_mul(2).min(state.hnsw.size())
+        };
         let results = state
             .hnsw
-            .search(query, over_fetch)
+            .search(query, search_limit)
             .map_err(|e| Error::Serialization(format!("usearch search: {e}")))?;
 
         // Build reverse lookup: key → id.
@@ -1455,11 +1481,7 @@ mod tests {
         let original = mk_file("invoice.md");
         let original_body_hash = crate::parser::compute_content_hash(&original.body);
         index
-            .upsert(
-                &original,
-                &[mk_chunk("invoice.md", 0)],
-                &[vec![0.25; 128]],
-            )
+            .upsert(&original, &[mk_chunk("invoice.md", 0)], &[vec![0.25; 128]])
             .unwrap();
         index
             .replace_computed_fields(

@@ -534,9 +534,8 @@ impl Config {
         let merged = merge_yaml_values(user_value, project_value);
 
         // (7) Deserialize merged Value into YamlConfig.
-        let mut yaml_config: YamlConfig = serde_yaml::from_value(merged).map_err(|e| {
-            Error::Config(format!("failed to deserialize merged config: {e}"))
-        })?;
+        let mut yaml_config: YamlConfig = serde_yaml::from_value(merged)
+            .map_err(|e| Error::Config(format!("failed to deserialize merged config: {e}")))?;
 
         // (8) Apply env var overrides.
         apply_env_overrides(&mut yaml_config);
@@ -572,9 +571,7 @@ impl Config {
             )));
         }
         if self.search_decay_half_life <= 0.0 {
-            return Err(Error::Config(
-                "search_decay_half_life must be > 0".into(),
-            ));
+            return Err(Error::Config("search_decay_half_life must be > 0".into()));
         }
         if !(1..=3).contains(&self.search_boost_hops) {
             return Err(Error::Config(format!(
@@ -601,9 +598,7 @@ impl Config {
             )));
         }
         if self.edge_cluster_rebalance == 0 {
-            return Err(Error::Config(
-                "edge_cluster_rebalance must be > 0".into(),
-            ));
+            return Err(Error::Config("edge_cluster_rebalance must be > 0".into()));
         }
         if !(0.25..=4.0).contains(&self.clustering_granularity) {
             return Err(Error::Config(format!(
@@ -758,7 +753,10 @@ pub fn update_config_value(config_path: &Path, key: &str, value: &str) -> Result
     let mut found = false;
 
     for line in &mut lines {
-        if line.starts_with(&prefix) || line.starts_with(&quoted_prefix) || line.starts_with(&format!("{key} =")) {
+        if line.starts_with(&prefix)
+            || line.starts_with(&quoted_prefix)
+            || line.starts_with(&format!("{key} ="))
+        {
             if value.is_empty() {
                 // Mark for removal by clearing.
                 *line = String::new();
@@ -786,9 +784,8 @@ pub fn update_config_value(config_path: &Path, key: &str, value: &str) -> Result
         ))
     })?;
     for line in &lines {
-        writeln!(file, "{line}").map_err(|e| {
-            Error::Config(format!("failed to write config: {e}"))
-        })?;
+        writeln!(file, "{line}")
+            .map_err(|e| Error::Config(format!("failed to write config: {e}")))?;
     }
 
     Ok(())
@@ -926,42 +923,98 @@ pub fn apply_env_overrides(yaml: &mut YamlConfig) {
     }
 
     // Embedding
-    if let Some(v) = env_str("MDVDB_EMBEDDING_PROVIDER") { yaml.embedding.provider = v; }
-    if let Some(v) = env_str("MDVDB_EMBEDDING_MODEL") { yaml.embedding.model = v; }
-    if let Some(v) = env_usize("MDVDB_EMBEDDING_DIMENSIONS") { yaml.embedding.dimensions = v; }
-    if let Some(v) = env_usize("MDVDB_EMBEDDING_BATCH_SIZE") { yaml.embedding.batch_size = v; }
-    if let Some(v) = env_str("MDVDB_EMBEDDING_ENDPOINT") { yaml.embedding.endpoint = Some(v); }
+    if let Some(v) = env_str("MDVDB_EMBEDDING_PROVIDER") {
+        yaml.embedding.provider = v;
+    }
+    if let Some(v) = env_str("MDVDB_EMBEDDING_MODEL") {
+        yaml.embedding.model = v;
+    }
+    if let Some(v) = env_usize("MDVDB_EMBEDDING_DIMENSIONS") {
+        yaml.embedding.dimensions = v;
+    }
+    if let Some(v) = env_usize("MDVDB_EMBEDDING_BATCH_SIZE") {
+        yaml.embedding.batch_size = v;
+    }
+    if let Some(v) = env_str("MDVDB_EMBEDDING_ENDPOINT") {
+        yaml.embedding.endpoint = Some(v);
+    }
 
     // Search
-    if let Some(v) = env_usize("MDVDB_SEARCH_DEFAULT_LIMIT") { yaml.search.limit = v; }
-    if let Some(v) = env_f64("MDVDB_SEARCH_MIN_SCORE") { yaml.search.min_score = v; }
-    if let Some(v) = env_str("MDVDB_SEARCH_MODE") { yaml.search.mode = v; }
-    if let Some(v) = env_f64("MDVDB_SEARCH_RRF_K") { yaml.search.rrf_k = v; }
-    if let Some(v) = env_f64("MDVDB_BM25_NORM_K") { yaml.search.bm25_norm_k = v; }
-    if let Some(v) = env_bool("MDVDB_SEARCH_BOOST_LINKS") { yaml.search.boost_links = v; }
-    if let Some(v) = env_usize("MDVDB_SEARCH_BOOST_HOPS") { yaml.search.boost_hops = v; }
-    if let Some(v) = env_usize("MDVDB_SEARCH_EXPAND_GRAPH") { yaml.search.expand_graph = v; }
-    if let Some(v) = env_usize("MDVDB_SEARCH_EXPAND_LIMIT") { yaml.search.expand_limit = v; }
+    if let Some(v) = env_usize("MDVDB_SEARCH_DEFAULT_LIMIT") {
+        yaml.search.limit = v;
+    }
+    if let Some(v) = env_f64("MDVDB_SEARCH_MIN_SCORE") {
+        yaml.search.min_score = v;
+    }
+    if let Some(v) = env_str("MDVDB_SEARCH_MODE") {
+        yaml.search.mode = v;
+    }
+    if let Some(v) = env_f64("MDVDB_SEARCH_RRF_K") {
+        yaml.search.rrf_k = v;
+    }
+    if let Some(v) = env_f64("MDVDB_BM25_NORM_K") {
+        yaml.search.bm25_norm_k = v;
+    }
+    if let Some(v) = env_bool("MDVDB_SEARCH_BOOST_LINKS") {
+        yaml.search.boost_links = v;
+    }
+    if let Some(v) = env_usize("MDVDB_SEARCH_BOOST_HOPS") {
+        yaml.search.boost_hops = v;
+    }
+    if let Some(v) = env_usize("MDVDB_SEARCH_EXPAND_GRAPH") {
+        yaml.search.expand_graph = v;
+    }
+    if let Some(v) = env_usize("MDVDB_SEARCH_EXPAND_LIMIT") {
+        yaml.search.expand_limit = v;
+    }
 
     // Decay
-    if let Some(v) = env_bool("MDVDB_SEARCH_DECAY") { yaml.search.decay.enabled = v; }
-    if let Some(v) = env_f64("MDVDB_SEARCH_DECAY_HALF_LIFE") { yaml.search.decay.half_life = v; }
-    if let Some(v) = env_comma_list("MDVDB_SEARCH_DECAY_EXCLUDE") { yaml.search.decay.exclude = v; }
-    if let Some(v) = env_comma_list("MDVDB_SEARCH_DECAY_INCLUDE") { yaml.search.decay.include = v; }
+    if let Some(v) = env_bool("MDVDB_SEARCH_DECAY") {
+        yaml.search.decay.enabled = v;
+    }
+    if let Some(v) = env_f64("MDVDB_SEARCH_DECAY_HALF_LIFE") {
+        yaml.search.decay.half_life = v;
+    }
+    if let Some(v) = env_comma_list("MDVDB_SEARCH_DECAY_EXCLUDE") {
+        yaml.search.decay.exclude = v;
+    }
+    if let Some(v) = env_comma_list("MDVDB_SEARCH_DECAY_INCLUDE") {
+        yaml.search.decay.include = v;
+    }
 
     // Chunking
-    if let Some(v) = env_usize("MDVDB_CHUNK_MAX_TOKENS") { yaml.chunking.max_tokens = v; }
-    if let Some(v) = env_usize("MDVDB_CHUNK_OVERLAP_TOKENS") { yaml.chunking.overlap_tokens = v; }
+    if let Some(v) = env_usize("MDVDB_CHUNK_MAX_TOKENS") {
+        yaml.chunking.max_tokens = v;
+    }
+    if let Some(v) = env_usize("MDVDB_CHUNK_OVERLAP_TOKENS") {
+        yaml.chunking.overlap_tokens = v;
+    }
 
     // Clustering
-    if let Some(v) = env_bool("MDVDB_CLUSTERING_ENABLED") { yaml.clustering.enabled = v; }
-    if let Some(v) = env_str("MDVDB_CLUSTERING_ALGORITHM") { yaml.clustering.algorithm = v; }
-    if let Some(v) = env_usize("MDVDB_CLUSTERING_KNN") { yaml.clustering.knn = v; }
-    if let Some(v) = env_f64("MDVDB_CLUSTERING_RESOLUTION") { yaml.clustering.resolution = v; }
-    if let Some(v) = env_usize("MDVDB_CLUSTERING_MIN_CLUSTER_SIZE") { yaml.clustering.min_cluster_size = v; }
-    if let Some(v) = env_usize("MDVDB_CLUSTERING_REBALANCE_THRESHOLD") { yaml.clustering.rebalance_threshold = v; }
-    if let Some(v) = env_f64("MDVDB_CLUSTER_GRANULARITY") { yaml.clustering.granularity = v; }
-    if let Some(v) = env_f64("MDVDB_TOPICS_MIN_SIMILARITY") { yaml.clustering.topics.min_similarity = v; }
+    if let Some(v) = env_bool("MDVDB_CLUSTERING_ENABLED") {
+        yaml.clustering.enabled = v;
+    }
+    if let Some(v) = env_str("MDVDB_CLUSTERING_ALGORITHM") {
+        yaml.clustering.algorithm = v;
+    }
+    if let Some(v) = env_usize("MDVDB_CLUSTERING_KNN") {
+        yaml.clustering.knn = v;
+    }
+    if let Some(v) = env_f64("MDVDB_CLUSTERING_RESOLUTION") {
+        yaml.clustering.resolution = v;
+    }
+    if let Some(v) = env_usize("MDVDB_CLUSTERING_MIN_CLUSTER_SIZE") {
+        yaml.clustering.min_cluster_size = v;
+    }
+    if let Some(v) = env_usize("MDVDB_CLUSTERING_REBALANCE_THRESHOLD") {
+        yaml.clustering.rebalance_threshold = v;
+    }
+    if let Some(v) = env_f64("MDVDB_CLUSTER_GRANULARITY") {
+        yaml.clustering.granularity = v;
+    }
+    if let Some(v) = env_f64("MDVDB_TOPICS_MIN_SIMILARITY") {
+        yaml.clustering.topics.min_similarity = v;
+    }
     if let Some(v) = env_str("MDVDB_CUSTOM_CLUSTERS") {
         yaml.clustering.custom = parse_custom_clusters_value(&v)
             .into_iter()
@@ -970,19 +1023,37 @@ pub fn apply_env_overrides(yaml: &mut YamlConfig) {
     }
 
     // Watch
-    if let Some(v) = env_bool("MDVDB_WATCH") { yaml.watch.enabled = v; }
-    if let Some(v) = env_u64("MDVDB_WATCH_DEBOUNCE_MS") { yaml.watch.debounce_ms = v; }
+    if let Some(v) = env_bool("MDVDB_WATCH") {
+        yaml.watch.enabled = v;
+    }
+    if let Some(v) = env_u64("MDVDB_WATCH_DEBOUNCE_MS") {
+        yaml.watch.debounce_ms = v;
+    }
 
     // Index
-    if let Some(v) = env_str("MDVDB_VECTOR_QUANTIZATION") { yaml.index.quantization = v; }
-    if let Some(v) = env_bool("MDVDB_INDEX_COMPRESSION") { yaml.index.compression = v; }
-    if let Some(v) = env_bool("MDVDB_EDGE_EMBEDDINGS") { yaml.index.edge_embeddings = v; }
-    if let Some(v) = env_f64("MDVDB_EDGE_BOOST_WEIGHT") { yaml.index.edge_boost_weight = v; }
-    if let Some(v) = env_usize("MDVDB_EDGE_CLUSTER_REBALANCE") { yaml.index.edge_cluster_rebalance = v; }
+    if let Some(v) = env_str("MDVDB_VECTOR_QUANTIZATION") {
+        yaml.index.quantization = v;
+    }
+    if let Some(v) = env_bool("MDVDB_INDEX_COMPRESSION") {
+        yaml.index.compression = v;
+    }
+    if let Some(v) = env_bool("MDVDB_EDGE_EMBEDDINGS") {
+        yaml.index.edge_embeddings = v;
+    }
+    if let Some(v) = env_f64("MDVDB_EDGE_BOOST_WEIGHT") {
+        yaml.index.edge_boost_weight = v;
+    }
+    if let Some(v) = env_usize("MDVDB_EDGE_CLUSTER_REBALANCE") {
+        yaml.index.edge_cluster_rebalance = v;
+    }
 
     // Sources
-    if let Some(v) = env_comma_list("MDVDB_SOURCE_DIRS") { yaml.sources.dirs = v; }
-    if let Some(v) = env_comma_list("MDVDB_IGNORE_PATTERNS") { yaml.sources.ignore = v; }
+    if let Some(v) = env_comma_list("MDVDB_SOURCE_DIRS") {
+        yaml.sources.dirs = v;
+    }
+    if let Some(v) = env_comma_list("MDVDB_IGNORE_PATTERNS") {
+        yaml.sources.ignore = v;
+    }
 }
 
 /// Migrate a dotenv-style config file to YAML format.
@@ -994,7 +1065,10 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
     use std::fs;
 
     let content = fs::read_to_string(dotenv_path).map_err(|e| {
-        Error::Config(format!("failed to read dotenv file '{}': {e}", dotenv_path.display()))
+        Error::Config(format!(
+            "failed to read dotenv file '{}': {e}",
+            dotenv_path.display()
+        ))
     })?;
 
     let mut yaml = YamlConfig::default();
@@ -1015,66 +1089,111 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
             "MDVDB_EMBEDDING_PROVIDER" => yaml.embedding.provider = value.to_string(),
             "MDVDB_EMBEDDING_MODEL" => yaml.embedding.model = value.to_string(),
             "MDVDB_EMBEDDING_DIMENSIONS" => {
-                if let Ok(v) = value.parse() { yaml.embedding.dimensions = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.embedding.dimensions = v;
+                }
             }
             "MDVDB_EMBEDDING_BATCH_SIZE" => {
-                if let Ok(v) = value.parse() { yaml.embedding.batch_size = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.embedding.batch_size = v;
+                }
             }
             "MDVDB_EMBEDDING_ENDPOINT" => yaml.embedding.endpoint = Some(value.to_string()),
             "MDVDB_SEARCH_DEFAULT_LIMIT" => {
-                if let Ok(v) = value.parse() { yaml.search.limit = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.limit = v;
+                }
             }
             "MDVDB_SEARCH_MIN_SCORE" => {
-                if let Ok(v) = value.parse() { yaml.search.min_score = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.min_score = v;
+                }
             }
             "MDVDB_SEARCH_MODE" => yaml.search.mode = value.to_string(),
             "MDVDB_SEARCH_RRF_K" => {
-                if let Ok(v) = value.parse() { yaml.search.rrf_k = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.rrf_k = v;
+                }
             }
             "MDVDB_BM25_NORM_K" => {
-                if let Ok(v) = value.parse() { yaml.search.bm25_norm_k = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.bm25_norm_k = v;
+                }
             }
             "MDVDB_SEARCH_BOOST_LINKS" => {
-                if let Ok(v) = value.parse::<bool>() { yaml.search.boost_links = v; }
-                else { yaml.search.boost_links = value == "1" || value == "yes"; }
+                if let Ok(v) = value.parse::<bool>() {
+                    yaml.search.boost_links = v;
+                } else {
+                    yaml.search.boost_links = value == "1" || value == "yes";
+                }
             }
             "MDVDB_SEARCH_BOOST_HOPS" => {
-                if let Ok(v) = value.parse() { yaml.search.boost_hops = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.boost_hops = v;
+                }
             }
             "MDVDB_SEARCH_EXPAND_GRAPH" => {
-                if let Ok(v) = value.parse() { yaml.search.expand_graph = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.expand_graph = v;
+                }
             }
             "MDVDB_SEARCH_EXPAND_LIMIT" => {
-                if let Ok(v) = value.parse() { yaml.search.expand_limit = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.expand_limit = v;
+                }
             }
             "MDVDB_SEARCH_DECAY" => {
-                if let Ok(v) = value.parse::<bool>() { yaml.search.decay.enabled = v; }
-                else { yaml.search.decay.enabled = value == "1" || value == "yes"; }
+                if let Ok(v) = value.parse::<bool>() {
+                    yaml.search.decay.enabled = v;
+                } else {
+                    yaml.search.decay.enabled = value == "1" || value == "yes";
+                }
             }
             "MDVDB_SEARCH_DECAY_HALF_LIFE" => {
-                if let Ok(v) = value.parse() { yaml.search.decay.half_life = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.search.decay.half_life = v;
+                }
             }
             "MDVDB_SEARCH_DECAY_EXCLUDE" => {
-                yaml.search.decay.exclude = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                yaml.search.decay.exclude = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
             "MDVDB_SEARCH_DECAY_INCLUDE" => {
-                yaml.search.decay.include = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                yaml.search.decay.include = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
             "MDVDB_CHUNK_MAX_TOKENS" => {
-                if let Ok(v) = value.parse() { yaml.chunking.max_tokens = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.chunking.max_tokens = v;
+                }
             }
             "MDVDB_CHUNK_OVERLAP_TOKENS" => {
-                if let Ok(v) = value.parse() { yaml.chunking.overlap_tokens = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.chunking.overlap_tokens = v;
+                }
             }
             "MDVDB_CLUSTERING_ENABLED" => {
-                if let Ok(v) = value.parse::<bool>() { yaml.clustering.enabled = v; }
-                else { yaml.clustering.enabled = value == "1" || value == "yes"; }
+                if let Ok(v) = value.parse::<bool>() {
+                    yaml.clustering.enabled = v;
+                } else {
+                    yaml.clustering.enabled = value == "1" || value == "yes";
+                }
             }
             "MDVDB_CLUSTERING_REBALANCE_THRESHOLD" => {
-                if let Ok(v) = value.parse() { yaml.clustering.rebalance_threshold = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.clustering.rebalance_threshold = v;
+                }
             }
             "MDVDB_CLUSTER_GRANULARITY" => {
-                if let Ok(v) = value.parse() { yaml.clustering.granularity = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.clustering.granularity = v;
+                }
             }
             "MDVDB_CUSTOM_CLUSTERS" => {
                 yaml.clustering.custom = parse_custom_clusters_value(value)
@@ -1083,32 +1202,55 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
                     .collect();
             }
             "MDVDB_WATCH" => {
-                if let Ok(v) = value.parse::<bool>() { yaml.watch.enabled = v; }
-                else { yaml.watch.enabled = value == "1" || value == "yes"; }
+                if let Ok(v) = value.parse::<bool>() {
+                    yaml.watch.enabled = v;
+                } else {
+                    yaml.watch.enabled = value == "1" || value == "yes";
+                }
             }
             "MDVDB_WATCH_DEBOUNCE_MS" => {
-                if let Ok(v) = value.parse() { yaml.watch.debounce_ms = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.watch.debounce_ms = v;
+                }
             }
             "MDVDB_VECTOR_QUANTIZATION" => yaml.index.quantization = value.to_string(),
             "MDVDB_INDEX_COMPRESSION" => {
-                if let Ok(v) = value.parse::<bool>() { yaml.index.compression = v; }
-                else { yaml.index.compression = value == "1" || value == "yes"; }
+                if let Ok(v) = value.parse::<bool>() {
+                    yaml.index.compression = v;
+                } else {
+                    yaml.index.compression = value == "1" || value == "yes";
+                }
             }
             "MDVDB_EDGE_EMBEDDINGS" => {
-                if let Ok(v) = value.parse::<bool>() { yaml.index.edge_embeddings = v; }
-                else { yaml.index.edge_embeddings = value == "1" || value == "yes"; }
+                if let Ok(v) = value.parse::<bool>() {
+                    yaml.index.edge_embeddings = v;
+                } else {
+                    yaml.index.edge_embeddings = value == "1" || value == "yes";
+                }
             }
             "MDVDB_EDGE_BOOST_WEIGHT" => {
-                if let Ok(v) = value.parse() { yaml.index.edge_boost_weight = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.index.edge_boost_weight = v;
+                }
             }
             "MDVDB_EDGE_CLUSTER_REBALANCE" => {
-                if let Ok(v) = value.parse() { yaml.index.edge_cluster_rebalance = v; }
+                if let Ok(v) = value.parse() {
+                    yaml.index.edge_cluster_rebalance = v;
+                }
             }
             "MDVDB_SOURCE_DIRS" => {
-                yaml.sources.dirs = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                yaml.sources.dirs = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
             "MDVDB_IGNORE_PATTERNS" => {
-                yaml.sources.ignore = value.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                yaml.sources.ignore = value
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
             _ => {
                 // Non-MDVDB keys (e.g. OPENAI_API_KEY) are secrets — they
@@ -1155,24 +1297,22 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
 
     // Rename old dotenv file to .bak
     let bak_path = dotenv_path.with_extension("bak");
-    if dotenv_path.file_name().is_some_and(|n| n.to_str().is_some_and(|s| s.starts_with('.'))) {
+    if dotenv_path
+        .file_name()
+        .is_some_and(|n| n.to_str().is_some_and(|s| s.starts_with('.')))
+    {
         // For dotfiles like .config -> .config.bak
         let mut bak_name = dotenv_path.file_name().unwrap().to_os_string();
         bak_name.push(".bak");
         let bak_path = dotenv_path.with_file_name(bak_name);
-        fs::rename(dotenv_path, &bak_path).map_err(|e| {
-            Error::Config(format!("failed to rename dotenv to backup: {e}"))
-        })?;
+        fs::rename(dotenv_path, &bak_path)
+            .map_err(|e| Error::Config(format!("failed to rename dotenv to backup: {e}")))?;
     } else {
-        fs::rename(dotenv_path, &bak_path).map_err(|e| {
-            Error::Config(format!("failed to rename dotenv to backup: {e}"))
-        })?;
+        fs::rename(dotenv_path, &bak_path)
+            .map_err(|e| Error::Config(format!("failed to rename dotenv to backup: {e}")))?;
     }
 
-    tracing::info!(
-        "Migrated dotenv config to YAML: {}",
-        yaml_path.display()
-    );
+    tracing::info!("Migrated dotenv config to YAML: {}", yaml_path.display());
 
     Ok(())
 }
@@ -1181,42 +1321,238 @@ pub fn migrate_dotenv_to_yaml(dotenv_path: &Path, yaml_path: &Path) -> Result<()
 ///
 /// Creates parent directories if needed.
 pub fn write_yaml_config(path: &Path, config: &YamlConfig) -> Result<(), Error> {
+    let yaml_str = serde_yaml::to_string(config)
+        .map_err(|e| Error::Config(format!("failed to serialize YAML config: {e}")))?;
+
+    let _lock = acquire_config_lock(path)?;
+    write_yaml_bytes_unlocked(path, yaml_str.as_bytes())
+}
+
+/// RAII guard for a project's advisory `config.lock`.
+///
+/// Keep the guard alive across the complete read-modify-write transaction.
+/// Closing the file releases the operating-system lock.
+#[must_use]
+pub(crate) struct ConfigLockGuard {
+    _file: std::fs::File,
+}
+
+/// Acquire the advisory lock associated with a YAML config file.
+///
+/// A `.markdownvdb/config.yaml` file is protected by
+/// `.markdownvdb/config.lock`. The same helper is used by settings, topic, and
+/// Shard mutations so independent mdvdb processes cannot overwrite each
+/// other's read-modify-write operations.
+pub(crate) fn acquire_config_lock(path: &Path) -> Result<ConfigLockGuard, Error> {
+    use std::fs::{self, OpenOptions};
+    use std::time::Duration;
+
+    const ATTEMPTS: usize = 20;
+    const RETRY_DELAY: Duration = Duration::from_millis(25);
+
+    let Some(parent) = path.parent() else {
+        return Err(Error::Config(format!(
+            "configuration path '{}' has no parent directory",
+            path.display()
+        )));
+    };
+    fs::create_dir_all(parent).map_err(|e| {
+        Error::Config(format!(
+            "failed to create directory '{}': {e}",
+            parent.display()
+        ))
+    })?;
+
+    let lock_path = path.with_extension("lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| {
+            Error::Config(format!(
+                "failed to open configuration lock '{}': {e}",
+                lock_path.display()
+            ))
+        })?;
+
+    for attempt in 0..ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(ConfigLockGuard { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) if attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(RETRY_DELAY);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Error::ConfigBusy {
+                    path: path.to_path_buf(),
+                });
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(Error::Io(e)),
+        }
+    }
+
+    unreachable!("configuration lock retry loop always returns")
+}
+
+/// Atomically replace a YAML file while its caller holds `config.lock`.
+pub(crate) fn write_yaml_value_unlocked(
+    path: &Path,
+    value: &serde_yaml::Value,
+) -> Result<(), Error> {
+    let yaml_str = serde_yaml::to_string(value)
+        .map_err(|e| Error::Config(format!("failed to serialize YAML: {e}")))?;
+    write_yaml_bytes_unlocked(path, yaml_str.as_bytes())
+}
+
+fn write_yaml_bytes_unlocked(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     use std::fs;
     use std::io::Write;
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            Error::Config(format!(
-                "failed to create directory '{}': {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    let yaml_str = serde_yaml::to_string(config).map_err(|e| {
-        Error::Config(format!("failed to serialize YAML config: {e}"))
-    })?;
-
-    let tmp_path = path.with_extension("yaml.tmp");
-    let mut file = fs::File::create(&tmp_path).map_err(|e| {
-        Error::Config(format!("failed to create temp file '{}': {e}", tmp_path.display()))
-    })?;
-    file.write_all(yaml_str.as_bytes()).map_err(|e| {
-        Error::Config(format!("failed to write YAML config: {e}"))
-    })?;
-    file.sync_all().map_err(|e| {
-        Error::Config(format!("failed to fsync YAML config: {e}"))
-    })?;
-    drop(file);
-
-    fs::rename(&tmp_path, path).map_err(|e| {
-        Error::Config(format!(
-            "failed to rename temp file to '{}': {e}",
+    let Some(parent) = path.parent() else {
+        return Err(Error::Config(format!(
+            "configuration path '{}' has no parent directory",
             path.display()
+        )));
+    };
+    fs::create_dir_all(parent).map_err(|e| {
+        Error::Config(format!(
+            "failed to create directory '{}': {e}",
+            parent.display()
+        ))
+    })?;
+
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+        Error::Config(format!(
+            "failed to create temporary config file in '{}': {e}",
+            parent.display()
+        ))
+    })?;
+    temp.write_all(bytes)
+        .map_err(|e| Error::Config(format!("failed to write YAML config: {e}")))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| Error::Config(format!("failed to fsync YAML config: {e}")))?;
+    temp.persist(path).map_err(|e| {
+        Error::Config(format!(
+            "failed to replace YAML config '{}': {}",
+            path.display(),
+            e.error
         ))
     })?;
 
     Ok(())
+}
+
+fn read_yaml_value_unlocked(path: &Path) -> Result<serde_yaml::Value, Error> {
+    use std::fs;
+
+    let mut root = if path.exists() {
+        let content = fs::read_to_string(path).map_err(|e| {
+            Error::Config(format!(
+                "failed to read YAML file '{}': {e}",
+                path.display()
+            ))
+        })?;
+        if content.trim().is_empty() {
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+        } else {
+            serde_yaml::from_str(&content).map_err(|e| {
+                Error::Config(format!(
+                    "failed to parse YAML file '{}': {e}",
+                    path.display()
+                ))
+            })?
+        }
+    } else {
+        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+    };
+    if root.is_null() {
+        root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+    Ok(root)
+}
+
+fn yaml_value_at<'a>(root: &'a serde_yaml::Value, key_path: &str) -> Option<&'a serde_yaml::Value> {
+    let mut current = root;
+    for part in key_path.split('.') {
+        current = current
+            .as_mapping()?
+            .get(serde_yaml::Value::String(part.to_string()))?;
+    }
+    Some(current)
+}
+
+fn set_yaml_value(
+    root: &mut serde_yaml::Value,
+    key_path: &str,
+    value: serde_yaml::Value,
+) -> Result<(), Error> {
+    let parts: Vec<&str> = key_path.split('.').collect();
+    if parts.iter().any(|part| part.is_empty()) {
+        return Err(Error::Config(
+            "configuration key cannot contain empty path segments".into(),
+        ));
+    }
+    let mut current = root;
+
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            if let serde_yaml::Value::Mapping(map) = current {
+                map.insert(serde_yaml::Value::String(part.to_string()), value);
+                return Ok(());
+            }
+            return Err(Error::Config(format!(
+                "cannot set key '{}': parent is not a mapping",
+                key_path
+            )));
+        }
+
+        let key = serde_yaml::Value::String(part.to_string());
+        if let serde_yaml::Value::Mapping(map) = current {
+            if !map.contains_key(&key) {
+                map.insert(
+                    key.clone(),
+                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+                );
+            }
+            current = map.get_mut(&key).ok_or_else(|| {
+                Error::Config(format!(
+                    "cannot navigate key '{}': intermediate key was not retained",
+                    key_path
+                ))
+            })?;
+        } else {
+            return Err(Error::Config(format!(
+                "cannot navigate key '{}': intermediate is not a mapping",
+                key_path
+            )));
+        }
+    }
+
+    Err(Error::Config("configuration key cannot be empty".into()))
+}
+
+/// Atomically mutate one value in a raw YAML config file.
+///
+/// The advisory `config.lock` is held while the current value is read, while
+/// `mutate` runs, and until the updated document is atomically persisted.
+/// Unrelated and unknown YAML nodes are retained. If `mutate` returns an
+/// error, the file is not changed.
+pub fn mutate_yaml_config_value<T, E, F>(
+    path: &Path,
+    key_path: &str,
+    mutate: F,
+) -> std::result::Result<T, E>
+where
+    E: From<Error>,
+    F: FnOnce(Option<&serde_yaml::Value>) -> std::result::Result<(serde_yaml::Value, T), E>,
+{
+    let _lock = acquire_config_lock(path).map_err(E::from)?;
+    let mut root = read_yaml_value_unlocked(path).map_err(E::from)?;
+    let (new_value, output) = mutate(yaml_value_at(&root, key_path))?;
+    set_yaml_value(&mut root, key_path, new_value).map_err(E::from)?;
+    write_yaml_value_unlocked(path, &root).map_err(E::from)?;
+    Ok(output)
 }
 
 /// Update a single value in a YAML config file using dot-notation key path.
@@ -1229,80 +1565,7 @@ pub fn update_yaml_config_value(
     key_path: &str,
     value: serde_yaml::Value,
 ) -> Result<(), Error> {
-    use std::fs;
-
-    let mut root: serde_yaml::Value = if path.exists() {
-        let content = fs::read_to_string(path).map_err(|e| {
-            Error::Config(format!("failed to read YAML file '{}': {e}", path.display()))
-        })?;
-        serde_yaml::from_str(&content).map_err(|e| {
-            Error::Config(format!("failed to parse YAML file '{}': {e}", path.display()))
-        })?
-    } else {
-        serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-    };
-
-    let parts: Vec<&str> = key_path.split('.').collect();
-    let mut current = &mut root;
-
-    for (i, part) in parts.iter().enumerate() {
-        if i == parts.len() - 1 {
-            // Set the value
-            if let serde_yaml::Value::Mapping(map) = current {
-                map.insert(serde_yaml::Value::String(part.to_string()), value.clone());
-            } else {
-                return Err(Error::Config(format!(
-                    "cannot set key '{}': parent is not a mapping",
-                    key_path
-                )));
-            }
-        } else {
-            // Navigate or create intermediate mapping
-            let key = serde_yaml::Value::String(part.to_string());
-            if let serde_yaml::Value::Mapping(map) = current {
-                if !map.contains_key(&key) {
-                    map.insert(key.clone(), serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-                }
-                current = map.get_mut(&key).unwrap();
-            } else {
-                return Err(Error::Config(format!(
-                    "cannot navigate key '{}': intermediate is not a mapping",
-                    key_path
-                )));
-            }
-        }
-    }
-
-    // Serialize and write atomically
-    let yaml_str = serde_yaml::to_string(&root).map_err(|e| {
-        Error::Config(format!("failed to serialize YAML: {e}"))
-    })?;
-
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            Error::Config(format!("failed to create directory '{}': {e}", parent.display()))
-        })?;
-    }
-
-    let tmp_path = path.with_extension("yaml.tmp");
-    {
-        use std::io::Write;
-        let mut file = fs::File::create(&tmp_path).map_err(|e| {
-            Error::Config(format!("failed to create temp file: {e}"))
-        })?;
-        file.write_all(yaml_str.as_bytes()).map_err(|e| {
-            Error::Config(format!("failed to write YAML: {e}"))
-        })?;
-        file.sync_all().map_err(|e| {
-            Error::Config(format!("failed to fsync YAML: {e}"))
-        })?;
-    }
-
-    fs::rename(&tmp_path, path).map_err(|e| {
-        Error::Config(format!("failed to rename temp file to '{}': {e}", path.display()))
-    })?;
-
-    Ok(())
+    mutate_yaml_config_value(path, key_path, |_| Ok((value, ())))
 }
 
 impl Config {
@@ -1316,8 +1579,8 @@ impl Config {
         let vector_quantization = yaml.index.quantization.parse::<VectorQuantization>()?;
 
         let openai_api_key = std::env::var("OPENAI_API_KEY").ok();
-        let ollama_host = std::env::var("OLLAMA_HOST")
-            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let ollama_host =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
 
         let source_dirs = yaml.sources.dirs.iter().map(PathBuf::from).collect();
         let clustering_algorithm = yaml.clustering.algorithm.parse::<ClusteringAlgorithm>()?;
@@ -1623,8 +1886,14 @@ mod tests {
         std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "abc");
         std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
         let result = Config::load(Path::new("/nonexistent"));
-        match saved { Some(v) => std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", v), None => std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS") }
-        match had_no_user { Some(v) => std::env::set_var("MDVDB_NO_USER_CONFIG", v), None => std::env::remove_var("MDVDB_NO_USER_CONFIG") }
+        match saved {
+            Some(v) => std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", v),
+            None => std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS"),
+        }
+        match had_no_user {
+            Some(v) => std::env::set_var("MDVDB_NO_USER_CONFIG", v),
+            None => std::env::remove_var("MDVDB_NO_USER_CONFIG"),
+        }
         // Should succeed with default dimensions since "abc" is silently skipped
         let config = result.unwrap();
         assert_eq!(config.embedding_dimensions, 1536);
@@ -1695,23 +1964,39 @@ mod tests {
 
         // Clear all MDVDB vars first.
         for var in &[
-            "MDVDB_EMBEDDING_PROVIDER", "MDVDB_EMBEDDING_MODEL",
-            "MDVDB_EMBEDDING_DIMENSIONS", "MDVDB_EMBEDDING_BATCH_SIZE",
-            "OPENAI_API_KEY", "OLLAMA_HOST", "MDVDB_EMBEDDING_ENDPOINT",
-            "MDVDB_SOURCE_DIRS", "MDVDB_IGNORE_PATTERNS",
-            "MDVDB_WATCH", "MDVDB_WATCH_DEBOUNCE_MS",
-            "MDVDB_CHUNK_MAX_TOKENS", "MDVDB_CHUNK_OVERLAP_TOKENS",
-            "MDVDB_CLUSTERING_ENABLED", "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
+            "MDVDB_EMBEDDING_PROVIDER",
+            "MDVDB_EMBEDDING_MODEL",
+            "MDVDB_EMBEDDING_DIMENSIONS",
+            "MDVDB_EMBEDDING_BATCH_SIZE",
+            "OPENAI_API_KEY",
+            "OLLAMA_HOST",
+            "MDVDB_EMBEDDING_ENDPOINT",
+            "MDVDB_SOURCE_DIRS",
+            "MDVDB_IGNORE_PATTERNS",
+            "MDVDB_WATCH",
+            "MDVDB_WATCH_DEBOUNCE_MS",
+            "MDVDB_CHUNK_MAX_TOKENS",
+            "MDVDB_CHUNK_OVERLAP_TOKENS",
+            "MDVDB_CLUSTERING_ENABLED",
+            "MDVDB_CLUSTERING_REBALANCE_THRESHOLD",
             "MDVDB_CLUSTER_GRANULARITY",
-            "MDVDB_SEARCH_DEFAULT_LIMIT", "MDVDB_SEARCH_MIN_SCORE",
-            "MDVDB_SEARCH_MODE", "MDVDB_SEARCH_RRF_K", "MDVDB_BM25_NORM_K",
-            "MDVDB_SEARCH_DECAY", "MDVDB_SEARCH_DECAY_HALF_LIFE",
-            "MDVDB_SEARCH_DECAY_EXCLUDE", "MDVDB_SEARCH_DECAY_INCLUDE",
+            "MDVDB_SEARCH_DEFAULT_LIMIT",
+            "MDVDB_SEARCH_MIN_SCORE",
+            "MDVDB_SEARCH_MODE",
+            "MDVDB_SEARCH_RRF_K",
+            "MDVDB_BM25_NORM_K",
+            "MDVDB_SEARCH_DECAY",
+            "MDVDB_SEARCH_DECAY_HALF_LIFE",
+            "MDVDB_SEARCH_DECAY_EXCLUDE",
+            "MDVDB_SEARCH_DECAY_INCLUDE",
             "MDVDB_SEARCH_BOOST_LINKS",
-            "MDVDB_SEARCH_BOOST_HOPS", "MDVDB_SEARCH_EXPAND_GRAPH",
+            "MDVDB_SEARCH_BOOST_HOPS",
+            "MDVDB_SEARCH_EXPAND_GRAPH",
             "MDVDB_SEARCH_EXPAND_LIMIT",
-            "MDVDB_VECTOR_QUANTIZATION", "MDVDB_INDEX_COMPRESSION",
-            "MDVDB_EDGE_EMBEDDINGS", "MDVDB_EDGE_BOOST_WEIGHT",
+            "MDVDB_VECTOR_QUANTIZATION",
+            "MDVDB_INDEX_COMPRESSION",
+            "MDVDB_EDGE_EMBEDDINGS",
+            "MDVDB_EDGE_BOOST_WEIGHT",
             "MDVDB_EDGE_CLUSTER_REBALANCE",
         ] {
             std::env::remove_var(var);
@@ -1741,7 +2026,10 @@ mod tests {
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EDGE_BOOST_WEIGHT");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("edge_boost_weight"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("edge_boost_weight"));
     }
 
     #[test]
@@ -1760,7 +2048,10 @@ mod tests {
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EDGE_CLUSTER_REBALANCE");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("edge_cluster_rebalance"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("edge_cluster_rebalance"));
     }
 
     #[test]
@@ -1849,7 +2140,11 @@ search:
         let cluster = YamlCustomCluster {
             name: "TestCluster".to_string(),
             description: None,
-            seeds: vec!["seed1".to_string(), "seed2".to_string(), "seed3".to_string()],
+            seeds: vec![
+                "seed1".to_string(),
+                "seed2".to_string(),
+                "seed3".to_string(),
+            ],
             threshold: None,
         };
 
@@ -1868,18 +2163,31 @@ search:
         let overlay: serde_yaml::Value = serde_yaml::from_str("b: 99").unwrap();
         let merged = merge_yaml_values(base, overlay);
         let map = merged.as_mapping().unwrap();
-        assert_eq!(map[&serde_yaml::Value::String("a".into())], serde_yaml::Value::Number(1.into()));
-        assert_eq!(map[&serde_yaml::Value::String("b".into())], serde_yaml::Value::Number(99.into()));
+        assert_eq!(
+            map[&serde_yaml::Value::String("a".into())],
+            serde_yaml::Value::Number(1.into())
+        );
+        assert_eq!(
+            map[&serde_yaml::Value::String("b".into())],
+            serde_yaml::Value::Number(99.into())
+        );
     }
 
     #[test]
     fn merge_yaml_values_nested() {
-        let base: serde_yaml::Value = serde_yaml::from_str("top:\n  a: 1\n  b: 2\nother: 3").unwrap();
+        let base: serde_yaml::Value =
+            serde_yaml::from_str("top:\n  a: 1\n  b: 2\nother: 3").unwrap();
         let overlay: serde_yaml::Value = serde_yaml::from_str("top:\n  b: 99").unwrap();
         let merged = merge_yaml_values(base, overlay);
         let top = merged["top"].as_mapping().unwrap();
-        assert_eq!(top[&serde_yaml::Value::String("a".into())], serde_yaml::Value::Number(1.into()));
-        assert_eq!(top[&serde_yaml::Value::String("b".into())], serde_yaml::Value::Number(99.into()));
+        assert_eq!(
+            top[&serde_yaml::Value::String("a".into())],
+            serde_yaml::Value::Number(1.into())
+        );
+        assert_eq!(
+            top[&serde_yaml::Value::String("b".into())],
+            serde_yaml::Value::Number(99.into())
+        );
         assert_eq!(merged["other"], serde_yaml::Value::Number(3.into()));
     }
 
@@ -1908,15 +2216,23 @@ search:
             ("MDVDB_WATCH_DEBOUNCE_MS", "500"),
             ("MDVDB_SOURCE_DIRS", "src,docs"),
         ];
-        let saved: Vec<(&str, Option<String>)> = vars.iter().map(|(k, _)| (*k, std::env::var(k).ok())).collect();
-        for (k, v) in &vars { std::env::set_var(k, v); }
+        let saved: Vec<(&str, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| (*k, std::env::var(k).ok()))
+            .collect();
+        for (k, v) in &vars {
+            std::env::set_var(k, v);
+        }
 
         let mut yaml = YamlConfig::default();
         apply_env_overrides(&mut yaml);
 
         // Restore
         for (k, v) in &saved {
-            match v { Some(val) => std::env::set_var(k, val), None => std::env::remove_var(k) }
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
         }
 
         assert_eq!(yaml.embedding.provider, "ollama");
@@ -1935,14 +2251,18 @@ search:
         let dotenv = tmp.path().join(".config");
         let yaml_path = tmp.path().join("config.yaml");
 
-        std::fs::write(&dotenv, "\
+        std::fs::write(
+            &dotenv,
+            "\
 MDVDB_EMBEDDING_PROVIDER=ollama\n\
 MDVDB_EMBEDDING_DIMENSIONS=768\n\
 MDVDB_SEARCH_DEFAULT_LIMIT=25\n\
 MDVDB_CHUNK_MAX_TOKENS=1024\n\
 MDVDB_CLUSTERING_ENABLED=false\n\
 MDVDB_WATCH_DEBOUNCE_MS=500\n\
-").unwrap();
+",
+        )
+        .unwrap();
 
         migrate_dotenv_to_yaml(&dotenv, &yaml_path).unwrap();
 
@@ -1975,14 +2295,18 @@ MDVDB_WATCH_DEBOUNCE_MS=500\n\
         let dotenv = tmp.path().join(".config");
         let yaml_path = tmp.path().join("config.yaml");
 
-        std::fs::write(&dotenv, "\
+        std::fs::write(
+            &dotenv,
+            "\
 # This is a comment\n\
 \n\
 MDVDB_EMBEDDING_PROVIDER=ollama\n\
 # Another comment\n\
 MDVDB_SEARCH_DEFAULT_LIMIT=5\n\
 \n\
-").unwrap();
+",
+        )
+        .unwrap();
 
         migrate_dotenv_to_yaml(&dotenv, &yaml_path).unwrap();
 
@@ -1998,11 +2322,15 @@ MDVDB_SEARCH_DEFAULT_LIMIT=5\n\
         let dotenv = tmp.path().join("config");
         let yaml_path = tmp.path().join("config.yaml");
 
-        std::fs::write(&dotenv, "\
+        std::fs::write(
+            &dotenv,
+            "\
 MDVDB_EMBEDDING_PROVIDER=openai\n\
 OPENAI_API_KEY=sk-preserved\n\
 OLLAMA_HOST=http://example:11434\n\
-").unwrap();
+",
+        )
+        .unwrap();
 
         migrate_dotenv_to_yaml(&dotenv, &yaml_path).unwrap();
 
@@ -2026,9 +2354,15 @@ OLLAMA_HOST=http://example:11434\n\
         migrate_dotenv_to_yaml(&dotenv, &yaml_path).unwrap();
 
         let env_content = std::fs::read_to_string(&env_path).unwrap();
-        assert!(env_content.contains("OPENAI_API_KEY=sk-existing"), "existing key must win");
+        assert!(
+            env_content.contains("OPENAI_API_KEY=sk-existing"),
+            "existing key must win"
+        );
         assert!(!env_content.contains("sk-from-dotenv"));
-        assert!(env_content.contains("MY_SECRET=abc"), "new key must be appended");
+        assert!(
+            env_content.contains("MY_SECRET=abc"),
+            "new key must be appended"
+        );
     }
 
     #[test]
@@ -2072,14 +2406,24 @@ OLLAMA_HOST=http://example:11434\n\
         write_yaml_config(&path, &cfg).unwrap();
 
         // Update nested value
-        update_yaml_config_value(&path, "search.decay.half_life", serde_yaml::Value::Number(serde_yaml::Number::from(45))).unwrap();
+        update_yaml_config_value(
+            &path,
+            "search.decay.half_life",
+            serde_yaml::Value::Number(serde_yaml::Number::from(45)),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let loaded: YamlConfig = serde_yaml::from_str(&content).unwrap();
         assert_eq!(loaded.search.decay.half_life, 45.0);
 
         // Update top-level nested value
-        update_yaml_config_value(&path, "embedding.provider", serde_yaml::Value::String("ollama".into())).unwrap();
+        update_yaml_config_value(
+            &path,
+            "embedding.provider",
+            serde_yaml::Value::String("ollama".into()),
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let loaded: YamlConfig = serde_yaml::from_str(&content).unwrap();
@@ -2115,13 +2459,22 @@ OLLAMA_HOST=http://example:11434\n\
         let config = Config::from_yaml(yaml, Path::new("/tmp")).unwrap();
 
         // Restore
-        match saved_key { Some(v) => std::env::set_var("OPENAI_API_KEY", v), None => std::env::remove_var("OPENAI_API_KEY") }
-        match saved_host { Some(v) => std::env::set_var("OLLAMA_HOST", v), None => std::env::remove_var("OLLAMA_HOST") }
+        match saved_key {
+            Some(v) => std::env::set_var("OPENAI_API_KEY", v),
+            None => std::env::remove_var("OPENAI_API_KEY"),
+        }
+        match saved_host {
+            Some(v) => std::env::set_var("OLLAMA_HOST", v),
+            None => std::env::remove_var("OLLAMA_HOST"),
+        }
 
         assert_eq!(config.embedding_provider, EmbeddingProviderType::Ollama);
         assert_eq!(config.search_default_mode, SearchMode::Semantic);
         assert_eq!(config.vector_quantization, VectorQuantization::F32);
-        assert_eq!(config.source_dirs, vec![PathBuf::from("src"), PathBuf::from("docs")]);
+        assert_eq!(
+            config.source_dirs,
+            vec![PathBuf::from("src"), PathBuf::from("docs")]
+        );
         assert_eq!(config.ollama_host, "http://myhost:11434");
         assert_eq!(config.custom_cluster_defs.len(), 1);
         assert_eq!(config.custom_cluster_defs[0].name, "Test");

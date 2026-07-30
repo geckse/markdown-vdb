@@ -1,180 +1,203 @@
 ---
 title: "mdvdb clusters"
-description: "Show document clusters with K-means grouping and TF-IDF keyword labels"
+description: "Inspect automatic communities and manage independent Collection or Shard Topics"
 category: "commands"
 ---
 
 # mdvdb clusters
 
-Show document clusters computed during ingestion. Documents are grouped using K-means clustering on their embedding vectors, with each cluster labeled using cross-cluster TF-IDF keyword extraction. This provides a high-level overview of the thematic structure of your content.
+Inspect automatic document communities or manage user-defined Topics. Without a Shard, results use
+the Collection analysis stored in the shared index. With `--shard`, automatic communities and
+Topic assignments belong only to that named recursive sub-collection.
 
 ## Usage
 
 ```bash
-mdvdb clusters [OPTIONS]
+mdvdb clusters [--shard <ID>]
+mdvdb clusters [--shard <ID>] --custom
+mdvdb clusters [--shard <ID>] list
+mdvdb clusters [--shard <ID>] add <NAME> [OPTIONS]
+mdvdb clusters [--shard <ID>] update <NAME> [OPTIONS]
+mdvdb clusters [--shard <ID>] remove <NAME>
+mdvdb clusters [--shard <ID>] unassigned
 ```
 
 ## Options
 
-This command has no command-specific options. Only [global options](#global-options) apply.
+| Flag | Description |
+|------|-------------|
+| `--shard <ID>` | Use the Shard's independent automatic clusters and Topics |
+| `--custom` | Show computed Topic summaries instead of automatic clusters |
 
-## Global Options
+Topic definition options:
 
-These options apply to all commands. See [Commands Index](./index.md) for details.
+| Flag | Applies to | Description |
+|------|------------|-------------|
+| `--description <TEXT>` | `add`, `update` | Natural-language Topic description |
+| `--seeds <A,B,...>` | `add`, `update` | Comma-separated seed phrases |
+| `--threshold <0..1>` | `add`, `update` | Per-Topic similarity threshold |
+| `--rename <NAME>` | `update` | Rename the Topic within its owner |
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--verbose` | `-v` | Increase log verbosity (-v info, -vv debug, -vvv trace) |
-| `--root` | | Project root directory (defaults to current directory) |
-| `--no-color` | | Disable colored output |
-| `--json` | | Output results as JSON |
+A Topic must have a non-empty description, at least one seed, or both. Names are unique
+case-sensitively within their owner. The Collection and every Shard are separate owners, so two
+scopes may intentionally use the same name with different definitions and assignments.
 
-## How Clustering Works
-
-mdvdb uses K-means clustering to group documents by semantic similarity:
-
-1. **Document vectors** -- Each file's embedding is computed by averaging the vectors of all its chunks. This produces one vector per file.
-2. **K selection** -- The number of clusters (K) is automatically determined based on the number of documents, scaled by the `MDVDB_CLUSTER_GRANULARITY` setting.
-3. **K-means** -- The [linfa](https://github.com/rust-ml/linfa) K-means implementation groups document vectors into K clusters (up to 100 iterations, tolerance 1e-4).
-4. **Keyword extraction** -- Cross-cluster TF-IDF analysis extracts the top 5 keywords that are most distinctive to each cluster compared to the corpus as a whole. Common English stop words are filtered out.
-5. **Label generation** -- Each cluster's label is generated from its top keywords (e.g., "api, authentication, endpoints").
-
-### Rebalancing
-
-Clusters are not recomputed on every ingestion. A full rebalance is triggered when the number of documents added since the last rebalance exceeds `MDVDB_CLUSTERING_REBALANCE_THRESHOLD` (default: 50). Between rebalances, new documents are assigned to the nearest existing centroid.
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_CLUSTERING_ENABLED` | `true` | Enable or disable clustering |
-| `MDVDB_CLUSTERING_REBALANCE_THRESHOLD` | `50` | Number of new documents before triggering a full rebalance |
-| `MDVDB_CLUSTER_GRANULARITY` | `1.0` | Cluster granularity multiplier (range: 0.25 to 4.0). Lower values produce fewer, larger clusters. Higher values produce more, smaller clusters. |
-
-See [Configuration](../configuration.md) for the full configuration reference.
-
-## Human-Readable Output
-
-When run without `--json`, clusters displays a formatted summary with distribution bars:
-
-```
-  ● Document Clusters (4 clusters, 57 documents)
-
-  Cluster 0: ████████████████████ 22 docs api, authentication, endpoints
-    Keywords: api, authentication, endpoints, oauth, tokens
-
-  Cluster 1: █████████████░░░░░░░ 15 docs deployment, docker, kubernetes
-    Keywords: deployment, docker, kubernetes, helm, ci
-
-  Cluster 2: ██████████░░░░░░░░░░ 12 docs getting-started, tutorial, quickstart
-    Keywords: getting-started, tutorial, quickstart, installation, setup
-
-  Cluster 3: ████████░░░░░░░░░░░░ 8 docs architecture, design, patterns
-    Keywords: architecture, design, patterns, modules, interfaces
-```
-
-### Output Elements
-
-| Element | Description |
-|---------|-------------|
-| **Header** | Total cluster count and total document count |
-| **Cluster ID** | Numeric cluster identifier (0-based) |
-| **Distribution bar** | 20-character bar proportional to the largest cluster |
-| **Document count** | Number of files in this cluster |
-| **Label** | Auto-generated label from top keywords (or "(unlabeled)" if empty) |
-| **Keywords** | Top 5 TF-IDF keywords distinguishing this cluster from others |
-
-### Empty State
-
-If no clusters are available (no files have been ingested, or clustering is disabled):
-
-```
-  ✗ No clusters available. Run mdvdb ingest first.
-```
-
-## Examples
+## Automatic clusters
 
 ```bash
-# Show document clusters
+# Communities across the complete Collection
 mdvdb clusters
 
-# Show clusters as JSON
-mdvdb clusters --json
-
-# Show clusters for a specific project
-mdvdb clusters --root /path/to/project
-
-# Show clusters with debug logging
-mdvdb clusters -vv
+# Finer communities derived only from indexed documents in Research
+mdvdb clusters --shard research
 ```
 
-## JSON Output
+Collection automatic clusters are maintained by ingest. Shard automatic clusters are computed
+lazily from the existing document vectors already stored in the shared index. They use the
+Collection's clustering algorithm and settings but only the Shard corpus. For Leiden analysis,
+`clustering.knn` remains the configured upper bound; a Shard caps its effective neighborhood at
+`max(2, ceil(sqrt(document_count)))`. This prevents a small Shard from becoming a complete
+similarity graph and collapsing otherwise useful local communities. Collection clustering is
+unchanged.
 
-### ClusterSummary Array (`--json`)
+No embedding provider is initialized by a read. The disposable Shard state is cached below
+`.markdownvdb/cache/shards/`; it does not duplicate document embeddings or graph topology and does
+not change index bytes or status.
 
-The JSON output is an array of `ClusterSummary` objects:
+Fewer than two indexed Shard documents produce no automatic partition and report `too_small`
+through graph analysis metadata.
+
+## Independent Topics
+
+Collection definitions live under `clustering.custom`. Shard definitions live inside the raw
+project-local Shard entry:
+
+```yaml
+shards:
+  research:
+    name: Research
+    path: work/research
+    topics:
+      - name: Methods
+        description: Research methods and experiments
+        seeds: [methodology, experiment]
+        threshold: 0.35
+```
+
+Manage them with the same CLI:
+
+```bash
+mdvdb clusters --shard research add Methods \
+  --description "Research methods and experiments" \
+  --seeds methodology,experiment \
+  --threshold 0.35
+
+mdvdb clusters --shard research list
+mdvdb clusters --shard research update Methods --threshold 0.40
+mdvdb clusters --shard research remove Methods
+```
+
+Definition mutations preserve unrelated YAML and prompt for a subsequent ingest. Ingest embeds new
+or changed Topic definitions and assigns in-Shard documents. When only the Shard corpus changes,
+compatible cached centroids are reused without re-embedding Topic text.
+
+Read-only commands never initialize an embedding provider. Until stale or new definitions have
+been ingested, graph topology and automatic clusters remain available while local Topics report
+`needs_ingest`.
+
+```bash
+mdvdb ingest
+mdvdb clusters --shard research --custom
+mdvdb clusters --shard research unassigned
+```
+
+Topics use multi-label threshold assignment. A document joins every Topic whose similarity meets
+the larger of the per-Topic threshold and Collection-wide
+`clustering.topics.min_similarity`. `unassigned` returns documents matching none.
+
+## Nested Shards
+
+Nested Shards analyze themselves independently. A document contained by both an ancestor and a
+descendant can have a different automatic cluster and different Topic memberships in each:
+
+```bash
+mdvdb clusters --shard research
+mdvdb clusters --shard papers
+```
+
+No assignments inherit from the Collection, ancestor Shard, or sibling Shard. Links, backlinks,
+relations, document identities, files, and embeddings remain Collection-wide and shared.
+
+## JSON output
+
+Automatic cluster output remains the existing `ClusterSummary[]` array:
 
 ```json
 [
   {
-    "id": 0,
-    "document_count": 22,
-    "label": "api, authentication, endpoints",
-    "keywords": ["api", "authentication", "endpoints", "oauth", "tokens"]
-  },
-  {
-    "id": 1,
-    "document_count": 15,
-    "label": "deployment, docker, kubernetes",
-    "keywords": ["deployment", "docker", "kubernetes", "helm", "ci"]
-  },
-  {
-    "id": 2,
+    "id": 3,
     "document_count": 12,
-    "label": "getting-started, tutorial, quickstart",
-    "keywords": ["getting-started", "tutorial", "quickstart", "installation", "setup"]
+    "label": "methods, experiments",
+    "keywords": ["methods", "experiments", "evaluation"]
   }
 ]
 ```
 
-### ClusterSummary Fields
+Topic output remains `CustomClusterSummary[]`, including definition metadata, document counts, and
+mean similarity. `unassigned` retains its existing object shape. Supplying `--shard` changes the
+analysis owner, not these JSON contracts.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `number` | Numeric cluster identifier (0-based) |
-| `document_count` | `number` | Number of files belonging to this cluster |
-| `label` | `string \| null` | Auto-generated label from keywords, or `null` if empty |
-| `keywords` | `string[]` | Top TF-IDF keywords distinguishing this cluster |
+Shard-local `add`, `update`, and `remove` return
+`{"action": string, "shard_id": string, "topics": TopicDef[]}`. The `topics` list is the complete
+post-mutation local definition state. Collection-level mutation output remains unchanged.
 
-### Empty State
+IDs are opaque and need not be contiguous. Compatible Shard cache state is reused for best-effort
+stable IDs and colors; a clustering-configuration change starts a fresh local state.
 
-When no clusters are available, the JSON output is an empty array:
+## Human output and empty states
 
-```json
-[]
+Human output identifies the selected Shard and prints local distribution bars, labels, keywords,
+and counts. Empty states distinguish:
+
+- Clustering disabled by Collection settings.
+- A Shard with fewer than two indexed documents.
+- No local Topics configured.
+- Local Topics that need ingest.
+- A missing Shard folder, for which definitions remain editable but computed results are disabled.
+
+## Safety and lifecycle
+
+- Queries never modify the shared index or public version fields.
+- Removing a Topic removes only its definition and derived local assignment state.
+- Removing a Shard also removes its local Topic definitions and best-effort deletes its disposable
+  cache, but never its folder or files.
+- Shard path updates and retargeting preserve local Topic definitions.
+- Corrupt or incompatible cache files are ignored and rebuilt safely.
+
+## Examples
+
+```bash
+# Collection automatic clusters
+mdvdb clusters
+
+# Shard automatic clusters as JSON
+mdvdb clusters --shard research --json
+
+# Computed local Topics
+mdvdb clusters --shard research --custom --json
+
+# Two independent Topics with the same display name
+mdvdb clusters add Methods --description "All collection methods"
+mdvdb clusters --shard research add Methods --description "Research methods"
+
+# Local Unassigned bucket
+mdvdb clusters --shard research unassigned --json
 ```
 
-## Notes
+## Related commands
 
-- The `clusters` command opens the index in **read-only** mode. It never modifies the index.
-- Clustering operates at the **document level** (one vector per file), not the chunk level. Each file's vector is the average of its chunk vectors.
-- Clusters are computed during [`mdvdb ingest`](./ingest.md), not during the `clusters` command itself.
-- Zero-norm vectors (files whose chunks all have zero embeddings) are excluded from clustering.
-- If only one document exists, it is placed in a single cluster.
-- The cluster ID is not guaranteed to be stable across rebalances -- the same document may be assigned a different cluster ID after a rebalance.
-- The `label` field is `null` (not an empty string) when the cluster has no meaningful label.
-
-## Related Commands
-
-- [`mdvdb ingest`](./ingest.md) -- Index files and compute clusters
-- [`mdvdb schema`](./schema.md) -- View metadata schema (another data inspection command)
-- [`mdvdb tree`](./tree.md) -- View file tree with sync status
-- [`mdvdb status`](./status.md) -- Check index document count
-- [`mdvdb graph`](./graph.md) -- View graph data including cluster membership
-
-## See Also
-
-- [Clustering](../concepts/clustering.md) -- Deep dive into K-means clustering, TF-IDF labels, and granularity tuning
-- [Index Storage](../concepts/index-storage.md) -- How cluster state is persisted in the index
-- [Configuration](../configuration.md) -- Clustering-related environment variables
-- [JSON Output Reference](../json-output.md) -- Complete JSON schema reference
+- [`mdvdb shards`](./shards.md) — create and manage named sub-collection scopes
+- [`mdvdb graph`](./graph.md) — render Shard-local graph clusters and Topics
+- [`mdvdb ingest`](./ingest.md) — compute new or changed Topic centroids
+- [Configuration](../configuration.md) — clustering settings and raw Shard Topic YAML
+- [JSON output](../json-output.md) — response schemas and graph analysis status

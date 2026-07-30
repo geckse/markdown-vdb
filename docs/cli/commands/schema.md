@@ -19,6 +19,7 @@ mdvdb schema [OPTIONS]
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--path <PREFIX>` | *(none)* | Restrict schema inference to files under this path prefix |
+| `--shard <ID>` | *(none)* | Restrict schema inference to a configured named Shard (conflicts with `--path`) |
 
 ### Option Details
 

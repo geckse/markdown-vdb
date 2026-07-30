@@ -2,10 +2,11 @@ use std::path::PathBuf;
 
 use mdvdb::chunker::Chunk;
 use mdvdb::embedding::mock::MockProvider;
+use mdvdb::embedding::provider::EmbeddingProvider;
+use mdvdb::fts::FtsIndex;
 use mdvdb::index::{EmbeddingConfig, Index};
 use mdvdb::links;
 use mdvdb::parser::{MarkdownFile, RawLink};
-use mdvdb::fts::FtsIndex;
 use mdvdb::search::{search, MetadataFilter, SearchMode, SearchQuery};
 use serde_json::json;
 use tempfile::TempDir;
@@ -30,11 +31,20 @@ fn create_index_dir() -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-fn fake_markdown_file(path: &str, hash: &str, frontmatter: Option<serde_json::Value>) -> MarkdownFile {
+fn fake_markdown_file(
+    path: &str,
+    hash: &str,
+    frontmatter: Option<serde_json::Value>,
+) -> MarkdownFile {
     fake_markdown_file_with_mtime(path, hash, frontmatter, 0)
 }
 
-fn fake_markdown_file_with_mtime(path: &str, hash: &str, frontmatter: Option<serde_json::Value>, modified_at: u64) -> MarkdownFile {
+fn fake_markdown_file_with_mtime(
+    path: &str,
+    hash: &str,
+    frontmatter: Option<serde_json::Value>,
+    modified_at: u64,
+) -> MarkdownFile {
     MarkdownFile {
         path: PathBuf::from(path),
         frontmatter,
@@ -119,7 +129,26 @@ async fn test_basic_search() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(!results.is_empty(), "should return results");
     assert!(results.len() <= 10, "default limit is 10");
@@ -141,7 +170,26 @@ async fn test_min_score_filtering() {
 
     // Very high min_score should filter out everything
     let query = SearchQuery::new("test query").with_min_score(0.9999);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     // All results (if any) must meet the threshold
     for r in &results {
@@ -160,9 +208,32 @@ async fn test_limit_capping() {
     populate_index(&index, "b.md", "h2", Some(json!({"title": "B"})), 5);
 
     let query = SearchQuery::new("test").with_limit(3);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    assert!(results.len() <= 3, "should respect limit of 3, got {}", results.len());
+    assert!(
+        results.len() <= 3,
+        "should respect limit of 3, got {}",
+        results.len()
+    );
 }
 
 #[tokio::test]
@@ -171,15 +242,45 @@ async fn test_metadata_filter_equals() {
     let index = Index::create(&path, &test_config()).unwrap();
     let provider = mock_provider();
 
-    populate_index(&index, "draft.md", "h1", Some(json!({"status": "draft"})), 2);
-    populate_index(&index, "pub.md", "h2", Some(json!({"status": "published"})), 2);
+    populate_index(
+        &index,
+        "draft.md",
+        "h1",
+        Some(json!({"status": "draft"})),
+        2,
+    );
+    populate_index(
+        &index,
+        "pub.md",
+        "h2",
+        Some(json!({"status": "published"})),
+        2,
+    );
 
-    let query = SearchQuery::new("test")
-        .with_filter(MetadataFilter::Equals {
-            field: "status".into(),
-            value: json!("draft"),
-        });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let query = SearchQuery::new("test").with_filter(MetadataFilter::Equals {
+        field: "status".into(),
+        value: json!("draft"),
+    });
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -197,15 +298,35 @@ async fn test_metadata_filter_in() {
     populate_index(&index, "b.md", "h2", Some(json!({"category": "python"})), 2);
     populate_index(&index, "c.md", "h3", Some(json!({"category": "go"})), 2);
 
-    let query = SearchQuery::new("test")
-        .with_filter(MetadataFilter::In {
-            field: "category".into(),
-            values: vec![json!("rust"), json!("go")],
-        });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let query = SearchQuery::new("test").with_filter(MetadataFilter::In {
+        field: "category".into(),
+        values: vec![json!("rust"), json!("go")],
+    });
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
-        let cat = r.file.frontmatter.as_ref().unwrap()["category"].as_str().unwrap();
+        let cat = r.file.frontmatter.as_ref().unwrap()["category"]
+            .as_str()
+            .unwrap();
         assert!(cat == "rust" || cat == "go", "unexpected category: {cat}");
     }
 }
@@ -219,16 +340,36 @@ async fn test_metadata_filter_range() {
     populate_index(&index, "old.md", "h1", Some(json!({"year": 2020})), 2);
     populate_index(&index, "new.md", "h2", Some(json!({"year": 2024})), 2);
 
-    let query = SearchQuery::new("test")
-        .with_filter(MetadataFilter::Range {
-            field: "year".into(),
-            min: Some(json!(2023)),
-            max: Some(json!(2025)),
-        });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let query = SearchQuery::new("test").with_filter(MetadataFilter::Range {
+        field: "year".into(),
+        min: Some(json!(2023)),
+        max: Some(json!(2025)),
+    });
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
-        let year = r.file.frontmatter.as_ref().unwrap()["year"].as_i64().unwrap();
+        let year = r.file.frontmatter.as_ref().unwrap()["year"]
+            .as_i64()
+            .unwrap();
         assert!((2023..=2025).contains(&year), "year {year} out of range");
     }
 }
@@ -240,17 +381,44 @@ async fn test_metadata_filter_exists() {
     let provider = mock_provider();
 
     populate_index(&index, "with.md", "h1", Some(json!({"author": "Alice"})), 2);
-    populate_index(&index, "without.md", "h2", Some(json!({"title": "No author"})), 2);
+    populate_index(
+        &index,
+        "without.md",
+        "h2",
+        Some(json!({"title": "No author"})),
+        2,
+    );
 
-    let query = SearchQuery::new("test")
-        .with_filter(MetadataFilter::Exists {
-            field: "author".into(),
-        });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let query = SearchQuery::new("test").with_filter(MetadataFilter::Exists {
+        field: "author".into(),
+    });
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
-        assert!(fm.get("author").is_some(), "should only return docs with author");
+        assert!(
+            fm.get("author").is_some(),
+            "should only return docs with author"
+        );
     }
 }
 
@@ -260,9 +428,27 @@ async fn test_combined_and_filters() {
     let index = Index::create(&path, &test_config()).unwrap();
     let provider = mock_provider();
 
-    populate_index(&index, "match.md", "h1", Some(json!({"status": "draft", "year": 2024})), 2);
-    populate_index(&index, "wrong_status.md", "h2", Some(json!({"status": "published", "year": 2024})), 2);
-    populate_index(&index, "wrong_year.md", "h3", Some(json!({"status": "draft", "year": 2020})), 2);
+    populate_index(
+        &index,
+        "match.md",
+        "h1",
+        Some(json!({"status": "draft", "year": 2024})),
+        2,
+    );
+    populate_index(
+        &index,
+        "wrong_status.md",
+        "h2",
+        Some(json!({"status": "published", "year": 2024})),
+        2,
+    );
+    populate_index(
+        &index,
+        "wrong_year.md",
+        "h3",
+        Some(json!({"status": "draft", "year": 2020})),
+        2,
+    );
 
     let query = SearchQuery::new("test")
         .with_filter(MetadataFilter::Equals {
@@ -274,7 +460,26 @@ async fn test_combined_and_filters() {
             min: Some(json!(2023)),
             max: Some(json!(2025)),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
@@ -291,7 +496,26 @@ async fn test_empty_index_returns_no_results() {
     let provider = mock_provider();
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(results.is_empty(), "empty index should return no results");
 }
@@ -305,7 +529,26 @@ async fn test_empty_query_returns_no_results() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(results.is_empty(), "empty query should return no results");
 }
@@ -361,7 +604,26 @@ async fn test_search_with_fts_hybrid_mode() {
     );
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Hybrid);
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        Some(&fts),
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(!results.is_empty(), "hybrid search should return results");
 }
@@ -388,7 +650,26 @@ async fn test_search_lexical_mode() {
     );
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        Some(&fts),
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(!results.is_empty(), "lexical search should return results");
 }
@@ -402,7 +683,26 @@ async fn test_search_semantic_mode_explicit() {
     populate_index(&index, "doc.md", "h1", Some(json!({"title": "Test"})), 3);
 
     let query = SearchQuery::new("test query").with_mode(SearchMode::Semantic);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(!results.is_empty(), "semantic search should return results");
 }
@@ -417,9 +717,31 @@ async fn test_search_hybrid_fallback_without_fts() {
 
     // Hybrid mode without FTS index should fall back to semantic
     let query = SearchQuery::new("test query").with_mode(SearchMode::Hybrid);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    assert!(!results.is_empty(), "hybrid without fts should fall back to semantic");
+    assert!(
+        !results.is_empty(),
+        "hybrid without fts should fall back to semantic"
+    );
 }
 
 #[tokio::test]
@@ -433,11 +755,27 @@ async fn test_search_mode_with_filter() {
 
     let chunks_a = fake_chunks("a.md", 2);
     let embs_a = fake_embeddings(2);
-    populate_both(&index, &fts, "a.md", "h1", Some(json!({"status": "draft"})), &chunks_a, &embs_a);
+    populate_both(
+        &index,
+        &fts,
+        "a.md",
+        "h1",
+        Some(json!({"status": "draft"})),
+        &chunks_a,
+        &embs_a,
+    );
 
     let chunks_b = fake_chunks("b.md", 2);
     let embs_b = fake_embeddings(2);
-    populate_both(&index, &fts, "b.md", "h2", Some(json!({"status": "published"})), &chunks_b, &embs_b);
+    populate_both(
+        &index,
+        &fts,
+        "b.md",
+        "h2",
+        Some(json!({"status": "published"})),
+        &chunks_b,
+        &embs_b,
+    );
 
     let query = SearchQuery::new("Chunk content")
         .with_mode(SearchMode::Hybrid)
@@ -445,11 +783,33 @@ async fn test_search_mode_with_filter() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        Some(&fts),
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
         let fm = r.file.frontmatter.as_ref().unwrap();
-        assert_eq!(fm["status"], "draft", "hybrid + filter should respect metadata filter");
+        assert_eq!(
+            fm["status"], "draft",
+            "hybrid + filter should respect metadata filter"
+        );
     }
 }
 
@@ -478,7 +838,26 @@ async fn test_lexical_search_no_embedding_call() {
     let initial_calls = provider.call_count();
 
     let query = SearchQuery::new("Chunk content").with_mode(SearchMode::Lexical);
-    let _results = search(&query, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let _results = search(
+        &query,
+        &index,
+        &provider,
+        Some(&fts),
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert_eq!(
         provider.call_count(),
@@ -534,11 +913,49 @@ async fn test_hybrid_combines_both_signals() {
 
     // Hybrid search for "Rust programming" — should find results from both signals.
     let query_hybrid = SearchQuery::new("Rust programming").with_mode(SearchMode::Hybrid);
-    let hybrid_results = search(&query_hybrid, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let hybrid_results = search(
+        &query_hybrid,
+        &index,
+        &provider,
+        Some(&fts),
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     // Lexical search for the same query.
     let query_lexical = SearchQuery::new("Rust programming").with_mode(SearchMode::Lexical);
-    let lexical_results = search(&query_lexical, &index, &provider, Some(&fts), 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let lexical_results = search(
+        &query_lexical,
+        &index,
+        &provider,
+        Some(&fts),
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     // Both should return results.
     assert!(!hybrid_results.is_empty(), "hybrid should return results");
@@ -561,21 +978,295 @@ async fn test_path_prefix_filters_results() {
     let index = Index::create(&path, &test_config()).unwrap();
     let provider = mock_provider();
 
-    populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
-    populate_index(&index, "docs/api.md", "h2", Some(json!({"title": "API"})), 2);
-    populate_index(&index, "notes/todo.md", "h3", Some(json!({"title": "Todo"})), 2);
+    populate_index(
+        &index,
+        "docs/guide.md",
+        "h1",
+        Some(json!({"title": "Guide"})),
+        2,
+    );
+    populate_index(
+        &index,
+        "docs/api.md",
+        "h2",
+        Some(json!({"title": "API"})),
+        2,
+    );
+    populate_index(
+        &index,
+        "docs-old/archive.md",
+        "h4",
+        Some(json!({"title": "Archive"})),
+        2,
+    );
+    populate_index(
+        &index,
+        "notes/todo.md",
+        "h3",
+        Some(json!({"title": "Todo"})),
+        2,
+    );
 
-    let query = SearchQuery::new("test").with_path_prefix("docs/");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let query = SearchQuery::new("test").with_path_prefix("docs");
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(!results.is_empty(), "should return results from docs/");
     for r in &results {
         assert!(
-            r.file.path.starts_with("docs/"),
-            "expected docs/ prefix, got: {}",
+            mdvdb::path_util::path_is_in_scope(&r.file.path, "docs"),
+            "expected docs scope, got: {}",
             r.file.path
         );
     }
+}
+
+#[tokio::test]
+async fn test_scoped_semantic_search_fills_limit_after_global_overfetch() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let vector_source = mock_provider();
+    let provider = mock_provider();
+    let query_text = "needle for the shard";
+    let query_vector = vector_source
+        .embed_batch(&[query_text.to_string()])
+        .await
+        .unwrap()
+        .remove(0);
+
+    let outside_file = fake_markdown_file("elsewhere/global.md", "outside", None);
+    let outside_chunks = fake_chunks("elsewhere/global.md", 20);
+    let outside_embeddings = vec![query_vector; outside_chunks.len()];
+    index
+        .upsert(&outside_file, &outside_chunks, &outside_embeddings)
+        .unwrap();
+
+    let shard_file = fake_markdown_file("shard/target.md", "inside", None);
+    let shard_chunks = fake_chunks("shard/target.md", 3);
+    let mut lower_ranked = vec![0.0; DIMS];
+    lower_ranked[0] = 1.0;
+    let shard_embeddings = vec![lower_ranked; shard_chunks.len()];
+    index
+        .upsert(&shard_file, &shard_chunks, &shard_embeddings)
+        .unwrap();
+
+    let query = SearchQuery::new(query_text)
+        .with_mode(SearchMode::Semantic)
+        .with_limit(3)
+        .with_path_prefix("shard");
+    let response = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.results.len(), 3);
+    assert!(response
+        .results
+        .iter()
+        .all(|result| result.file.path == "shard/target.md"));
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "candidate widening must reuse the query embedding"
+    );
+}
+
+#[tokio::test]
+async fn test_scoped_lexical_search_fills_limit_after_global_overfetch() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let provider = mock_provider();
+    let fts = FtsIndex::open_or_create(&_dir.path().join("fts")).unwrap();
+
+    let mut outside_chunks = fake_chunks("elsewhere/global.md", 20);
+    for chunk in &mut outside_chunks {
+        chunk.content = "needle needle needle needle needle".to_string();
+    }
+    populate_both(
+        &index,
+        &fts,
+        "elsewhere/global.md",
+        "outside",
+        None,
+        &outside_chunks,
+        &fake_embeddings(outside_chunks.len()),
+    );
+
+    let mut shard_chunks = fake_chunks("shard/target.md", 3);
+    for chunk in &mut shard_chunks {
+        chunk.content = "needle".to_string();
+    }
+    populate_both(
+        &index,
+        &fts,
+        "shard/target.md",
+        "inside",
+        None,
+        &shard_chunks,
+        &fake_embeddings(shard_chunks.len()),
+    );
+
+    let query = SearchQuery::new("needle")
+        .with_mode(SearchMode::Lexical)
+        .with_limit(3)
+        .with_path_prefix("shard");
+    let response = search(
+        &query,
+        &index,
+        &provider,
+        Some(&fts),
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.results.len(), 3);
+    assert!(response
+        .results
+        .iter()
+        .all(|result| result.file.path == "shard/target.md"));
+    assert_eq!(
+        provider.call_count(),
+        0,
+        "lexical widening must not request an embedding"
+    );
+}
+
+#[tokio::test]
+async fn test_scoped_edge_search_fills_limit_and_filters_only_source() {
+    let (_dir, path) = create_index_dir();
+    let index = Index::create(&path, &test_config()).unwrap();
+    let vector_source = mock_provider();
+    let provider = mock_provider();
+    let query_text = "edge needle";
+    let query_vector = vector_source
+        .embed_batch(&[query_text.to_string()])
+        .await
+        .unwrap()
+        .remove(0);
+
+    let mut semantic_edges = std::collections::HashMap::new();
+    let mut edge_vectors = Vec::new();
+    for index in 0..20 {
+        let edge_id = format!("edge:elsewhere/source-{index}.md->target-{index}.md@1");
+        semantic_edges.insert(
+            edge_id.clone(),
+            links::SemanticEdge {
+                edge_id: edge_id.clone(),
+                source: format!("elsewhere/source-{index}.md"),
+                target: format!("target-{index}.md"),
+                context_text: "outside".to_string(),
+                line_number: 1,
+                strength: None,
+                relationship_type: None,
+                cluster_id: None,
+            },
+        );
+        edge_vectors.push((edge_id, query_vector.clone()));
+    }
+    let mut lower_ranked = vec![0.0; DIMS];
+    lower_ranked[0] = 1.0;
+    for index in 0..3 {
+        let edge_id = format!("edge:shard/source-{index}.md->outside/target-{index}.md@1");
+        semantic_edges.insert(
+            edge_id.clone(),
+            links::SemanticEdge {
+                edge_id: edge_id.clone(),
+                source: format!("shard/source-{index}.md"),
+                target: format!("outside/target-{index}.md"),
+                context_text: "inside source, outside target".to_string(),
+                line_number: 1,
+                strength: None,
+                relationship_type: None,
+                cluster_id: None,
+            },
+        );
+        edge_vectors.push((edge_id, lower_ranked.clone()));
+    }
+    index.upsert_edges(&edge_vectors).unwrap();
+    index.update_link_graph(Some(links::LinkGraph {
+        forward: std::collections::HashMap::new(),
+        last_updated: 0,
+        semantic_edges: Some(semantic_edges),
+        edge_cluster_state: None,
+    }));
+
+    let query = SearchQuery::new(query_text)
+        .with_mode(SearchMode::Edge)
+        .with_limit(3)
+        .with_path_prefix("shard");
+    let response = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.edge_results.len(), 3);
+    assert!(response.edge_results.iter().all(|edge| {
+        edge.source_path.starts_with("shard/") && edge.target_path.starts_with("outside/")
+    }));
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "edge widening must reuse the query embedding"
+    );
 }
 
 #[tokio::test]
@@ -584,12 +1275,40 @@ async fn test_path_prefix_no_match() {
     let index = Index::create(&path, &test_config()).unwrap();
     let provider = mock_provider();
 
-    populate_index(&index, "docs/guide.md", "h1", Some(json!({"title": "Guide"})), 2);
+    populate_index(
+        &index,
+        "docs/guide.md",
+        "h1",
+        Some(json!({"title": "Guide"})),
+        2,
+    );
 
     let query = SearchQuery::new("test").with_path_prefix("nonexistent/");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    assert!(results.is_empty(), "nonexistent prefix should return no results");
+    assert!(
+        results.is_empty(),
+        "nonexistent prefix should return no results"
+    );
 }
 
 #[tokio::test]
@@ -598,9 +1317,27 @@ async fn test_path_prefix_combined_with_metadata_filter() {
     let index = Index::create(&path, &test_config()).unwrap();
     let provider = mock_provider();
 
-    populate_index(&index, "docs/draft.md", "h1", Some(json!({"status": "draft"})), 2);
-    populate_index(&index, "docs/published.md", "h2", Some(json!({"status": "published"})), 2);
-    populate_index(&index, "notes/draft.md", "h3", Some(json!({"status": "draft"})), 2);
+    populate_index(
+        &index,
+        "docs/draft.md",
+        "h1",
+        Some(json!({"status": "draft"})),
+        2,
+    );
+    populate_index(
+        &index,
+        "docs/published.md",
+        "h2",
+        Some(json!({"status": "published"})),
+        2,
+    );
+    populate_index(
+        &index,
+        "notes/draft.md",
+        "h3",
+        Some(json!({"status": "draft"})),
+        2,
+    );
 
     let query = SearchQuery::new("test")
         .with_path_prefix("docs/")
@@ -608,7 +1345,26 @@ async fn test_path_prefix_combined_with_metadata_filter() {
             field: "status".into(),
             value: json!("draft"),
         });
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
         assert!(
@@ -642,13 +1398,35 @@ async fn test_decay_disabled_does_not_change_results() {
 
     // Search without decay.
     let query = SearchQuery::new("test query");
-    let results_no_decay = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results_no_decay = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
     assert!(!results_no_decay.is_empty());
 
     // All scores should be unaffected by age (same content gets same score).
     // modified_at should still be populated on the results.
     for r in &results_no_decay {
-        assert!(r.file.modified_at.is_some(), "modified_at should be present");
+        assert!(
+            r.file.modified_at.is_some(),
+            "modified_at should be present"
+        );
     }
 }
 
@@ -669,13 +1447,38 @@ async fn test_decay_enabled_penalizes_old_files() {
 
     // Search with decay enabled.
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        true,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(results.len() >= 2, "should return results for both files");
 
     // Find scores for each file.
-    let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
-    let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+    let recent_score = results
+        .iter()
+        .find(|r| r.file.path == "recent.md")
+        .map(|r| r.score);
+    let old_score = results
+        .iter()
+        .find(|r| r.file.path == "old.md")
+        .map(|r| r.score);
 
     assert!(recent_score.is_some() && old_score.is_some());
     assert!(
@@ -702,10 +1505,35 @@ async fn test_decay_per_query_override_enables() {
 
     // Config says decay disabled (false), but query enables it.
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
-    let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+    let recent_score = results
+        .iter()
+        .find(|r| r.file.path == "recent.md")
+        .map(|r| r.score);
+    let old_score = results
+        .iter()
+        .find(|r| r.file.path == "old.md")
+        .map(|r| r.score);
 
     assert!(recent_score.is_some() && old_score.is_some());
     assert!(
@@ -730,15 +1558,46 @@ async fn test_decay_per_query_override_disables() {
 
     // Config says decay enabled (true), but query disables it.
     let query = SearchQuery::new("test query").with_decay(false);
-    let results_no_decay = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results_no_decay = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        true,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     // Without decay, both should have comparable scores (same mock embeddings).
-    let recent = results_no_decay.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
-    let old = results_no_decay.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+    let recent = results_no_decay
+        .iter()
+        .find(|r| r.file.path == "recent.md")
+        .map(|r| r.score);
+    let old = results_no_decay
+        .iter()
+        .find(|r| r.file.path == "old.md")
+        .map(|r| r.score);
     if let (Some(r), Some(o)) = (recent, old) {
         // Without decay the difference should be very small (mock provider gives similar vectors).
         let diff = (r - o).abs();
-        assert!(diff < 0.2, "without decay, scores should be close: recent={}, old={}, diff={}", r, o, diff);
+        assert!(
+            diff < 0.2,
+            "without decay, scores should be close: recent={}, old={}, diff={}",
+            r,
+            o,
+            diff
+        );
     }
 }
 
@@ -757,11 +1616,38 @@ async fn test_decay_custom_half_life() {
     populate_index_with_mtime(&index, "old.md", "h2", None, 1, now - 90 * 86400);
 
     // Very short half-life (7 days) should punish 90-day old file severely.
-    let query = SearchQuery::new("test query").with_decay(true).with_decay_half_life(7.0);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let query = SearchQuery::new("test query")
+        .with_decay(true)
+        .with_decay_half_life(7.0);
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    let recent_score = results.iter().find(|r| r.file.path == "recent.md").map(|r| r.score);
-    let old_score = results.iter().find(|r| r.file.path == "old.md").map(|r| r.score);
+    let recent_score = results
+        .iter()
+        .find(|r| r.file.path == "recent.md")
+        .map(|r| r.score);
+    let old_score = results
+        .iter()
+        .find(|r| r.file.path == "old.md")
+        .map(|r| r.score);
 
     assert!(recent_score.is_some() && old_score.is_some());
     // With 7-day half-life and 90 days age, multiplier ≈ 0.5^(90/7) ≈ 0.00015
@@ -783,10 +1669,33 @@ async fn test_decay_modified_at_in_results() {
     populate_index_with_mtime(&index, "doc.md", "h1", None, 1, mtime);
 
     let query = SearchQuery::new("test query");
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     assert!(!results.is_empty());
-    assert_eq!(results[0].file.modified_at, Some(mtime), "modified_at should be populated in results");
+    assert_eq!(
+        results[0].file.modified_at,
+        Some(mtime),
+        "modified_at should be populated in results"
+    );
 }
 
 #[tokio::test]
@@ -805,7 +1714,26 @@ async fn test_decay_scores_in_valid_range() {
     populate_index_with_mtime(&index, "c.md", "h3", None, 1, now - 365 * 86400);
 
     let query = SearchQuery::new("test query").with_decay(true);
-    let results = search(&query, &index, &provider, None, 60.0, 1.5, true, 90.0, &[], &[], false, 1, 0, 3, 0.15).await.unwrap().results;
+    let results = search(
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        true,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
     for r in &results {
         assert!(r.score >= 0.0, "score should be >= 0, got {}", r.score);
@@ -827,27 +1755,64 @@ async fn test_decay_exclude_preserves_score() {
         .as_secs();
 
     // Both files are old (180 days).
-    populate_index_with_mtime(&index, "docs/reference/api.md", "h1", None, 1, now - 180 * 86400);
-    populate_index_with_mtime(&index, "docs/guides/setup.md", "h2", None, 1, now - 180 * 86400);
+    populate_index_with_mtime(
+        &index,
+        "docs/reference/api.md",
+        "h1",
+        None,
+        1,
+        now - 180 * 86400,
+    );
+    populate_index_with_mtime(
+        &index,
+        "docs/guides/setup.md",
+        "h2",
+        None,
+        1,
+        now - 180 * 86400,
+    );
 
     let exclude = vec!["docs/reference".to_string()];
 
     // Search with decay enabled but docs/reference excluded.
     let query = SearchQuery::new("test query").with_decay(true);
     let results = search(
-        &query, &index, &provider, None, 60.0, 1.5, true, 90.0,
-        &exclude, &[], false, 1, 0, 3, 0.15,
-    ).await.unwrap().results;
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        true,
+        90.0,
+        &exclude,
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    let ref_score = results.iter().find(|r| r.file.path == "docs/reference/api.md").map(|r| r.score);
-    let guide_score = results.iter().find(|r| r.file.path == "docs/guides/setup.md").map(|r| r.score);
+    let ref_score = results
+        .iter()
+        .find(|r| r.file.path == "docs/reference/api.md")
+        .map(|r| r.score);
+    let guide_score = results
+        .iter()
+        .find(|r| r.file.path == "docs/guides/setup.md")
+        .map(|r| r.score);
 
     assert!(ref_score.is_some() && guide_score.is_some());
     // Excluded file should have higher score (no decay) than non-excluded (decayed).
     assert!(
         ref_score.unwrap() > guide_score.unwrap(),
         "excluded file should keep original score: ref={:?} > guide={:?}",
-        ref_score, guide_score
+        ref_score,
+        guide_score
     );
 }
 
@@ -863,7 +1828,14 @@ async fn test_decay_include_only_affects_matching_paths() {
         .as_secs();
 
     // Both files are old.
-    populate_index_with_mtime(&index, "journal/2024-01.md", "h1", None, 1, now - 180 * 86400);
+    populate_index_with_mtime(
+        &index,
+        "journal/2024-01.md",
+        "h1",
+        None,
+        1,
+        now - 180 * 86400,
+    );
     populate_index_with_mtime(&index, "docs/readme.md", "h2", None, 1, now - 180 * 86400);
 
     let include = vec!["journal/".to_string()];
@@ -871,19 +1843,42 @@ async fn test_decay_include_only_affects_matching_paths() {
     // Search with decay enabled but only for journal/ paths.
     let query = SearchQuery::new("test query").with_decay(true);
     let results = search(
-        &query, &index, &provider, None, 60.0, 1.5, true, 90.0,
-        &[], &include, false, 1, 0, 3, 0.15,
-    ).await.unwrap().results;
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        true,
+        90.0,
+        &[],
+        &include,
+        false,
+        1,
+        0,
+        3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    let journal_score = results.iter().find(|r| r.file.path == "journal/2024-01.md").map(|r| r.score);
-    let docs_score = results.iter().find(|r| r.file.path == "docs/readme.md").map(|r| r.score);
+    let journal_score = results
+        .iter()
+        .find(|r| r.file.path == "journal/2024-01.md")
+        .map(|r| r.score);
+    let docs_score = results
+        .iter()
+        .find(|r| r.file.path == "docs/readme.md")
+        .map(|r| r.score);
 
     assert!(journal_score.is_some() && docs_score.is_some());
     // docs/readme.md is NOT in include list, so no decay → higher score.
     assert!(
         docs_score.unwrap() > journal_score.unwrap(),
         "non-included file should keep original score: docs={:?} > journal={:?}",
-        docs_score, journal_score
+        docs_score,
+        journal_score
     );
 }
 
@@ -899,20 +1894,43 @@ async fn test_decay_exclude_overrides_include() {
         .as_secs();
 
     // All files are old.
-    populate_index_with_mtime(&index, "journal/pinned/important.md", "h1", None, 1, now - 180 * 86400);
-    populate_index_with_mtime(&index, "journal/2024-01.md", "h2", None, 1, now - 180 * 86400);
+    populate_index_with_mtime(
+        &index,
+        "journal/pinned/important.md",
+        "h1",
+        None,
+        1,
+        now - 180 * 86400,
+    );
+    populate_index_with_mtime(
+        &index,
+        "journal/2024-01.md",
+        "h2",
+        None,
+        1,
+        now - 180 * 86400,
+    );
 
     let exclude = vec!["journal/pinned".to_string()];
     let include = vec!["journal/".to_string()];
 
     let query = SearchQuery::new("test query").with_decay(true);
     let results = search(
-        &query, &index, &provider, None, 60.0, 1.5, true, 90.0,
-        &exclude, &include, false, 1, 0, 3, 0.15,
-    ).await.unwrap().results;
+        &query, &index, &provider, None, 60.0, 1.5, true, 90.0, &exclude, &include, false, 1, 0, 3,
+        0.15,
+    )
+    .await
+    .unwrap()
+    .results;
 
-    let pinned_score = results.iter().find(|r| r.file.path == "journal/pinned/important.md").map(|r| r.score);
-    let regular_score = results.iter().find(|r| r.file.path == "journal/2024-01.md").map(|r| r.score);
+    let pinned_score = results
+        .iter()
+        .find(|r| r.file.path == "journal/pinned/important.md")
+        .map(|r| r.score);
+    let regular_score = results
+        .iter()
+        .find(|r| r.file.path == "journal/2024-01.md")
+        .map(|r| r.score);
 
     assert!(pinned_score.is_some() && regular_score.is_some());
     // Pinned matches include but also matches exclude → no decay → higher score.
@@ -983,7 +2001,21 @@ async fn test_search_response_has_all_fields() {
 
     let query = SearchQuery::new("test query");
     let response = search(
-        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15,
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
     )
     .await
     .unwrap();
@@ -1009,23 +2041,49 @@ async fn test_graph_expansion_disabled() {
 
     // Build files with links: a.md -> b.md -> c.md
     let file_a = populate_index_with_links(
-        &index, "a.md", "h1", Some(json!({"title": "A"})), 2, &["b.md"],
+        &index,
+        "a.md",
+        "h1",
+        Some(json!({"title": "A"})),
+        2,
+        &["b.md"],
     );
     let file_b = populate_index_with_links(
-        &index, "b.md", "h2", Some(json!({"title": "B"})), 2, &["c.md"],
+        &index,
+        "b.md",
+        "h2",
+        Some(json!({"title": "B"})),
+        2,
+        &["c.md"],
     );
-    let file_c = populate_index_with_links(
-        &index, "c.md", "h3", Some(json!({"title": "C"})), 2, &[],
-    );
+    let file_c =
+        populate_index_with_links(&index, "c.md", "h3", Some(json!({"title": "C"})), 2, &[]);
 
     // Build and store link graph.
-    let graph = links::build_link_graph(&[file_a, file_b, file_c], &mdvdb::relations::RelationContext::empty());
+    let graph = links::build_link_graph(
+        &[file_a, file_b, file_c],
+        &mdvdb::relations::RelationContext::empty(),
+    );
     index.update_link_graph(Some(graph));
 
     // Search with expand_graph=0 (explicit).
     let query = SearchQuery::new("test query").with_expand_graph(0);
     let response = search(
-        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15,
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
     )
     .await
     .unwrap();
@@ -1046,23 +2104,49 @@ async fn test_graph_expansion_returns_items() {
     // Build files with links: a.md -> b.md -> c.md
     // Give a.md a distinctive embedding so it's the top search result.
     let file_a = populate_index_with_links(
-        &index, "a.md", "h1", Some(json!({"title": "A"})), 2, &["b.md"],
+        &index,
+        "a.md",
+        "h1",
+        Some(json!({"title": "A"})),
+        2,
+        &["b.md"],
     );
     let file_b = populate_index_with_links(
-        &index, "b.md", "h2", Some(json!({"title": "B"})), 2, &["c.md"],
+        &index,
+        "b.md",
+        "h2",
+        Some(json!({"title": "B"})),
+        2,
+        &["c.md"],
     );
-    let file_c = populate_index_with_links(
-        &index, "c.md", "h3", Some(json!({"title": "C"})), 2, &[],
-    );
+    let file_c =
+        populate_index_with_links(&index, "c.md", "h3", Some(json!({"title": "C"})), 2, &[]);
 
     // Build and store link graph.
-    let graph = links::build_link_graph(&[file_a, file_b, file_c], &mdvdb::relations::RelationContext::empty());
+    let graph = links::build_link_graph(
+        &[file_a, file_b, file_c],
+        &mdvdb::relations::RelationContext::empty(),
+    );
     index.update_link_graph(Some(graph));
 
     // Search with expand_graph=1.
     let query = SearchQuery::new("test query").with_expand_graph(1);
     let response = search(
-        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 1, 3, 0.15,
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        1,
+        3,
+        0.15,
     )
     .await
     .unwrap();
@@ -1097,25 +2181,56 @@ async fn test_graph_expansion_no_duplicates() {
 
     // Build a chain: a.md -> b.md -> c.md -> d.md
     let file_a = populate_index_with_links(
-        &index, "a.md", "h1", Some(json!({"title": "A"})), 2, &["b.md"],
+        &index,
+        "a.md",
+        "h1",
+        Some(json!({"title": "A"})),
+        2,
+        &["b.md"],
     );
     let file_b = populate_index_with_links(
-        &index, "b.md", "h2", Some(json!({"title": "B"})), 2, &["c.md"],
+        &index,
+        "b.md",
+        "h2",
+        Some(json!({"title": "B"})),
+        2,
+        &["c.md"],
     );
     let file_c = populate_index_with_links(
-        &index, "c.md", "h3", Some(json!({"title": "C"})), 2, &["d.md"],
+        &index,
+        "c.md",
+        "h3",
+        Some(json!({"title": "C"})),
+        2,
+        &["d.md"],
     );
-    let file_d = populate_index_with_links(
-        &index, "d.md", "h4", Some(json!({"title": "D"})), 2, &[],
-    );
+    let file_d =
+        populate_index_with_links(&index, "d.md", "h4", Some(json!({"title": "D"})), 2, &[]);
 
-    let graph = links::build_link_graph(&[file_a, file_b, file_c, file_d], &mdvdb::relations::RelationContext::empty());
+    let graph = links::build_link_graph(
+        &[file_a, file_b, file_c, file_d],
+        &mdvdb::relations::RelationContext::empty(),
+    );
     index.update_link_graph(Some(graph));
 
     // Search with expand_graph=2 for wider reach.
     let query = SearchQuery::new("test query").with_expand_graph(2);
     let response = search(
-        &query, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 2, 10, 0.15,
+        &query,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        2,
+        10,
+        0.15,
     )
     .await
     .unwrap();
@@ -1164,19 +2279,42 @@ async fn test_multihop_boost_reorders() {
     // With mock provider, search returns similar distances for all files.
     // The link boost should change the ordering.
     let file_hub = populate_index_with_links(
-        &index, "hub.md", "h1", Some(json!({"title": "Hub"})), 1, &["mid.md"],
+        &index,
+        "hub.md",
+        "h1",
+        Some(json!({"title": "Hub"})),
+        1,
+        &["mid.md"],
     );
     let file_mid = populate_index_with_links(
-        &index, "mid.md", "h2", Some(json!({"title": "Mid"})), 1, &["far.md"],
+        &index,
+        "mid.md",
+        "h2",
+        Some(json!({"title": "Mid"})),
+        1,
+        &["far.md"],
     );
     let file_far = populate_index_with_links(
-        &index, "far.md", "h3", Some(json!({"title": "Far"})), 1, &[],
+        &index,
+        "far.md",
+        "h3",
+        Some(json!({"title": "Far"})),
+        1,
+        &[],
     );
     let file_alone = populate_index_with_links(
-        &index, "alone.md", "h4", Some(json!({"title": "Alone"})), 1, &[],
+        &index,
+        "alone.md",
+        "h4",
+        Some(json!({"title": "Alone"})),
+        1,
+        &[],
     );
 
-    let graph = links::build_link_graph(&[file_hub, file_mid, file_far, file_alone], &mdvdb::relations::RelationContext::empty());
+    let graph = links::build_link_graph(
+        &[file_hub, file_mid, file_far, file_alone],
+        &mdvdb::relations::RelationContext::empty(),
+    );
     index.update_link_graph(Some(graph));
 
     // Search with 1-hop boost — only direct neighbors of top results get boosted.
@@ -1184,7 +2322,21 @@ async fn test_multihop_boost_reorders() {
         .with_boost_links(true)
         .with_boost_hops(1);
     let response_1hop = search(
-        &query_1hop, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15,
+        &query_1hop,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
     )
     .await
     .unwrap();
@@ -1194,7 +2346,21 @@ async fn test_multihop_boost_reorders() {
         .with_boost_links(true)
         .with_boost_hops(2);
     let response_2hop = search(
-        &query_2hop, &index, &provider, None, 60.0, 1.5, false, 90.0, &[], &[], false, 1, 0, 3, 0.15,
+        &query_2hop,
+        &index,
+        &provider,
+        None,
+        60.0,
+        1.5,
+        false,
+        90.0,
+        &[],
+        &[],
+        false,
+        1,
+        0,
+        3,
+        0.15,
     )
     .await
     .unwrap();

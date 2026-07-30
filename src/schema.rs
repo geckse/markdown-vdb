@@ -375,18 +375,12 @@ impl Schema {
 
     /// Infer a schema from frontmatter across files matching a path prefix.
     ///
-    /// Files whose `path` starts with `path_prefix` are included.
-    /// The prefix is normalized to end with `/` (unless empty).
+    /// Files whose path is equal to or below `path_prefix` are included.
+    /// Matching is path-segment-aware (`docs` never includes `docs-old`).
     pub fn infer_scoped(files: &[MarkdownFile], path_prefix: &str) -> Self {
-        let prefix = if path_prefix.is_empty() || path_prefix.ends_with('/') {
-            path_prefix.to_string()
-        } else {
-            format!("{path_prefix}/")
-        };
-
-        let filtered = files
-            .iter()
-            .filter(|f| crate::path_util::to_slash(&f.path).starts_with(&prefix));
+        let filtered = files.iter().filter(|f| {
+            crate::path_util::path_is_in_scope(&crate::path_util::to_slash(&f.path), path_prefix)
+        });
         Self::infer_from_iter(filtered)
     }
 
@@ -551,14 +545,7 @@ impl Schema {
         let mut matching_scopes: Vec<(&str, &ScopeOverlay)> = overlay
             .scopes
             .iter()
-            .filter(|(scope, _)| {
-                let normalized_scope = scope.trim_matches('/');
-                normalized_scope.is_empty()
-                    || normalized_prefix == normalized_scope
-                    || normalized_prefix
-                        .strip_prefix(normalized_scope)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
-            })
+            .filter(|(scope, _)| crate::path_util::path_is_in_scope(normalized_prefix, scope))
             .map(|(s, o)| (s.as_str(), o))
             .collect();
         matching_scopes.sort_by_key(|(scope, _)| scope.len());
@@ -1311,10 +1298,13 @@ scopes:
         );
         let overlay = make_overlay(HashMap::new(), scopes);
 
-        assert!(Schema::resolve_overlay_for_path(&overlay, Some("invoices/a.md"))
-            .contains_key("total"));
-        assert!(!Schema::resolve_overlay_for_path(&overlay, Some("invoices-old/a.md"))
-            .contains_key("total"));
+        assert!(
+            Schema::resolve_overlay_for_path(&overlay, Some("invoices/a.md")).contains_key("total")
+        );
+        assert!(
+            !Schema::resolve_overlay_for_path(&overlay, Some("invoices-old/a.md"))
+                .contains_key("total")
+        );
     }
 
     #[test]
