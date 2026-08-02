@@ -119,6 +119,31 @@ impl Index {
         Self::open_with_options(path, WriteOptions::default())
     }
 
+    /// Reload the persisted generation into this handle.
+    ///
+    /// Manual module commands acquire their cross-process run lock only after
+    /// constructing `MarkdownVdb`. Reloading under that lock prevents a process
+    /// which opened just before another module run completed from evaluating
+    /// and later saving an obsolete in-memory generation.
+    ///
+    /// A dirty handle represents an unfinished transaction. Silently retaining
+    /// it here would let the next transaction save that partial branch over a
+    /// newer on-disk generation, so callers must explicitly discard/reopen it.
+    pub fn reload_from_disk_if_clean(&self) -> Result<bool> {
+        // Hold the write guard for the complete check/load/swap sequence.  A
+        // watcher in this process must not make the handle dirty between the
+        // cleanliness check and replacement with the on-disk generation.
+        let mut state = self.state.write();
+        if state.dirty {
+            return Err(Error::IndexDirty {
+                path: self.path.clone(),
+            });
+        }
+        let refreshed = Self::open_with_options(&self.path, self.write_options.clone())?;
+        *state = refreshed.state.into_inner();
+        Ok(true)
+    }
+
     /// Open an existing index file at the given path with explicit write options.
     pub fn open_with_options(path: &Path, write_options: WriteOptions) -> Result<Self> {
         let (metadata, hnsw) = storage::load_index(path)?;
@@ -252,11 +277,29 @@ impl Index {
         config: &EmbeddingConfig,
         write_options: WriteOptions,
     ) -> Result<(Self, bool)> {
+        Self::open_or_create_with_options_report_and_rebuild_hook(
+            path,
+            config,
+            write_options,
+            || Ok(()),
+        )
+    }
+
+    /// Open an index and invoke `before_rebuild` before an incompatible or
+    /// missing generation is removed/recreated. Companion stores use the hook
+    /// to persist a reconciliation marker without changing the index format.
+    pub(crate) fn open_or_create_with_options_report_and_rebuild_hook(
+        path: &Path,
+        config: &EmbeddingConfig,
+        write_options: WriteOptions,
+        before_rebuild: impl FnOnce() -> Result<()>,
+    ) -> Result<(Self, bool)> {
         match Self::open_with_options(path, write_options.clone()) {
             Ok(index) => Ok((index, false)),
             Err(Error::IndexNotFound { .. })
             | Err(Error::IndexVersionMismatch { .. })
             | Err(Error::IndexCorrupted(_)) => {
+                before_rebuild()?;
                 // Remove outdated/corrupted index file so we can recreate it
                 if path.exists() {
                     let _ = std::fs::remove_file(path);
@@ -313,6 +356,7 @@ impl Index {
         // Insert new chunks.
         let mut stored_file = StoredFile::from(file);
         stored_file.computed_fields = previous_computed_fields;
+        stored_file.reconcile_materialized_proofs();
         for (i, chunk) in chunks.iter().enumerate() {
             let key = state.next_key;
             state.next_key += 1;
@@ -335,6 +379,38 @@ impl Index {
             .get_or_insert_with(HashMap::new)
             .insert(relative_path.clone(), file.modified_at);
 
+        state.metadata.files.insert(relative_path, stored_file);
+        state.dirty = true;
+        Ok(())
+    }
+
+    /// Add a newly discovered source document without chunking or embedding it.
+    ///
+    /// Manual computed-module runs need a collection-wide raw-source snapshot so
+    /// a newly created relation target (or incoming relation owner) can
+    /// participate before the next ingest.  The empty embedding-body hash is an
+    /// intentional provisional sentinel: a later incremental ingest must not
+    /// mistake this metadata-only entry for an already embedded document, even
+    /// when its source hash has not changed in the meantime.
+    ///
+    /// Existing documents are rejected so this helper can never discard their
+    /// chunks or vectors. Call [`Self::refresh_source_metadata`] for those.
+    pub(crate) fn insert_unembedded_source_metadata(&self, file: &MarkdownFile) -> Result<()> {
+        let mut state = self.state.write();
+        let relative_path = crate::path_util::to_slash(&file.path);
+        if state.metadata.files.contains_key(&relative_path) {
+            return Err(Error::Config(format!(
+                "cannot insert provisional source metadata for existing file `{relative_path}`"
+            )));
+        }
+
+        let mut stored_file = StoredFile::from(file);
+        stored_file.embedding_body_hash.clear();
+        state
+            .metadata
+            .file_mtimes
+            .get_or_insert_with(HashMap::new)
+            .insert(relative_path.clone(), file.modified_at);
         state.metadata.files.insert(relative_path, stored_file);
         state.dirty = true;
         Ok(())
@@ -466,6 +542,7 @@ impl Index {
                     path: PathBuf::from(relative_path),
                 })?;
         file.computed_fields = computed_fields;
+        file.reconcile_materialized_proofs();
         state.dirty = true;
         Ok(())
     }
@@ -492,6 +569,7 @@ impl Index {
             .as_ref()
             .and_then(|value| serde_json::to_string(value).ok());
         stored.file_size = file.file_size;
+        stored.reconcile_materialized_proofs();
         state
             .metadata
             .file_mtimes
@@ -531,6 +609,7 @@ impl Index {
             .and_then(|value| serde_json::to_string(value).ok());
         stored.file_size = file.file_size;
         stored.computed_fields = computed_fields;
+        stored.reconcile_materialized_proofs();
         state
             .metadata
             .file_mtimes
@@ -1374,7 +1453,10 @@ mod tests {
         ComputedFieldEntry {
             module: module.to_string(),
             definition_fingerprint: format!("{module}-fingerprint"),
+            input_fingerprint: None,
+            dependency_snapshot: Default::default(),
             value_json: Some(value_json.to_string()),
+            materialized_value_json: None,
             diagnostic: None,
         }
     }
@@ -1386,7 +1468,11 @@ mod tests {
         let index = Index::create(&path, &test_config()).unwrap();
         index.upsert(&mk_file("invoice.md"), &[], &[]).unwrap();
 
-        let fields = HashMap::from([("total".to_string(), computed_entry("formula", "12.50"))]);
+        let mut entry = computed_entry("formula", "12.50");
+        entry.input_fingerprint = Some("formula-inputs".to_string());
+        entry.dependency_snapshot =
+            crate::index::types::ComputedDependencySnapshot::owner("invoice.md", "hash-invoice.md");
+        let fields = HashMap::from([("total".to_string(), entry)]);
         index
             .replace_computed_fields("invoice.md", fields.clone())
             .unwrap();
@@ -1471,6 +1557,78 @@ mod tests {
 
         let reopened = Index::open(&path).unwrap();
         assert_eq!(reopened.get_computed_fields("invoice.md"), Some(fields));
+    }
+
+    #[test]
+    fn raw_replacement_permanently_revokes_materialized_ownership() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.idx");
+        let index = Index::create(&path, &test_config()).unwrap();
+        let mut materialized = mk_file("contact.md");
+        materialized.content_hash = "computed-write".to_string();
+        materialized.frontmatter = Some(serde_json::json!({
+            "client_domain": "computed.example",
+            "ordinary": "keep"
+        }));
+        index.upsert(&materialized, &[], &[]).unwrap();
+        let mut proof = computed_entry("lookup_rollup", "\"computed.example\"");
+        proof.materialized_value_json = Some("\"computed.example\"".to_string());
+        index
+            .replace_computed_fields(
+                "contact.md",
+                HashMap::from([("client_domain".to_string(), proof)]),
+            )
+            .unwrap();
+        let owned = index.get_file("contact.md").unwrap();
+        assert!(owned
+            .materialized_field_matches("client_domain", &owned.computed_fields["client_domain"]));
+
+        // A raw refresh represents an external/user-authored edit. Once the
+        // semantic value differs, the old proof must be destroyed, not merely
+        // made temporarily inactive.
+        let mut user_replacement = materialized.clone();
+        user_replacement.content_hash = "user-replacement".to_string();
+        user_replacement.frontmatter = Some(serde_json::json!({
+            "client_domain": "user.example",
+            "ordinary": "keep"
+        }));
+        index.refresh_source_metadata(&user_replacement).unwrap();
+        index.save().unwrap();
+        drop(index);
+
+        let reopened = Index::open(&path).unwrap();
+        let replaced = reopened.get_file("contact.md").unwrap();
+        assert!(replaced.computed_fields["client_domain"]
+            .materialized_value_json
+            .is_none());
+        assert_eq!(
+            replaced.effective_frontmatter().unwrap()["client_domain"],
+            "user.example"
+        );
+
+        // Even if the user later writes bytes with the old computed semantic
+        // value, equality cannot resurrect deletion/suppression authority.
+        let mut coincidentally_equal = user_replacement;
+        coincidentally_equal.content_hash = "user-equal-to-old-computed".to_string();
+        coincidentally_equal.frontmatter = Some(serde_json::json!({
+            "client_domain": "computed.example",
+            "ordinary": "keep"
+        }));
+        reopened
+            .refresh_source_metadata(&coincidentally_equal)
+            .unwrap();
+        reopened.save().unwrap();
+        drop(reopened);
+
+        let reopened_again = Index::open(&path).unwrap();
+        let final_file = reopened_again.get_file("contact.md").unwrap();
+        let final_entry = &final_file.computed_fields["client_domain"];
+        assert!(final_entry.materialized_value_json.is_none());
+        assert!(!final_file.materialized_field_matches("client_domain", final_entry));
+        assert!(final_file.computed_values_json().is_empty());
+        let effective = final_file.effective_frontmatter().unwrap();
+        assert_eq!(effective["client_domain"], "computed.example");
+        assert_eq!(effective["ordinary"], "keep");
     }
 
     #[test]
@@ -2145,6 +2303,19 @@ mod tests {
         drop(held);
         writer.save().unwrap();
         other.save().unwrap();
+    }
+
+    #[test]
+    fn reload_rejects_an_unsaved_partial_branch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("index");
+        let index = Index::create(&path, &test_config()).unwrap();
+        index.upsert(&mk_file("partial.md"), &[], &[]).unwrap();
+
+        let result = index.reload_from_disk_if_clean();
+        assert!(matches!(result, Err(Error::IndexDirty { path: p }) if p == path));
+        assert!(index.get_file("partial.md").is_some());
+        assert!(Index::open(&path).unwrap().get_file("partial.md").is_none());
     }
 
     /// Regression test: orphaned edge vectors in HNSW cause "Duplicate keys"

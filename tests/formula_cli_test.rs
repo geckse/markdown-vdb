@@ -76,10 +76,6 @@ fn write_initial_schema(root: &Path) {
         field_type: formula
         formula: price / divisor
         result_type: number
-      collision:
-        field_type: formula
-        formula: price * 10
-        result_type: number
 "#,
     )
     .unwrap();
@@ -183,12 +179,11 @@ fn ingest_materializes_formula_results_and_queries_use_source_frontmatter() {
     assert_decimal(&a["computed_fields"]["exact_sum"], "0.3");
     assert_decimal(&a["computed_fields"]["doubled"], "0.6");
     assert_decimal(&a["computed_fields"]["unit_total"], "0.3");
-    assert_decimal(&a["computed_fields"]["collision"], "1");
     assert!(a["computed_fields"].get("broken").is_none());
     assert_decimal(&a["frontmatter"]["exact_sum"], "0.3");
     assert_decimal(&a["frontmatter"]["doubled"], "0.6");
     assert_decimal(&a["frontmatter"]["unit_total"], "0.3");
-    assert_decimal(&a["frontmatter"]["collision"], "1");
+    assert_decimal(&a["frontmatter"]["collision"], "999");
     assert!(a["frontmatter"].get("broken").is_none());
     assert_eq!(
         a["computed_field_errors"]["broken"]["code"],
@@ -200,7 +195,6 @@ fn ingest_materializes_formula_results_and_queries_use_source_frontmatter() {
     assert_decimal(&b["computed_fields"]["doubled"], "1.2");
     assert_decimal(&b["computed_fields"]["unit_total"], "0.15");
     assert_decimal(&b["computed_fields"]["broken"], "0.2");
-    assert_decimal(&b["computed_fields"]["collision"], "2");
     assert_eq!(b["computed_field_errors"], serde_json::json!({}));
 
     let collection = run_json(
@@ -248,14 +242,14 @@ fn ingest_materializes_formula_results_and_queries_use_source_frontmatter() {
     assert_decimal(&filtered["rows"][0]["frontmatter"]["exact_sum"], "0.3");
     assert_decimal(&filtered["rows"][0]["computed_fields"]["exact_sum"], "0.3");
 
-    // A formula owns its field name and overwrites a previously authored value.
+    // An ordinary field remains ordinary when no computed definition owns it.
     let collision_filtered = run_json(
         root,
         &[
             "collection",
             "invoices",
             "--filter",
-            "collision=1",
+            "collision=999",
             "--json",
         ],
     );
@@ -263,12 +257,11 @@ fn ingest_materializes_formula_results_and_queries_use_source_frontmatter() {
     assert_eq!(collision_filtered["rows"][0]["path"], "invoices/a.md");
     assert_decimal(
         &collision_filtered["rows"][0]["frontmatter"]["collision"],
-        "1",
+        "999",
     );
-    assert_decimal(
-        &collision_filtered["rows"][0]["computed_fields"]["collision"],
-        "1",
-    );
+    assert!(collision_filtered["rows"][0]["computed_fields"]
+        .get("collision")
+        .is_none());
 
     let search = run_json(
         root,
@@ -297,6 +290,67 @@ fn ingest_materializes_formula_results_and_queries_use_source_frontmatter() {
 }
 
 #[test]
+fn formula_definition_never_overwrites_or_claims_an_existing_ordinary_key() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write_config(root);
+    fs::write(
+        root.join(".markdownvdb.schema.yml"),
+        r#"scopes:
+  invoices:
+    fields:
+      collision:
+        field_type: formula
+        formula: price * 10
+        result_type: number
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("invoices")).unwrap();
+    let path = root.join("invoices/a.md");
+    let original = r#"---
+price: 1
+collision: 999
+---
+Body
+"#;
+    fs::write(&path, original).unwrap();
+
+    let first = ingest(root);
+    assert_eq!(first["files_failed"], 0);
+    let diagnostics = first["module_reports"][0]["diagnostics"]
+        .as_array()
+        .unwrap();
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic["field"] == "collision" && diagnostic["code"] == "writeback_failed"
+    }));
+    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+
+    let first_document = document(root, "invoices/a.md");
+    assert_decimal(&first_document["frontmatter"]["collision"], "999");
+    assert!(first_document["computed_fields"].get("collision").is_none());
+    assert_eq!(
+        first_document["computed_field_errors"]["collision"]["code"],
+        "writeback_failed"
+    );
+    assert!(
+        first_document["computed_field_errors"]["collision"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not own")
+    );
+
+    let _second = ingest(root);
+    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    let reopened = document(root, "invoices/a.md");
+    assert_decimal(&reopened["frontmatter"]["collision"], "999");
+    assert_eq!(
+        reopened["computed_field_errors"]["collision"]["code"],
+        "writeback_failed"
+    );
+}
+
+#[test]
 fn ingest_catches_up_schema_only_formula_changes_without_reembedding() {
     let dir = setup_formula_vault();
     let root = dir.path();
@@ -319,7 +373,6 @@ fn ingest_catches_up_schema_only_formula_changes_without_reembedding() {
     assert_decimal(&a["computed_fields"]["exact_sum"], "1.3");
     assert_decimal(&a["computed_fields"]["doubled"], "2.6");
     assert!(a["computed_fields"].get("unit_total").is_none());
-    assert!(a["computed_field_errors"].get("collision").is_none());
     assert!(a["computed_field_errors"].get("broken").is_none());
 
     let a_after = fs::read_to_string(&a_path).unwrap();
@@ -327,7 +380,7 @@ fn ingest_catches_up_schema_only_formula_changes_without_reembedding() {
     assert_ne!(a_after.as_bytes(), a_before);
     assert_ne!(b_after.as_bytes(), b_before);
     assert!(!a_after.contains("unit_total:"));
-    assert!(!a_after.contains("collision:"));
+    assert!(a_after.contains("collision: 999"));
     assert!(!b_after.contains("broken:"));
     let collection = run_json(root, &["collection", "invoices", "--json"]);
     let columns = collection["columns"]
@@ -338,7 +391,7 @@ fn ingest_catches_up_schema_only_formula_changes_without_reembedding() {
         .collect::<Vec<_>>();
     assert!(!columns.contains(&"unit_total"));
     assert!(!columns.contains(&"broken"));
-    assert!(!columns.contains(&"collision"));
+    assert!(columns.contains(&"collision"));
 }
 
 #[test]
@@ -356,14 +409,13 @@ fn frontmatter_input_change_recomputes_once_without_reembedding_or_echo_loop() {
     assert_eq!(changed["files_skipped"], 1);
     assert_eq!(changed["api_calls"], 0);
     assert_eq!(
-        changed["module_reports"][0]["files_evaluated"],
-        1,
+        changed["module_reports"][0]["files_evaluated"], 1,
         "the edited row is recomputed exactly once"
     );
     let a = document(root, "invoices/a.md");
     assert_decimal(&a["frontmatter"]["exact_sum"], "0.6");
     assert_decimal(&a["frontmatter"]["doubled"], "1.2");
-    assert_decimal(&a["frontmatter"]["collision"], "4");
+    assert_decimal(&a["frontmatter"]["collision"], "999");
 
     // The Formula write-back hash was committed with the same index save. Its
     // filesystem echo is a true no-op on the next catch-up.
@@ -382,9 +434,10 @@ fn manual_formula_run_reads_current_markdown_without_hiding_a_changed_body() {
     ingest(root);
 
     let current = fs::read_to_string(&a_path).unwrap();
-    let changed = current
-        .replacen("price: 0.1", "price: 0.5", 1)
-        .replace("Invoice formula test record alpha.", "A genuinely changed body.");
+    let changed = current.replacen("price: 0.1", "price: 0.5", 1).replace(
+        "Invoice formula test record alpha.",
+        "A genuinely changed body.",
+    );
     fs::write(&a_path, changed).unwrap();
 
     let report = run_json(

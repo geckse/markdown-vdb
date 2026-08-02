@@ -48,7 +48,9 @@ const TOPIC_DESC_WEIGHT: f32 = 0.6;
 const TOPIC_SEED_WEIGHT: f32 = 0.4;
 
 /// Information about a single cluster, stored in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct ClusterInfo {
     /// Numeric cluster identifier — stable across re-clustering, not contiguous.
@@ -71,7 +73,9 @@ pub struct ClusterInfo {
 }
 
 /// Cluster state persisted in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct ClusterState {
     /// All clusters.
@@ -128,7 +132,9 @@ pub struct CustomClusterDef {
 }
 
 /// One document's membership in a topic, with its cosine similarity score.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct TopicMember {
     /// File path (relative).
@@ -138,7 +144,9 @@ pub struct TopicMember {
 }
 
 /// Information about a single user-defined topic, stored in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct CustomClusterInfo {
     /// Numeric cluster identifier (0-based, = definition order).
@@ -160,7 +168,9 @@ pub struct CustomClusterInfo {
 }
 
 /// Custom cluster (topics) state persisted in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct CustomClusterState {
     /// All topics.
@@ -222,8 +232,7 @@ impl Clusterer {
         } else {
             match algorithm {
                 ClusteringAlgorithm::Leiden => {
-                    let graph =
-                        leiden::build_knn_graph(&normalized, self.config.clustering_knn);
+                    let graph = leiden::build_knn_graph(&normalized, self.config.clustering_knn);
                     let membership = leiden::leiden_partition(
                         n,
                         &graph.edges,
@@ -272,12 +281,7 @@ impl Clusterer {
 
         // Optional one-level hierarchy (Leiden only, enough clusters).
         let parent_clusters = if algorithm == ClusteringAlgorithm::Leiden {
-            self.build_parent_level(
-                &mut clusters,
-                &normalized,
-                documents,
-                &mut next_cluster_id,
-            )?
+            self.build_parent_level(&mut clusters, &normalized, documents, &mut next_cluster_id)?
         } else {
             Vec::new()
         };
@@ -454,11 +458,7 @@ impl Clusterer {
 
         insert_sorted(&mut cluster.members, doc_path.to_string());
         if let Some(parent_id) = cluster.parent_id {
-            if let Some(parent) = state
-                .parent_clusters
-                .iter_mut()
-                .find(|p| p.id == parent_id)
-            {
+            if let Some(parent) = state.parent_clusters.iter_mut().find(|p| p.id == parent_id) {
                 insert_sorted(&mut parent.members, doc_path.to_string());
             }
         }
@@ -665,9 +665,8 @@ impl Clusterer {
                 continue;
             }
 
-            let centroid = normalize_in_place(
-                centroids.row(raw_id).iter().map(|&v| v as f32).collect(),
-            );
+            let centroid =
+                normalize_in_place(centroids.row(raw_id).iter().map(|&v| v as f32).collect());
 
             clusters.push(EdgeClusterInfo {
                 id: clusters.len(),
@@ -1215,7 +1214,11 @@ pub fn topics_fingerprint(
         "dims": embedding_dimensions,
     });
     let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_string(&payload).unwrap_or_default().as_bytes());
+    hasher.update(
+        serde_json::to_string(&payload)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     format!("{:x}", hasher.finalize())
 }
 
@@ -1616,7 +1619,10 @@ mod tests {
         let mut vectors = HashMap::new();
         vectors.insert("doc.md".to_string(), vec![1.0, 0.0, 0.0]);
         let mut documents = HashMap::new();
-        documents.insert("doc.md".to_string(), "rust programming language".to_string());
+        documents.insert(
+            "doc.md".to_string(),
+            "rust programming language".to_string(),
+        );
         let state = clusterer.cluster_all(&vectors, &documents, None).unwrap();
         assert_eq!(state.clusters.len(), 1);
         assert_eq!(state.clusters[0].members, vec!["doc.md".to_string()]);
@@ -1642,7 +1648,9 @@ mod tests {
         let mut vectors = HashMap::new();
         vectors.insert("z1.md".to_string(), vec![0.0, 0.0, 0.0]);
         vectors.insert("z2.md".to_string(), vec![0.0, 0.0, 0.0]);
-        let state = clusterer.cluster_all(&vectors, &HashMap::new(), None).unwrap();
+        let state = clusterer
+            .cluster_all(&vectors, &HashMap::new(), None)
+            .unwrap();
         assert!(state.clusters.is_empty());
         assert_eq!(state.unclustered.len(), 2);
     }
@@ -1669,8 +1677,11 @@ mod tests {
         let clusterer = Clusterer::new(&test_config());
         let (vectors, documents) = grouped_vectors(5);
         let state = clusterer.cluster_all(&vectors, &documents, None).unwrap();
-        let all_keywords: Vec<&String> =
-            state.clusters.iter().flat_map(|c| c.keywords.iter()).collect();
+        let all_keywords: Vec<&String> = state
+            .clusters
+            .iter()
+            .flat_map(|c| c.keywords.iter())
+            .collect();
         assert!(
             all_keywords.iter().any(|k| k.contains(' ')),
             "expected at least one bigram keyword, got {all_keywords:?}"
@@ -1758,7 +1769,11 @@ mod tests {
             vec![1.0, 0.0],
             vec!["a.md", "b.md", "c.md"],
         )]);
-        let mut new = vec![bare_cluster(0, vec![1.0, 0.0], vec!["a.md", "b.md", "c.md"])];
+        let mut new = vec![bare_cluster(
+            0,
+            vec![1.0, 0.0],
+            vec!["a.md", "b.md", "c.md"],
+        )];
         new[0].label = "fresh label".to_string();
         let next = match_to_previous(&mut new, &prev);
         assert_eq!(new[0].id, 3);
@@ -1790,7 +1805,10 @@ mod tests {
     fn algorithm_switch_detected() {
         let clusterer = Clusterer::new(&kmeans_config());
         let state = state_with(vec![]);
-        assert!(clusterer.algorithm_changed(&state), "leiden state + kmeans config");
+        assert!(
+            clusterer.algorithm_changed(&state),
+            "leiden state + kmeans config"
+        );
     }
 
     // --- incremental assignment ---
@@ -1882,8 +1900,7 @@ mod tests {
     fn assign_incremental_empty_clusters_errors() {
         let clusterer = Clusterer::new(&test_config());
         let mut state = state_with(vec![]);
-        let result =
-            clusterer.assign_incremental(&mut state, "x.md", &[1.0, 0.0], &HashMap::new());
+        let result = clusterer.assign_incremental(&mut state, "x.md", &[1.0, 0.0], &HashMap::new());
         assert!(result.is_err());
     }
 
@@ -1974,8 +1991,7 @@ mod tests {
                 assert!(c.parent_id.is_none());
             }
         } else {
-            let parent_ids: HashSet<usize> =
-                state.parent_clusters.iter().map(|p| p.id).collect();
+            let parent_ids: HashSet<usize> = state.parent_clusters.iter().map(|p| p.id).collect();
             for c in &state.clusters {
                 if let Some(pid) = c.parent_id {
                     assert!(parent_ids.contains(&pid), "dangling parent_id {pid}");
@@ -2046,7 +2062,9 @@ mod tests {
 
         assert_eq!(state.clusters[0].members.len(), 1);
         assert_eq!(state.clusters[1].members.len(), 1);
-        assert!((state.clusters[0].members[0].score - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-3);
+        assert!(
+            (state.clusters[0].members[0].score - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-3
+        );
         assert!(state.unassigned.is_empty());
         assert_eq!(state.fingerprint, "fp");
     }
@@ -2082,8 +2100,15 @@ mod tests {
             .assign_all_to_custom(&defs, &topic_centroids(), &doc_vectors, "fp".into())
             .unwrap();
 
-        assert!(state.clusters[0].members.is_empty(), "blocked by topic threshold");
-        assert_eq!(state.clusters[1].members.len(), 1, "floor still applies to topic 2");
+        assert!(
+            state.clusters[0].members.is_empty(),
+            "blocked by topic threshold"
+        );
+        assert_eq!(
+            state.clusters[1].members.len(),
+            1,
+            "floor still applies to topic 2"
+        );
     }
 
     #[test]
@@ -2152,7 +2177,11 @@ mod tests {
             serde_json::to_string(&s1).unwrap(),
             serde_json::to_string(&s2).unwrap()
         );
-        let paths: Vec<&str> = s1.clusters[0].members.iter().map(|m| m.path.as_str()).collect();
+        let paths: Vec<&str> = s1.clusters[0]
+            .members
+            .iter()
+            .map(|m| m.path.as_str())
+            .collect();
         let mut sorted = paths.clone();
         sorted.sort();
         assert_eq!(paths, sorted, "members must be path-sorted");
@@ -2193,7 +2222,12 @@ mod tests {
     fn assign_single_zero_norm_goes_unassigned() {
         let clusterer = Clusterer::new(&test_config());
         let mut state = clusterer
-            .assign_all_to_custom(&topic_defs(), &topic_centroids(), &HashMap::new(), "fp".into())
+            .assign_all_to_custom(
+                &topic_defs(),
+                &topic_centroids(),
+                &HashMap::new(),
+                "fp".into(),
+            )
             .unwrap();
         clusterer
             .assign_single_to_custom(&mut state, "zero.md", &[0.0, 0.0, 0.0])
@@ -2205,7 +2239,12 @@ mod tests {
     fn assign_single_dimension_mismatch_errors() {
         let clusterer = Clusterer::new(&test_config());
         let mut state = clusterer
-            .assign_all_to_custom(&topic_defs(), &topic_centroids(), &HashMap::new(), "fp".into())
+            .assign_all_to_custom(
+                &topic_defs(),
+                &topic_centroids(),
+                &HashMap::new(),
+                "fp".into(),
+            )
             .unwrap();
         let result = clusterer.assign_single_to_custom(&mut state, "doc.md", &[1.0, 0.0]);
         assert!(result.is_err());

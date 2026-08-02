@@ -99,22 +99,21 @@ pub async fn embed_chunks(
 
     type BatchResult = crate::Result<(usize, Vec<(String, Vec<f32>)>)>;
     let mut stream = stream::iter(batches.into_iter().enumerate().map(|(batch_idx, batch)| {
-            let chunk_ids: Vec<String> = batch.iter().map(|c| c.id.clone()).collect();
-            let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
-            async move {
-                let vectors = provider.embed_batch(&texts).await?;
-                tracing::info!(
-                    batch = batch_idx + 1,
-                    total = total_batches,
-                    "batch complete"
-                );
-                let pairs: Vec<(String, Vec<f32>)> =
-                    chunk_ids.into_iter().zip(vectors).collect();
-                let result: BatchResult = Ok((batch_idx, pairs));
-                result
-            }
-        }))
-        .buffer_unordered(MAX_CONCURRENT);
+        let chunk_ids: Vec<String> = batch.iter().map(|c| c.id.clone()).collect();
+        let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
+        async move {
+            let vectors = provider.embed_batch(&texts).await?;
+            tracing::info!(
+                batch = batch_idx + 1,
+                total = total_batches,
+                "batch complete"
+            );
+            let pairs: Vec<(String, Vec<f32>)> = chunk_ids.into_iter().zip(vectors).collect();
+            let result: BatchResult = Ok((batch_idx, pairs));
+            result
+        }
+    }))
+    .buffer_unordered(MAX_CONCURRENT);
 
     let mut embeddings: HashMap<String, Vec<f32>> = HashMap::new();
     let mut api_calls: usize = 0;

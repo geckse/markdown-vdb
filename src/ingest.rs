@@ -100,17 +100,20 @@ pub async fn ingest_file(
     let batch_chunks: Vec<BatchChunk> = chunks.iter().map(to_batch_chunk).collect();
 
     let mut current_hashes = HashMap::new();
-    current_hashes.insert(
-        relative_path.to_path_buf(),
-        file.content_hash.clone(),
-    );
+    current_hashes.insert(relative_path.to_path_buf(), file.content_hash.clone());
 
     // Pass empty existing hashes since we already checked above and know the file changed.
     let empty_existing: HashMap<PathBuf, String> = HashMap::new();
 
-    let embed_result =
-        batch::embed_chunks(provider, &batch_chunks, &empty_existing, &current_hashes, batch_size, None)
-            .await?;
+    let embed_result = batch::embed_chunks(
+        provider,
+        &batch_chunks,
+        &empty_existing,
+        &current_hashes,
+        batch_size,
+        None,
+    )
+    .await?;
 
     // 5. Reorder embeddings to match chunk order.
     let mut ordered_embeddings: Vec<Vec<f32>> = Vec::with_capacity(chunks_total);

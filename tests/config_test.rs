@@ -93,19 +93,44 @@ fn defaults_applied_when_no_config() {
     assert_eq!(config.chunk_overlap_tokens, 50);
     assert!(config.clustering_enabled);
     assert_eq!(config.clustering_rebalance_threshold, 50);
-    assert!((config.clustering_granularity - 1.0).abs() < f64::EPSILON, "default granularity should be 1.0");
+    assert!(
+        (config.clustering_granularity - 1.0).abs() < f64::EPSILON,
+        "default granularity should be 1.0"
+    );
     assert_eq!(config.search_default_limit, 10);
     assert_eq!(config.search_min_score, 0.0);
     assert_eq!(config.search_default_mode, mdvdb::SearchMode::Hybrid);
     assert_eq!(config.search_rrf_k, 60.0);
     assert_eq!(config.bm25_norm_k, 1.5);
-    assert!(!config.search_decay_enabled, "decay should be disabled by default");
-    assert_eq!(config.search_decay_half_life, 90.0, "default half-life should be 90 days");
-    assert_eq!(config.vector_quantization, VectorQuantization::F16, "default quantization should be F16");
-    assert!(config.index_compression, "index compression should be enabled by default");
-    assert_eq!(config.search_boost_hops, 1, "default boost hops should be 1");
-    assert_eq!(config.search_expand_graph, 0, "default expand graph should be 0 (disabled)");
-    assert_eq!(config.search_expand_limit, 3, "default expand limit should be 3");
+    assert!(
+        !config.search_decay_enabled,
+        "decay should be disabled by default"
+    );
+    assert_eq!(
+        config.search_decay_half_life, 90.0,
+        "default half-life should be 90 days"
+    );
+    assert_eq!(
+        config.vector_quantization,
+        VectorQuantization::F16,
+        "default quantization should be F16"
+    );
+    assert!(
+        config.index_compression,
+        "index compression should be enabled by default"
+    );
+    assert_eq!(
+        config.search_boost_hops, 1,
+        "default boost hops should be 1"
+    );
+    assert_eq!(
+        config.search_expand_graph, 0,
+        "default expand graph should be 0 (disabled)"
+    );
+    assert_eq!(
+        config.search_expand_limit, 3,
+        "default expand limit should be 3"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -334,17 +359,10 @@ fn dotenv_mdvdb_vars_stripped_from_env_file() {
     let tmp = TempDir::new().unwrap();
 
     // .env has an MDVDB setting — should be stripped
-    fs::write(
-        tmp.path().join(".env"),
-        "MDVDB_EMBEDDING_DIMENSIONS=256\n",
-    )
-    .unwrap();
+    fs::write(tmp.path().join(".env"), "MDVDB_EMBEDDING_DIMENSIONS=256\n").unwrap();
 
     // Project YAML overrides it
-    write_project_yaml(
-        tmp.path(),
-        "embedding:\n  dimensions: 768\n",
-    );
+    write_project_yaml(tmp.path(), "embedding:\n  dimensions: 768\n");
 
     let config = Config::load(tmp.path()).unwrap();
     assert_eq!(
@@ -362,10 +380,7 @@ fn shell_env_overrides_yaml_and_dotenv() {
     std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
     let tmp = TempDir::new().unwrap();
 
-    write_project_yaml(
-        tmp.path(),
-        "embedding:\n  dimensions: 768\n",
-    );
+    write_project_yaml(tmp.path(), "embedding:\n  dimensions: 768\n");
 
     // Shell env overrides everything
     std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "1024");
@@ -385,10 +400,7 @@ fn search_config_from_yaml() {
     clear_env();
     std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
     let tmp = TempDir::new().unwrap();
-    write_project_yaml(
-        tmp.path(),
-        "search:\n  mode: semantic\n  rrf_k: 30.0\n",
-    );
+    write_project_yaml(tmp.path(), "search:\n  mode: semantic\n  rrf_k: 30.0\n");
 
     let config = Config::load(tmp.path()).unwrap();
     assert_eq!(config.search_default_mode, mdvdb::SearchMode::Semantic);
@@ -489,10 +501,7 @@ fn project_config_overrides_user_config() {
         "embedding:\n  model: user-model\n  dimensions: 256\n",
     );
 
-    write_project_yaml(
-        project.path(),
-        "embedding:\n  model: project-model\n",
-    );
+    write_project_yaml(project.path(), "embedding:\n  model: project-model\n");
 
     std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
 
@@ -516,10 +525,7 @@ fn shell_env_overrides_user_config() {
     let project = TempDir::new().unwrap();
     let user_home = TempDir::new().unwrap();
 
-    write_user_yaml(
-        user_home.path(),
-        "embedding:\n  model: user-model\n",
-    );
+    write_user_yaml(user_home.path(), "embedding:\n  model: user-model\n");
 
     std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
     std::env::set_var("MDVDB_EMBEDDING_MODEL", "env-model");
@@ -541,10 +547,7 @@ fn dotenv_overrides_user_config() {
     let project = TempDir::new().unwrap();
     let user_home = TempDir::new().unwrap();
 
-    write_user_yaml(
-        user_home.path(),
-        "embedding:\n  model: user-model\n",
-    );
+    write_user_yaml(user_home.path(), "embedding:\n  model: user-model\n");
 
     // .env MDVDB vars are stripped — they don't override YAML
     fs::write(
@@ -573,7 +576,10 @@ fn missing_user_config_dir_silently_skipped() {
     std::env::set_var("MDVDB_CONFIG_HOME", "/nonexistent/mdvdb/config/dir");
 
     let result = Config::load(project.path());
-    assert!(result.is_ok(), "missing user config dir should not cause errors");
+    assert!(
+        result.is_ok(),
+        "missing user config dir should not cause errors"
+    );
 
     clear_env();
 }
@@ -585,10 +591,7 @@ fn no_user_config_env_disables_user_config() {
     let project = TempDir::new().unwrap();
     let user_home = TempDir::new().unwrap();
 
-    write_user_yaml(
-        user_home.path(),
-        "embedding:\n  model: user-model\n",
-    );
+    write_user_yaml(user_home.path(), "embedding:\n  model: user-model\n");
 
     std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
     std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
@@ -747,10 +750,7 @@ fn full_three_level_cascade() {
         "embedding:\n  model: user-model\n  dimensions: 128\nsearch:\n  limit: 5\n",
     );
 
-    write_project_yaml(
-        project.path(),
-        "embedding:\n  dimensions: 512\n",
-    );
+    write_project_yaml(project.path(), "embedding:\n  dimensions: 512\n");
 
     std::env::set_var("MDVDB_SEARCH_DEFAULT_LIMIT", "50");
     std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
@@ -758,8 +758,14 @@ fn full_three_level_cascade() {
     let config = Config::load(project.path()).unwrap();
 
     assert_eq!(config.search_default_limit, 50, "shell env should win");
-    assert_eq!(config.embedding_dimensions, 512, "project YAML should win over user YAML");
-    assert_eq!(config.embedding_model, "user-model", "user YAML should provide fallback model");
+    assert_eq!(
+        config.embedding_dimensions, 512,
+        "project YAML should win over user YAML"
+    );
+    assert_eq!(
+        config.embedding_model, "user-model",
+        "user YAML should provide fallback model"
+    );
 
     clear_env();
 }
@@ -779,8 +785,14 @@ fn decay_env_vars_override_defaults() {
 
     let config = Config::load(tmp.path()).unwrap();
 
-    assert!(config.search_decay_enabled, "decay should be enabled via env");
-    assert_eq!(config.search_decay_half_life, 30.0, "half-life should be 30 from env");
+    assert!(
+        config.search_decay_enabled,
+        "decay should be enabled via env"
+    );
+    assert_eq!(
+        config.search_decay_half_life, 30.0,
+        "half-life should be 30 from env"
+    );
 
     clear_env();
 }
@@ -796,7 +808,11 @@ fn decay_half_life_zero_rejected() {
     let result = Config::load(tmp.path());
     assert!(result.is_err(), "half-life of 0 should be rejected");
     let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("half_life"), "error should mention half_life: {}", err_msg);
+    assert!(
+        err_msg.contains("half_life"),
+        "error should mention half_life: {}",
+        err_msg
+    );
 
     clear_env();
 }
@@ -877,7 +893,10 @@ fn invalid_quantization_rejected() {
     std::env::set_var("MDVDB_VECTOR_QUANTIZATION", "f8");
 
     let result = Config::load(tmp.path());
-    assert!(result.is_err(), "invalid quantization type should be rejected");
+    assert!(
+        result.is_err(),
+        "invalid quantization type should be rejected"
+    );
 
     clear_env();
 }
@@ -1085,10 +1104,7 @@ fn granularity_in_yaml() {
     clear_env();
     std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
     let tmp = TempDir::new().unwrap();
-    write_project_yaml(
-        tmp.path(),
-        "clustering:\n  granularity: 0.5\n",
-    );
+    write_project_yaml(tmp.path(), "clustering:\n  granularity: 0.5\n");
 
     let config = Config::load(tmp.path()).unwrap();
     assert!((config.clustering_granularity - 0.5).abs() < f64::EPSILON);
@@ -1202,10 +1218,7 @@ fn update_config_value_creates_and_modifies() {
     mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", "A:x,y|B:z").unwrap();
     let content = fs::read_to_string(&config_path).unwrap();
     assert!(content.contains("MDVDB_CUSTOM_CLUSTERS=A:x,y|B:z"));
-    assert_eq!(
-        content.matches("MDVDB_CUSTOM_CLUSTERS").count(),
-        1
-    );
+    assert_eq!(content.matches("MDVDB_CUSTOM_CLUSTERS").count(), 1);
 
     // Removes key when value is empty
     mdvdb::config_update_value(&config_path, "MDVDB_CUSTOM_CLUSTERS", "").unwrap();
@@ -1247,7 +1260,10 @@ fn yaml_config_load_from_file() {
     assert_eq!(config.watch_debounce_ms, 500);
     assert_eq!(config.vector_quantization, VectorQuantization::F32);
     assert!(!config.index_compression);
-    assert_eq!(config.source_dirs, vec![PathBuf::from("docs"), PathBuf::from("notes")]);
+    assert_eq!(
+        config.source_dirs,
+        vec![PathBuf::from("docs"), PathBuf::from("notes")]
+    );
 
     clear_env();
 }
@@ -1277,11 +1293,27 @@ fn yaml_config_deep_merge_project_over_user() {
     std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
 
     let config = Config::load(project.path()).unwrap();
-    assert_eq!(config.search_default_mode, mdvdb::SearchMode::Hybrid, "project should override mode");
-    assert_eq!(config.search_default_limit, 20, "user limit should be preserved via deep merge");
-    assert_eq!(config.search_min_score, 0.5, "user min_score should be preserved via deep merge");
-    assert_eq!(config.embedding_model, "project-model", "project should override model");
-    assert_eq!(config.embedding_dimensions, 256, "user dimensions should be preserved via deep merge");
+    assert_eq!(
+        config.search_default_mode,
+        mdvdb::SearchMode::Hybrid,
+        "project should override mode"
+    );
+    assert_eq!(
+        config.search_default_limit, 20,
+        "user limit should be preserved via deep merge"
+    );
+    assert_eq!(
+        config.search_min_score, 0.5,
+        "user min_score should be preserved via deep merge"
+    );
+    assert_eq!(
+        config.embedding_model, "project-model",
+        "project should override model"
+    );
+    assert_eq!(
+        config.embedding_dimensions, 256,
+        "user dimensions should be preserved via deep merge"
+    );
 
     clear_env();
 }
@@ -1294,21 +1326,18 @@ fn yaml_env_override_takes_priority() {
     let project = TempDir::new().unwrap();
     let user_home = TempDir::new().unwrap();
 
-    write_user_yaml(
-        user_home.path(),
-        "embedding:\n  model: user-model\n",
-    );
+    write_user_yaml(user_home.path(), "embedding:\n  model: user-model\n");
 
-    write_project_yaml(
-        project.path(),
-        "embedding:\n  model: project-model\n",
-    );
+    write_project_yaml(project.path(), "embedding:\n  model: project-model\n");
 
     std::env::set_var("MDVDB_CONFIG_HOME", user_home.path());
     std::env::set_var("MDVDB_EMBEDDING_MODEL", "env-model");
 
     let config = Config::load(project.path()).unwrap();
-    assert_eq!(config.embedding_model, "env-model", "env should override both YAML layers");
+    assert_eq!(
+        config.embedding_model, "env-model",
+        "env should override both YAML layers"
+    );
 
     clear_env();
 }
@@ -1331,13 +1360,22 @@ fn yaml_dotenv_migration() {
     .unwrap();
 
     let config = Config::load(tmp.path()).unwrap();
-    assert_eq!(config.embedding_model, "migrated-model", "migration should preserve values");
+    assert_eq!(
+        config.embedding_model, "migrated-model",
+        "migration should preserve values"
+    );
     assert_eq!(config.embedding_dimensions, 768);
 
     // config.yaml should now exist
-    assert!(mdvdb_dir.join("config.yaml").is_file(), "config.yaml should be created");
+    assert!(
+        mdvdb_dir.join("config.yaml").is_file(),
+        "config.yaml should be created"
+    );
     // .config.bak should exist as backup
-    assert!(mdvdb_dir.join(".config.bak").is_file(), ".config.bak backup should be created");
+    assert!(
+        mdvdb_dir.join(".config.bak").is_file(),
+        ".config.bak backup should be created"
+    );
 
     clear_env();
 }
@@ -1358,13 +1396,19 @@ fn yaml_legacy_flat_migration() {
     .unwrap();
 
     let config = Config::load(tmp.path()).unwrap();
-    assert_eq!(config.embedding_model, "legacy-model", "legacy flat migration should work");
+    assert_eq!(
+        config.embedding_model, "legacy-model",
+        "legacy flat migration should work"
+    );
     assert_eq!(config.embedding_dimensions, 512);
 
     // After migration, .markdownvdb should be a directory with config.yaml
     let mdvdb_dir = tmp.path().join(".markdownvdb");
     assert!(mdvdb_dir.is_dir(), ".markdownvdb should now be a directory");
-    assert!(mdvdb_dir.join("config.yaml").is_file(), "config.yaml should exist after migration");
+    assert!(
+        mdvdb_dir.join("config.yaml").is_file(),
+        "config.yaml should exist after migration"
+    );
 
     clear_env();
 }
@@ -1404,10 +1448,7 @@ fn yaml_partial_config_valid() {
     clear_env();
     std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
     let tmp = TempDir::new().unwrap();
-    write_project_yaml(
-        tmp.path(),
-        "embedding:\n  provider: mock\n",
-    );
+    write_project_yaml(tmp.path(), "embedding:\n  provider: mock\n");
 
     let config = Config::load(tmp.path()).unwrap();
     assert_eq!(config.embedding_provider, EmbeddingProviderType::Mock);
@@ -1467,7 +1508,11 @@ fn yaml_source_dirs_as_list() {
     let config = Config::load(tmp.path()).unwrap();
     assert_eq!(
         config.source_dirs,
-        vec![PathBuf::from("docs"), PathBuf::from("notes"), PathBuf::from("wiki")]
+        vec![
+            PathBuf::from("docs"),
+            PathBuf::from("notes"),
+            PathBuf::from("wiki")
+        ]
     );
 
     clear_env();
@@ -1616,7 +1661,10 @@ fn topics_min_similarity_out_of_range_rejected() {
     clear_env();
     std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
     let tmp = TempDir::new().unwrap();
-    write_project_yaml(tmp.path(), "clustering:\n  topics:\n    min_similarity: 1.5\n");
+    write_project_yaml(
+        tmp.path(),
+        "clustering:\n  topics:\n    min_similarity: 1.5\n",
+    );
     assert!(Config::load(tmp.path()).is_err());
 
     clear_env();
@@ -1641,7 +1689,10 @@ fn topic_with_description_only_valid() {
     assert_eq!(config.custom_cluster_defs.len(), 1);
     let def = &config.custom_cluster_defs[0];
     assert_eq!(def.name, "Rust");
-    assert_eq!(def.description.as_deref(), Some("Notes about Rust programming"));
+    assert_eq!(
+        def.description.as_deref(),
+        Some("Notes about Rust programming")
+    );
     assert!(def.seeds.is_empty());
     assert!(def.threshold.is_none());
 
@@ -1661,8 +1712,7 @@ fn topic_with_neither_description_nor_seeds_rejected() {
 
     let result = Config::load(tmp.path());
     assert!(result.is_err());
-    assert!(format!("{}", result.unwrap_err())
-        .contains("needs a description or at least one seed"));
+    assert!(format!("{}", result.unwrap_err()).contains("needs a description or at least one seed"));
 
     clear_env();
 }

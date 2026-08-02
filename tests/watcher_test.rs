@@ -8,7 +8,7 @@ use mdvdb::embedding::mock::MockProvider;
 use mdvdb::embedding::provider::EmbeddingProvider;
 use mdvdb::fts::FtsIndex;
 use mdvdb::index::{EmbeddingConfig, Index};
-use mdvdb::watcher::Watcher;
+use mdvdb::watcher::{FileEvent, Watcher};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -109,6 +109,36 @@ async fn wait_for_condition<F: Fn() -> bool>(check: F, timeout_ms: u64) -> bool 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn watcher_rejects_an_unsaved_partial_index_branch() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let pending_path = project_root.join("docs/pending.md");
+    fs::write(&pending_path, "---\nvalue: 1\n---\n").unwrap();
+    let parsed =
+        mdvdb::parser::parse_markdown_file(&project_root, std::path::Path::new("docs/pending.md"))
+            .unwrap();
+    index.upsert(&parsed, &[], &[]).unwrap();
+
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        index,
+        fts_index,
+        provider,
+        None,
+    );
+    let result = watcher
+        .handle_event(&FileEvent::SchemaChanged(PathBuf::from(
+            ".markdownvdb.schema.yml",
+        )))
+        .await;
+    assert!(matches!(result, Err(mdvdb::Error::IndexDirty { .. })));
+    assert!(Index::open(&project_root.join("test.idx"))
+        .unwrap()
+        .get_file("docs/pending.md")
+        .is_none());
+}
 
 /// Note: This test relies on OS-level filesystem events (FSEvents on macOS).
 /// It may fail in sandboxed environments that restrict FS event delivery.
@@ -460,6 +490,7 @@ async fn matching_source_hash_does_not_hide_a_stale_body_embedding() {
     fs::write(&absolute, "# Changed\n\nA genuinely changed body.\n").unwrap();
     let changed = mdvdb::parser::parse_markdown_file(&project_root, &relative).unwrap();
     index.refresh_source_metadata(&changed).unwrap();
+    index.save().unwrap();
     assert_eq!(
         index.get_file("docs/stale-body.md").unwrap().content_hash,
         changed.content_hash,
@@ -622,13 +653,10 @@ async fn schema_change_recomputes_formulas_without_embedding() {
         Some(serde_json::json!(0.3))
     );
     assert_eq!(
-        mdvdb::parser::parse_markdown_file(
-            &project_root,
-            &PathBuf::from("docs/invoice.md")
-        )
-        .unwrap()
-        .frontmatter
-        .unwrap()["total"],
+        mdvdb::parser::parse_markdown_file(&project_root, &PathBuf::from("docs/invoice.md"))
+            .unwrap()
+            .frontmatter
+            .unwrap()["total"],
         serde_json::json!(0.3)
     );
 
@@ -664,13 +692,10 @@ async fn schema_change_recomputes_formulas_without_embedding() {
         Some(serde_json::json!(1.3))
     );
     assert_eq!(
-        mdvdb::parser::parse_markdown_file(
-            &project_root,
-            &PathBuf::from("docs/invoice.md")
-        )
-        .unwrap()
-        .frontmatter
-        .unwrap()["total"],
+        mdvdb::parser::parse_markdown_file(&project_root, &PathBuf::from("docs/invoice.md"))
+            .unwrap()
+            .frontmatter
+            .unwrap()["total"],
         serde_json::json!(1.3)
     );
 
@@ -690,9 +715,11 @@ async fn schema_change_recomputes_formulas_without_embedding() {
         .expect("schema callback report");
     assert_eq!(schema_report.chunks_processed, 0);
     assert_eq!(schema_report.path, ".markdownvdb.schema.yml");
-    assert_eq!(schema_report.module_reports.len(), 1);
+    assert_eq!(schema_report.module_reports.len(), 2);
     assert_eq!(schema_report.module_reports[0].module, "formula");
     assert_eq!(schema_report.module_reports[0].event, "schema_changed");
+    assert_eq!(schema_report.module_reports[1].module, "lookup_rollup");
+    assert_eq!(schema_report.module_reports[1].event, "schema_changed");
 }
 
 #[tokio::test]
@@ -774,11 +801,9 @@ async fn malformed_and_deleted_schema_clear_formula_cache_without_embedding() {
         removed.diagnostic.as_ref().map(|error| error.code.as_str()),
         Some("schema_overlay_missing")
     );
-    assert!(
-        !fs::read_to_string(project_root.join("docs/invoice.md"))
-            .unwrap()
-            .contains("total:")
-    );
+    assert!(!fs::read_to_string(project_root.join("docs/invoice.md"))
+        .unwrap()
+        .contains("total:"));
     assert!(
         index
             .get_scoped_schema("docs")
@@ -849,7 +874,6 @@ async fn rename_drops_old_computed_state_and_calculates_new_path() {
 // ---------------------------------------------------------------------------
 
 use mdvdb::clustering::{Clusterer, CustomClusterInfo, CustomClusterState};
-use mdvdb::watcher::FileEvent;
 
 fn clustering_config(source_dir: &str) -> Config {
     let mut config = test_config(source_dir);

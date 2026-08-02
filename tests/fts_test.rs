@@ -28,7 +28,11 @@ fn chunk_data(id: &str, content: &str, headings: &[&str]) -> FtsChunkData {
 fn test_fts_open_or_create() {
     let dir = TempDir::new().unwrap();
     let result = FtsIndex::open_or_create(&dir.path().join("fts"));
-    assert!(result.is_ok(), "should create FTS index: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "should create FTS index: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -53,7 +57,11 @@ fn test_fts_upsert_and_search() {
     let (_dir, fts) = create_fts_dir();
 
     let chunks = vec![
-        chunk_data("doc.md#0", "Rust is a systems programming language", &["Rust"]),
+        chunk_data(
+            "doc.md#0",
+            "Rust is a systems programming language",
+            &["Rust"],
+        ),
         chunk_data("doc.md#1", "Python is great for data science", &["Python"]),
     ];
     fts.upsert_chunks("doc.md", &chunks).unwrap();
@@ -73,7 +81,10 @@ fn test_fts_search_no_results() {
     fts.commit().unwrap();
 
     let results = fts.search("nonexistent zebra", 10).unwrap();
-    assert!(results.is_empty(), "should return no results for unmatched query");
+    assert!(
+        results.is_empty(),
+        "should return no results for unmatched query"
+    );
 }
 
 #[test]
@@ -84,7 +95,10 @@ fn test_fts_remove_file() {
     fts.upsert_chunks("doc.md", &chunks).unwrap();
     fts.commit().unwrap();
 
-    assert!(fts.num_docs().unwrap() > 0, "should have docs before remove");
+    assert!(
+        fts.num_docs().unwrap() > 0,
+        "should have docs before remove"
+    );
 
     fts.remove_file("doc.md").unwrap();
     fts.commit().unwrap();
@@ -110,7 +124,10 @@ fn test_fts_upsert_replaces_existing() {
     assert!(cats.is_empty(), "old content should be gone after upsert");
 
     let dogs = fts.search("dogs", 10).unwrap();
-    assert!(!dogs.is_empty(), "new content should be findable after upsert");
+    assert!(
+        !dogs.is_empty(),
+        "new content should be findable after upsert"
+    );
 }
 
 #[test]
@@ -118,8 +135,16 @@ fn test_fts_heading_boost() {
     let (_dir, fts) = create_fts_dir();
 
     // One chunk with "rust" in heading, another with "rust" only in body
-    let chunk_a = [chunk_data("a.md#0", "some generic programming content", &["Rust Guide"])];
-    let chunk_b = [chunk_data("b.md#0", "rust is mentioned in the body text", &["Introduction"])];
+    let chunk_a = [chunk_data(
+        "a.md#0",
+        "some generic programming content",
+        &["Rust Guide"],
+    )];
+    let chunk_b = [chunk_data(
+        "b.md#0",
+        "rust is mentioned in the body text",
+        &["Introduction"],
+    )];
     fts.upsert_chunks("a.md", &chunk_a).unwrap();
     fts.upsert_chunks("b.md", &chunk_b).unwrap();
     fts.commit().unwrap();
@@ -145,7 +170,11 @@ fn test_fts_limit_respected() {
     fts.commit().unwrap();
 
     let results = fts.search("document common search", 3).unwrap();
-    assert!(results.len() <= 3, "should respect limit of 3, got {}", results.len());
+    assert!(
+        results.len() <= 3,
+        "should respect limit of 3, got {}",
+        results.len()
+    );
 }
 
 #[test]
@@ -159,7 +188,11 @@ fn test_fts_delete_all() {
     fts.delete_all().unwrap();
     fts.commit().unwrap();
 
-    assert_eq!(fts.num_docs().unwrap(), 0, "should have 0 docs after delete_all");
+    assert_eq!(
+        fts.num_docs().unwrap(),
+        0,
+        "should have 0 docs after delete_all"
+    );
 }
 
 #[test]
@@ -175,7 +208,11 @@ fn test_fts_num_docs() {
     fts.upsert_chunks("doc.md", &chunks).unwrap();
     fts.commit().unwrap();
 
-    assert_eq!(fts.num_docs().unwrap(), 2, "should have 2 docs after inserting 2 chunks");
+    assert_eq!(
+        fts.num_docs().unwrap(),
+        2,
+        "should have 2 docs after inserting 2 chunks"
+    );
 }
 
 #[test]
@@ -184,12 +221,20 @@ fn test_fts_multiple_files() {
 
     fts.upsert_chunks(
         "rust.md",
-        &[chunk_data("rust.md#0", "Rust systems programming language", &["Rust"])],
+        &[chunk_data(
+            "rust.md#0",
+            "Rust systems programming language",
+            &["Rust"],
+        )],
     )
     .unwrap();
     fts.upsert_chunks(
         "python.md",
-        &[chunk_data("python.md#0", "Python data science machine learning", &["Python"])],
+        &[chunk_data(
+            "python.md#0",
+            "Python data science machine learning",
+            &["Python"],
+        )],
     )
     .unwrap();
     fts.commit().unwrap();
@@ -235,5 +280,8 @@ fn test_fts_readonly_open_does_not_conflict_with_writer() {
     let _writer = FtsIndex::open_or_create(&path).unwrap();
     // Read-only opens acquire no writer lock and must keep working.
     let readonly = FtsIndex::open_readonly(&path);
-    assert!(readonly.is_ok(), "read-only open must not hit the writer lock");
+    assert!(
+        readonly.is_ok(),
+        "read-only open must not hit the writer lock"
+    );
 }

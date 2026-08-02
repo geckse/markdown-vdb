@@ -202,8 +202,14 @@ fn test_get_without_populate_omits_keys() {
 
     let json = serde_json::to_value(&doc).unwrap();
     let obj = json.as_object().unwrap();
-    assert!(!obj.contains_key("relations"), "key must be absent, not null");
-    assert!(!obj.contains_key("referenced_by"), "key must be absent, not null");
+    assert!(
+        !obj.contains_key("relations"),
+        "key must be absent, not null"
+    );
+    assert!(
+        !obj.contains_key("referenced_by"),
+        "key must be absent, not null"
+    );
 }
 
 #[test]
@@ -294,8 +300,14 @@ fn test_get_populated_array_order_and_duplicates() {
     );
 
     // Markdown-link and bare-path syntaxes are relations too.
-    assert_eq!(relations["spec"][0].path.as_deref(), Some("clients/acme.md"));
-    assert_eq!(relations["note"][0].path.as_deref(), Some("clients/globex.md"));
+    assert_eq!(
+        relations["spec"][0].path.as_deref(),
+        Some("clients/acme.md")
+    );
+    assert_eq!(
+        relations["note"][0].path.as_deref(),
+        Some("clients/globex.md")
+    );
 }
 
 #[test]
@@ -545,7 +557,10 @@ fn test_collection_populate_page_rows_only() {
         let relations = row.relations.as_ref().expect("page rows are populated");
         assert!(!relations.is_empty());
         // frontmatter stays the RAW object.
-        let raw_client = row.frontmatter.get("client").or_else(|| row.frontmatter.get("clients"));
+        let raw_client = row
+            .frontmatter
+            .get("client")
+            .or_else(|| row.frontmatter.get("clients"));
         assert!(raw_client.is_some());
         assert!(row.frontmatter.get("relations").is_none());
     }
@@ -553,7 +568,10 @@ fn test_collection_populate_page_rows_only() {
     // i1 (sorted by path → first page row): resolved client relation present.
     let i1 = &resp.rows[0];
     assert_eq!(i1.path, "invoices/i1.md");
-    assert_eq!(i1.frontmatter["client"], "[[clients/acme]]", "raw untouched");
+    assert_eq!(
+        i1.frontmatter["client"], "[[clients/acme]]",
+        "raw untouched"
+    );
     let client = &i1.relations.as_ref().unwrap()["client"];
     assert_eq!(client[0].path.as_deref(), Some("clients/acme.md"));
     assert_eq!(client[0].title.as_deref(), Some("Acme Corp"));
@@ -613,7 +631,10 @@ async fn test_search_without_populate_omits_relations() {
     assert!(!response.results.is_empty());
     let json = serde_json::to_value(&response.results).unwrap();
     for result in json.as_array().unwrap() {
-        assert!(!result["file"].as_object().unwrap().contains_key("relations"));
+        assert!(!result["file"]
+            .as_object()
+            .unwrap()
+            .contains_key("relations"));
     }
 }
 
@@ -630,12 +651,19 @@ async fn test_search_filter_matches_relation_syntax() {
                 value: serde_json::json!(filter_value),
             });
         let response = vdb.search(query).await.unwrap();
-        let paths: Vec<&str> = response.results.iter().map(|r| r.file.path.as_str()).collect();
+        let paths: Vec<&str> = response
+            .results
+            .iter()
+            .map(|r| r.file.path.as_str())
+            .collect();
         assert!(
             paths.contains(&"invoices/i1.md"),
             "filter {filter_value:?} should match i1, got {paths:?}"
         );
-        assert!(!paths.contains(&"invoices/i3.md"), "[[acme]] must not match {filter_value:?} (syntactic only)");
+        assert!(
+            !paths.contains(&"invoices/i3.md"),
+            "[[acme]] must not match {filter_value:?} (syntactic only)"
+        );
     }
 }
 
@@ -675,7 +703,9 @@ async fn test_doctor_relations_check_warns() {
         .expect("Relations check present");
     assert_eq!(check.status, mdvdb::CheckStatus::Warn, "{}", check.detail);
     assert!(
-        check.detail.contains("notes/dangling.md#client → clients/ghost.md"),
+        check
+            .detail
+            .contains("notes/dangling.md#client → clients/ghost.md"),
         "dangling example missing: {}",
         check.detail
     );
@@ -698,7 +728,11 @@ async fn test_doctor_relations_check_passes_on_clean_vault() {
     )
     .unwrap();
     fs::create_dir_all(root.join("clients")).unwrap();
-    fs::write(root.join("clients/acme.md"), "---\ntitle: Acme\n---\nAcme.\n").unwrap();
+    fs::write(
+        root.join("clients/acme.md"),
+        "---\ntitle: Acme\n---\nAcme.\n",
+    )
+    .unwrap();
     fs::write(
         root.join("invoice.md"),
         "---\nclient: \"[[clients/acme]]\"\n---\nInvoice.\n",
@@ -709,9 +743,17 @@ async fn test_doctor_relations_check_passes_on_clean_vault() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let result = vdb.doctor().await.unwrap();
-    let check = result.checks.iter().find(|c| c.name == "Relations").unwrap();
+    let check = result
+        .checks
+        .iter()
+        .find(|c| c.name == "Relations")
+        .unwrap();
     assert_eq!(check.status, mdvdb::CheckStatus::Pass, "{}", check.detail);
-    assert!(check.detail.contains("1 relation link(s)"), "{}", check.detail);
+    assert!(
+        check.detail.contains("1 relation link(s)"),
+        "{}",
+        check.detail
+    );
 }
 
 // ---------------------------------------------------------------------------

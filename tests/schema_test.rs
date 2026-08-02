@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -5,7 +6,7 @@ use std::process::Command;
 use mdvdb::config::{Config, EmbeddingProviderType};
 use mdvdb::index::{EmbeddingConfig, Index};
 use mdvdb::parser::MarkdownFile;
-use mdvdb::schema::Schema;
+use mdvdb::schema::{OverlayField, Schema};
 use mdvdb::{IngestOptions, MarkdownVdb, SearchMode};
 use tempfile::TempDir;
 
@@ -57,7 +58,8 @@ fn schema_roundtrip_in_index() {
                 "draft": true,
                 "priority": 1,
                 "created": "2025-01-15",
-                "attachments": ["[[assets/mockup.png]]"]
+                "attachments": ["[[assets/mockup.png]]"],
+                "payload": {"message": "hello", "retries": 2}
             }),
         ),
         make_file(
@@ -80,11 +82,38 @@ fn schema_roundtrip_in_index() {
         ),
     ];
 
-    // 2. Infer schema
-    let schema = Schema::infer(&files);
+    // 2. Infer schema and add overlay-only computed fields. This also verifies
+    // the archived index layout for Lookup/Rollup-specific metadata.
+    let schema = Schema::merge(
+        Schema::infer(&files),
+        Some(HashMap::from([
+            (
+                "client_domain".to_string(),
+                OverlayField {
+                    field_type: Some("lookup".to_string()),
+                    relation_field: Some("client".to_string()),
+                    target_field: Some("domain".to_string()),
+                    ..OverlayField::default()
+                },
+            ),
+            (
+                "invoice_total".to_string(),
+                OverlayField {
+                    field_type: Some("rollup".to_string()),
+                    relation_field: Some("client".to_string()),
+                    target_field: Some("total".to_string()),
+                    relation_direction: Some("incoming".to_string()),
+                    relation_scope: Some("invoices/".to_string()),
+                    formula: Some("values.reduce((sum, value) => sum + value, 0)".to_string()),
+                    result_type: Some("number".to_string()),
+                    ..OverlayField::default()
+                },
+            ),
+        ])),
+    );
 
     // Verify inferred schema has expected fields
-    assert!(schema.fields.len() >= 5, "should have at least 5 fields");
+    assert!(schema.fields.len() >= 6, "should have at least 6 fields");
     assert!(schema.get_field("title").is_some());
     assert!(schema.get_field("tags").is_some());
     assert!(schema.get_field("draft").is_some());
@@ -92,6 +121,25 @@ fn schema_roundtrip_in_index() {
     assert_eq!(
         schema.get_field("attachments").unwrap().field_type,
         mdvdb::FieldType::File
+    );
+    assert_eq!(
+        schema.get_field("payload").unwrap().field_type,
+        mdvdb::FieldType::Json
+    );
+    assert_eq!(
+        schema
+            .get_field("client_domain")
+            .unwrap()
+            .relation_direction,
+        Some(mdvdb::RelationDirection::Outgoing)
+    );
+    assert_eq!(
+        schema
+            .get_field("invoice_total")
+            .unwrap()
+            .relation_scope
+            .as_deref(),
+        Some("invoices")
     );
 
     // Check occurrence counts
@@ -117,7 +165,9 @@ fn schema_roundtrip_in_index() {
     let reopened = Index::open(&path).unwrap();
 
     // 6. Verify schema is recovered unchanged
-    let recovered = reopened.get_schema().expect("schema should persist after reopen");
+    let recovered = reopened
+        .get_schema()
+        .expect("schema should persist after reopen");
     assert_eq!(
         recovered.fields.len(),
         schema.fields.len(),
@@ -160,6 +210,41 @@ fn schema_roundtrip_in_index() {
         assert_eq!(
             recovered_field.allowed_values, original_field.allowed_values,
             "allowed_values mismatch for '{}'",
+            original_field.name
+        );
+        assert_eq!(
+            recovered_field.relation_target, original_field.relation_target,
+            "relation_target mismatch for '{}'",
+            original_field.name
+        );
+        assert_eq!(
+            recovered_field.formula, original_field.formula,
+            "formula mismatch for '{}'",
+            original_field.name
+        );
+        assert_eq!(
+            recovered_field.result_type, original_field.result_type,
+            "result_type mismatch for '{}'",
+            original_field.name
+        );
+        assert_eq!(
+            recovered_field.relation_field, original_field.relation_field,
+            "relation_field mismatch for '{}'",
+            original_field.name
+        );
+        assert_eq!(
+            recovered_field.target_field, original_field.target_field,
+            "target_field mismatch for '{}'",
+            original_field.name
+        );
+        assert_eq!(
+            recovered_field.relation_direction, original_field.relation_direction,
+            "relation_direction mismatch for '{}'",
+            original_field.name
+        );
+        assert_eq!(
+            recovered_field.relation_scope, original_field.relation_scope,
+            "relation_scope mismatch for '{}'",
             original_field.name
         );
     }
@@ -210,7 +295,7 @@ fn mock_config() -> Config {
         edge_embeddings: true,
         edge_boost_weight: 0.15,
         edge_cluster_rebalance: 50,
-            custom_cluster_defs: Vec::new(),
+        custom_cluster_defs: Vec::new(),
     }
 }
 
@@ -408,12 +493,14 @@ fn test_schema_cli_with_path_flag() {
     assert_eq!(json["scope"].as_str().unwrap(), "blog/");
 
     // Verify schema contains blog fields
-    let fields = json["schema"]["fields"].as_array().expect("fields should be array");
-    let field_names: Vec<&str> = fields
-        .iter()
-        .map(|f| f["name"].as_str().unwrap())
-        .collect();
-    assert!(field_names.contains(&"status"), "should contain status field");
+    let fields = json["schema"]["fields"]
+        .as_array()
+        .expect("fields should be array");
+    let field_names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
+    assert!(
+        field_names.contains(&"status"),
+        "should contain status field"
+    );
     assert!(field_names.contains(&"tags"), "should contain tags field");
     assert!(
         !field_names.contains(&"version"),
@@ -426,14 +513,20 @@ fn infer_scoped_normalizes_backslash_file_paths() {
     // Files whose PathBufs carry Windows-style separators must still match
     // the slash-separated scope prefix.
     let files = vec![
-        make_file(r"docs\a.md", serde_json::json!({"title": "A", "draft": true})),
+        make_file(
+            r"docs\a.md",
+            serde_json::json!({"title": "A", "draft": true}),
+        ),
         make_file(r"docs\b.md", serde_json::json!({"title": "B"})),
         make_file("other/c.md", serde_json::json!({"unrelated": 1})),
     ];
 
     let schema = Schema::infer_scoped(&files, "docs");
     let names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
-    assert!(names.contains(&"title"), "scoped schema should see docs files: {names:?}");
+    assert!(
+        names.contains(&"title"),
+        "scoped schema should see docs files: {names:?}"
+    );
     assert!(names.contains(&"draft"));
     assert!(
         !names.contains(&"unrelated"),
@@ -443,4 +536,69 @@ fn infer_scoped_normalizes_backslash_file_paths() {
     // Scope discovery also sees the normalized top-level directory.
     let scopes = Schema::discover_scopes(&files);
     assert!(scopes.contains(&"docs".to_string()), "scopes: {scopes:?}");
+}
+
+#[test]
+fn lookup_rollup_overlay_public_schema_contract() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join(".markdownvdb.schema.yml"),
+        r#"scopes:
+  contacts:
+    fields:
+      client_domain:
+        field_type: lookup
+        relation_field: client
+        target_field: domain
+  clients:
+    fields:
+      invoice_total:
+        field_type: rollup
+        relation_field: client
+        target_field: total
+        relation_direction: incoming
+        relation_scope: invoices/
+        formula: values.reduce((sum, value) => sum + value, 0)
+        result_type: number
+"#,
+    )
+    .unwrap();
+
+    let overlay = Schema::load_overlay(dir.path()).unwrap().unwrap();
+    let contacts = Schema::merge(
+        Schema::infer(&[]),
+        Some(Schema::resolve_overlay_for_path(
+            &overlay,
+            Some("contacts/c1.md"),
+        )),
+    );
+    let lookup = contacts.get_field("client_domain").unwrap();
+    assert_eq!(lookup.field_type, mdvdb::FieldType::Lookup);
+    assert_eq!(lookup.relation_field.as_deref(), Some("client"));
+    assert_eq!(lookup.target_field.as_deref(), Some("domain"));
+    assert_eq!(
+        lookup.relation_direction,
+        Some(mdvdb::schema::RelationDirection::Outgoing)
+    );
+
+    let clients = Schema::merge(
+        Schema::infer(&[]),
+        Some(Schema::resolve_overlay_for_path(
+            &overlay,
+            Some("clients/acme.md"),
+        )),
+    );
+    let rollup = clients.get_field("invoice_total").unwrap();
+    assert_eq!(rollup.field_type, mdvdb::FieldType::Rollup);
+    assert_eq!(
+        rollup.relation_direction,
+        Some(mdvdb::schema::RelationDirection::Incoming)
+    );
+    assert_eq!(rollup.relation_scope.as_deref(), Some("invoices"));
+
+    let json = serde_json::to_value(rollup).unwrap();
+    assert_eq!(json["field_type"], "Rollup");
+    assert_eq!(json["relation_direction"], "Incoming");
+    assert_eq!(json["relation_scope"], "invoices");
+    assert_eq!(json["result_type"], "Number");
 }

@@ -28,7 +28,9 @@ pub struct LinkEntry {
 }
 
 /// A semantic edge representing a link with its surrounding paragraph context.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct SemanticEdge {
     /// Unique edge identifier in format `"edge:source.md->target.md@42"`.
@@ -50,7 +52,9 @@ pub struct SemanticEdge {
 }
 
 /// Information about a single edge cluster.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct EdgeClusterInfo {
     /// Numeric cluster identifier (0-based).
@@ -66,7 +70,9 @@ pub struct EdgeClusterInfo {
 }
 
 /// Edge cluster state persisted in the index.
-#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Serialize, serde::Deserialize,
+)]
 #[rkyv(derive(Debug))]
 pub struct EdgeClusterState {
     /// All edge clusters.
@@ -318,10 +324,7 @@ pub fn build_link_graph(
         .unwrap_or_default()
         .as_secs();
 
-    debug!(
-        files = forward.len(),
-        "built link graph"
-    );
+    debug!(files = forward.len(), "built link graph");
 
     LinkGraph {
         forward,
@@ -442,10 +445,7 @@ pub fn query_links(
 }
 
 /// Find orphan files — files with no incoming or outgoing links.
-pub fn find_orphans(
-    graph: &LinkGraph,
-    all_files: &HashSet<String>,
-) -> Vec<OrphanFile> {
+pub fn find_orphans(graph: &LinkGraph, all_files: &HashSet<String>) -> Vec<OrphanFile> {
     let backlinks = compute_backlinks(graph);
 
     let mut orphans: Vec<OrphanFile> = all_files
@@ -455,9 +455,7 @@ pub fn find_orphans(
             let has_incoming = backlinks.contains_key(file.as_str());
             !has_outgoing && !has_incoming
         })
-        .map(|path| OrphanFile {
-            path: path.clone(),
-        })
+        .map(|path| OrphanFile { path: path.clone() })
         .collect();
 
     orphans.sort_by(|a, b| a.path.cmp(&b.path));
@@ -643,10 +641,7 @@ fn build_incoming_tree(
 
 /// Count total nodes in a neighborhood tree.
 fn count_nodes(nodes: &[NeighborhoodNode]) -> usize {
-    nodes
-        .iter()
-        .map(|n| 1 + count_nodes(&n.children))
-        .sum()
+    nodes.iter().map(|n| 1 + count_nodes(&n.children)).sum()
 }
 
 /// Find the maximum depth of a neighborhood tree.
@@ -833,7 +828,10 @@ mod tests {
 
     #[test]
     fn resolve_link_parent_dir() {
-        assert_eq!(resolve_link("docs/sub/readme.md", "../other"), "docs/other.md");
+        assert_eq!(
+            resolve_link("docs/sub/readme.md", "../other"),
+            "docs/other.md"
+        );
     }
 
     #[test]
@@ -853,7 +851,10 @@ mod tests {
 
     #[test]
     fn resolve_link_backslash_normalization() {
-        assert_eq!(resolve_link("docs/readme.md", "sub\\other"), "docs/sub/other.md");
+        assert_eq!(
+            resolve_link("docs/readme.md", "sub\\other"),
+            "docs/sub/other.md"
+        );
     }
 
     // --- build_link_graph tests ---
@@ -910,7 +911,10 @@ mod tests {
         let backlinks = compute_backlinks(&graph);
 
         assert_eq!(backlinks["b.md"].len(), 2);
-        let sources: HashSet<_> = backlinks["b.md"].iter().map(|e| e.source.as_str()).collect();
+        let sources: HashSet<_> = backlinks["b.md"]
+            .iter()
+            .map(|e| e.source.as_str())
+            .collect();
         assert!(sources.contains("a.md"));
         assert!(sources.contains("c.md"));
     }
@@ -933,8 +937,16 @@ mod tests {
         let result = query_links("a.md", &graph, &backlinks, &known);
 
         assert_eq!(result.outgoing.len(), 2);
-        let valid: Vec<_> = result.outgoing.iter().filter(|r| r.state == LinkState::Valid).collect();
-        let broken: Vec<_> = result.outgoing.iter().filter(|r| r.state == LinkState::Broken).collect();
+        let valid: Vec<_> = result
+            .outgoing
+            .iter()
+            .filter(|r| r.state == LinkState::Valid)
+            .collect();
+        let broken: Vec<_> = result
+            .outgoing
+            .iter()
+            .filter(|r| r.state == LinkState::Broken)
+            .collect();
         assert_eq!(valid.len(), 1);
         assert_eq!(valid[0].entry.target, "b.md");
         assert_eq!(broken.len(), 1);
@@ -949,7 +961,10 @@ mod tests {
         ];
         let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
-        let known: HashSet<String> = ["a.md", "b.md", "c.md"].iter().map(|s| s.to_string()).collect();
+        let known: HashSet<String> = ["a.md", "b.md", "c.md"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
 
         let result = query_links("b.md", &graph, &backlinks, &known);
         assert_eq!(result.incoming.len(), 2);
@@ -1012,10 +1027,7 @@ mod tests {
     // --- frontmatter relation edge tests (phase 31) ---
 
     fn ctx_with_known(paths: &[&str]) -> crate::relations::RelationContext {
-        crate::relations::RelationContext::new(
-            paths.iter().map(|s| s.to_string()).collect(),
-            None,
-        )
+        crate::relations::RelationContext::new(paths.iter().map(|s| s.to_string()).collect(), None)
     }
 
     #[test]
@@ -1096,10 +1108,16 @@ mod tests {
                 target: Some("clients".to_string()),
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let mut scopes = std::collections::HashMap::new();
-        scopes.insert("invoices/".to_string(), ScopeOverlay { fields: scope_fields });
+        scopes.insert(
+            "invoices/".to_string(),
+            ScopeOverlay {
+                fields: scope_fields,
+            },
+        );
         let overlay = OverlaySchema {
             fields: std::collections::HashMap::new(),
             scopes,
@@ -1122,25 +1140,38 @@ mod tests {
     }
 
     #[test]
-    fn materialized_formula_link_value_does_not_create_relation_edge() {
+    fn materialized_computed_link_values_do_not_create_relation_edges() {
         use crate::schema::{OverlayField, OverlaySchema, ScopeOverlay};
         let overlay = OverlaySchema {
             fields: std::collections::HashMap::new(),
             scopes: std::collections::HashMap::from([(
                 "invoices".to_string(),
                 ScopeOverlay {
-                    fields: std::collections::HashMap::from([(
-                        "lookup".to_string(),
-                        OverlayField {
-                            description: None,
-                            field_type: Some("formula".to_string()),
-                            allowed_values: None,
-                            required: None,
-                            target: None,
-                            formula: Some("'[[clients/acme]]'".to_string()),
-                            result_type: Some("string".to_string()),
-                        },
-                    )]),
+                    fields: std::collections::HashMap::from([
+                        (
+                            "formula_link".to_string(),
+                            OverlayField {
+                                field_type: Some("formula".to_string()),
+                                formula: Some("'[[clients/acme]]'".to_string()),
+                                result_type: Some("string".to_string()),
+                                ..OverlayField::default()
+                            },
+                        ),
+                        (
+                            "lookup_link".to_string(),
+                            OverlayField {
+                                field_type: Some("lookup".to_string()),
+                                ..OverlayField::default()
+                            },
+                        ),
+                        (
+                            "rollup_link".to_string(),
+                            OverlayField {
+                                field_type: Some("rollup".to_string()),
+                                ..OverlayField::default()
+                            },
+                        ),
+                    ]),
                 },
             )]),
         };
@@ -1151,7 +1182,11 @@ mod tests {
         let files = vec![make_file_with_fm_links(
             "invoices/i1.md",
             vec![],
-            vec![make_fm_link("lookup", "clients/acme")],
+            vec![
+                make_fm_link("formula_link", "clients/acme"),
+                make_fm_link("lookup_link", "clients/acme"),
+                make_fm_link("rollup_link", "clients/acme"),
+            ],
         )];
 
         assert!(build_link_graph(&files, &ctx).forward.is_empty());
@@ -1218,7 +1253,10 @@ mod tests {
             vec![],
             vec![make_fm_link("client", "clients/acme")],
         )];
-        let graph = build_link_graph(&files, &ctx_with_known(&["clients/acme.md", "invoices/i1.md"]));
+        let graph = build_link_graph(
+            &files,
+            &ctx_with_known(&["clients/acme.md", "invoices/i1.md"]),
+        );
         let all: HashSet<String> = ["invoices/i1.md", "clients/acme.md", "orphan.md"]
             .iter()
             .map(|s| s.to_string())
@@ -1252,12 +1290,7 @@ mod tests {
         let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
-        let neighbors = bfs_neighbors(
-            &graph,
-            &backlinks,
-            &["a.md".to_string()],
-            1,
-        );
+        let neighbors = bfs_neighbors(&graph, &backlinks, &["a.md".to_string()], 1);
 
         assert_eq!(neighbors.len(), 1);
         assert_eq!(neighbors["b.md"], 1);
@@ -1274,12 +1307,7 @@ mod tests {
         let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
-        let neighbors = bfs_neighbors(
-            &graph,
-            &backlinks,
-            &["a.md".to_string()],
-            2,
-        );
+        let neighbors = bfs_neighbors(&graph, &backlinks, &["a.md".to_string()], 2);
 
         assert_eq!(neighbors.len(), 2);
         assert_eq!(neighbors["b.md"], 1);
@@ -1300,12 +1328,7 @@ mod tests {
         let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
-        let neighbors = bfs_neighbors(
-            &graph,
-            &backlinks,
-            &["a.md".to_string()],
-            3,
-        );
+        let neighbors = bfs_neighbors(&graph, &backlinks, &["a.md".to_string()], 3);
 
         assert_eq!(neighbors.len(), 3);
         assert_eq!(neighbors["b.md"], 1);
@@ -1329,12 +1352,7 @@ mod tests {
         let backlinks = compute_backlinks(&graph);
 
         // With max_depth 3, BFS should not loop forever
-        let neighbors = bfs_neighbors(
-            &graph,
-            &backlinks,
-            &["a.md".to_string()],
-            3,
-        );
+        let neighbors = bfs_neighbors(&graph, &backlinks, &["a.md".to_string()], 3);
 
         // a is seed (excluded). Bidirectional traversal:
         // hop 1: b.md (forward a->b), d.md (backlink d->a)
@@ -1350,18 +1368,11 @@ mod tests {
     #[test]
     fn bfs_disconnected() {
         // a -> b, c is isolated
-        let files = vec![
-            make_file("a.md", vec![make_link("b", "B", 1, false)]),
-        ];
+        let files = vec![make_file("a.md", vec![make_link("b", "B", 1, false)])];
         let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
-        let neighbors = bfs_neighbors(
-            &graph,
-            &backlinks,
-            &["a.md".to_string()],
-            3,
-        );
+        let neighbors = bfs_neighbors(&graph, &backlinks, &["a.md".to_string()], 3);
 
         // Only b.md reachable, c.md is disconnected and not reachable
         assert_eq!(neighbors.len(), 1);
@@ -1380,12 +1391,7 @@ mod tests {
         let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
-        let neighbors = bfs_neighbors(
-            &graph,
-            &backlinks,
-            &["a.md".to_string()],
-            1,
-        );
+        let neighbors = bfs_neighbors(&graph, &backlinks, &["a.md".to_string()], 1);
 
         // b.md via forward link, c.md via backlink (c links to a, so a has backlink from c)
         assert_eq!(neighbors.len(), 2);
@@ -1395,9 +1401,7 @@ mod tests {
 
     #[test]
     fn bfs_empty_seeds() {
-        let files = vec![
-            make_file("a.md", vec![make_link("b", "B", 1, false)]),
-        ];
+        let files = vec![make_file("a.md", vec![make_link("b", "B", 1, false)])];
         let graph = build_link_graph(&files, &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
@@ -1411,12 +1415,7 @@ mod tests {
         let graph = build_link_graph(&[], &empty_ctx());
         let backlinks = compute_backlinks(&graph);
 
-        let neighbors = bfs_neighbors(
-            &graph,
-            &backlinks,
-            &["a.md".to_string()],
-            2,
-        );
+        let neighbors = bfs_neighbors(&graph, &backlinks, &["a.md".to_string()], 2);
 
         assert!(neighbors.is_empty());
     }
@@ -1427,10 +1426,10 @@ mod tests {
     fn neighborhood_depth_1() {
         // a -> b, a -> c; d -> a (backlink)
         let files = vec![
-            make_file("a.md", vec![
-                make_link("b", "B", 1, false),
-                make_link("c", "C", 2, false),
-            ]),
+            make_file(
+                "a.md",
+                vec![make_link("b", "B", 1, false), make_link("c", "C", 2, false)],
+            ),
             make_file("d.md", vec![make_link("a", "A", 1, false)]),
         ];
         let graph = build_link_graph(&files, &empty_ctx());
@@ -1536,14 +1535,9 @@ mod tests {
     #[test]
     fn neighborhood_missing_file() {
         // Query for a file not in the graph
-        let files = vec![
-            make_file("a.md", vec![make_link("b", "B", 1, false)]),
-        ];
+        let files = vec![make_file("a.md", vec![make_link("b", "B", 1, false)])];
         let graph = build_link_graph(&files, &empty_ctx());
-        let known: HashSet<String> = ["a.md", "b.md"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let known: HashSet<String> = ["a.md", "b.md"].iter().map(|s| s.to_string()).collect();
 
         let result = neighborhood(&graph, &known, "missing.md", 2);
 

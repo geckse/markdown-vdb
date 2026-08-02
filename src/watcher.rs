@@ -232,7 +232,37 @@ impl Watcher {
             }
         };
 
-        let result = self.handle_event_inner(event).await;
+        // Keep raw index changes, dependency evaluation, materialization, and
+        // the final index save in one project-scoped critical section. Reload
+        // after waiting so this watcher never mutates an obsolete generation.
+        let result = match crate::modules::acquire_module_run_lock(&self.project_root) {
+            Ok(module_run_lock) => {
+                if let Err(error) = self.index.reload_from_disk_if_clean() {
+                    Err(error)
+                } else {
+                    match crate::fts::recover_if_required(
+                        &self.project_root,
+                        &self.index,
+                        &self.fts_index,
+                    ) {
+                        Err(error) => Err(error),
+                        Ok(_) => match crate::fts::begin_reconciliation(&self.project_root) {
+                            Err(error) => Err(error),
+                            Ok(()) => {
+                                match self.handle_event_inner(event, &module_run_lock).await {
+                                    Ok(outcome) => {
+                                        crate::fts::finish_reconciliation(&self.project_root)
+                                            .map(|()| outcome)
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+            Err(error) => Err(error),
+        };
 
         let duration_ms = start.elapsed().as_millis() as u64;
         let (success, error, chunks_processed, module_reports) = match &result {
@@ -261,7 +291,11 @@ impl Watcher {
     }
 
     /// Inner implementation of event handling.
-    async fn handle_event_inner(&self, event: &FileEvent) -> Result<EventOutcome> {
+    async fn handle_event_inner(
+        &self,
+        event: &FileEvent,
+        module_run_lock: &crate::modules::ModuleRunLock,
+    ) -> Result<EventOutcome> {
         match event {
             FileEvent::Created(path) | FileEvent::Modified(path) => {
                 debug!(path = %path.display(), "processing created/modified event");
@@ -271,7 +305,7 @@ impl Watcher {
                     removed: Vec::new(),
                     renamed: Vec::new(),
                 };
-                self.process_file(path, module_event).await
+                self.process_file(path, module_event, module_run_lock).await
             }
             FileEvent::Deleted(path) => {
                 let relative = crate::path_util::to_slash(path);
@@ -292,6 +326,7 @@ impl Watcher {
                                 removed: Vec::new(),
                                 renamed: Vec::new(),
                             },
+                            module_run_lock,
                         )
                         .await;
                 }
@@ -315,13 +350,15 @@ impl Watcher {
                 self.remove_from_clusters(&relative);
                 self.fts_index.remove_file(&relative)?;
                 self.refresh_schemas();
-                let module_reports = self.run_modules(&ModuleEvent::FilesChanged {
-                    upserted: Vec::new(),
-                    removed: vec![relative],
-                    renamed: Vec::new(),
-                });
+                let module_reports = self.run_modules(
+                    &ModuleEvent::FilesChanged {
+                        upserted: Vec::new(),
+                        removed: vec![relative],
+                        renamed: Vec::new(),
+                    },
+                    module_run_lock,
+                )?;
                 self.fts_index.commit()?;
-                self.index.save()?;
                 Ok(EventOutcome {
                     chunks_processed: 0,
                     module_reports,
@@ -353,13 +390,28 @@ impl Watcher {
                     removed: vec![from_str.clone()],
                     renamed: vec![(from_str, to_str)],
                 };
-                self.process_file(to, module_event).await
+                self.process_file(to, module_event, module_run_lock).await
             }
             FileEvent::SchemaChanged(path) => {
                 debug!(path = %path.display(), "processing schema overlay event");
                 self.refresh_schemas();
-                let module_reports = self.run_modules(&ModuleEvent::SchemaChanged);
-                self.index.save()?;
+                // Computed classification is overlay-driven. Revisit every
+                // indexed source before module cleanup so a link-shaped value
+                // that just became (or ceased to be) computed cannot leave a
+                // stale relation/backlink edge behind.
+                let mut indexed_paths: Vec<String> =
+                    self.index.get_file_hashes().into_keys().collect();
+                indexed_paths.sort();
+                for indexed_path in indexed_paths {
+                    if let Ok(file) = crate::parser::parse_markdown_file(
+                        &self.project_root,
+                        Path::new(&indexed_path),
+                    ) {
+                        self.update_file_links(&file);
+                    }
+                }
+                let module_reports =
+                    self.run_modules(&ModuleEvent::SchemaChanged, module_run_lock)?;
                 Ok(EventOutcome {
                     chunks_processed: 0,
                     module_reports,
@@ -373,6 +425,7 @@ impl Watcher {
         &self,
         relative_path: &Path,
         module_event: ModuleEvent,
+        module_run_lock: &crate::modules::ModuleRunLock,
     ) -> Result<EventOutcome> {
         let abs_path = self.project_root.join(relative_path);
 
@@ -385,13 +438,15 @@ impl Watcher {
             self.remove_from_clusters(&relative);
             self.fts_index.remove_file(&relative)?;
             self.refresh_schemas();
-            let module_reports = self.run_modules(&ModuleEvent::FilesChanged {
-                upserted: Vec::new(),
-                removed: vec![relative],
-                renamed: Vec::new(),
-            });
+            let module_reports = self.run_modules(
+                &ModuleEvent::FilesChanged {
+                    upserted: Vec::new(),
+                    removed: vec![relative],
+                    renamed: Vec::new(),
+                },
+                module_run_lock,
+            )?;
             self.fts_index.commit()?;
-            self.index.save()?;
             return Ok(EventOutcome {
                 chunks_processed: 0,
                 module_reports,
@@ -427,8 +482,7 @@ impl Watcher {
                 self.index.refresh_source_metadata(&file)?;
                 self.update_file_links(&file);
                 self.refresh_schemas();
-                let module_reports = self.run_modules(&module_event);
-                self.index.save()?;
+                let module_reports = self.run_modules(&module_event, module_run_lock)?;
                 return Ok(EventOutcome {
                     chunks_processed: 0,
                     module_reports,
@@ -485,9 +539,8 @@ impl Watcher {
         // Keep cluster and topic membership live under watch mode.
         self.update_clusters_for_file(&path_str_fts);
 
-        let module_reports = self.run_modules(&module_event);
+        let module_reports = self.run_modules(&module_event, module_run_lock)?;
         self.fts_index.commit()?;
-        self.index.save()?;
         let chunk_count = chunks.len();
         info!(
             path = %relative_path.display(),
@@ -501,16 +554,41 @@ impl Watcher {
         })
     }
 
-    fn run_modules(&self, event: &ModuleEvent) -> Vec<ModuleReport> {
-        ModuleRunner::builtins().run(&self.project_root, self.index.as_ref(), event)
+    fn run_modules(
+        &self,
+        event: &ModuleEvent,
+        module_run_lock: &crate::modules::ModuleRunLock,
+    ) -> Result<Vec<ModuleReport>> {
+        ModuleRunner::builtins().run_locked(
+            &self.project_root,
+            self.index.as_ref(),
+            event,
+            module_run_lock,
+        )
     }
 
     fn update_file_links(&self, file: &crate::parser::MarkdownFile) {
         let overlay = crate::schema::Schema::load_overlay(&self.project_root).unwrap_or(None);
+        let computed_owners = self
+            .index
+            .get_all_files()
+            .into_iter()
+            .filter_map(|(path, file)| {
+                let fields: std::collections::HashSet<String> = file
+                    .computed_fields
+                    .iter()
+                    .filter(|(field, entry)| file.materialized_field_matches(field, entry))
+                    .map(|(field, _)| field)
+                    .cloned()
+                    .collect();
+                (!fields.is_empty()).then_some((path, fields))
+            })
+            .collect();
         let relation_ctx = crate::relations::RelationContext::new(
             self.index.get_file_hashes().keys().cloned().collect(),
             overlay,
-        );
+        )
+        .with_computed_field_owners(computed_owners);
         let mut graph = self
             .index
             .get_link_graph()

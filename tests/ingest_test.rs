@@ -59,10 +59,10 @@ fn test_config() -> Config {
         search_expand_limit: 3,
         vector_quantization: mdvdb::VectorQuantization::F16,
         index_compression: true,
-            edge_embeddings: true,
-            edge_boost_weight: 0.15,
-            edge_cluster_rebalance: 50,
-            custom_cluster_defs: Vec::new(),
+        edge_embeddings: true,
+        edge_boost_weight: 0.15,
+        edge_cluster_rebalance: 50,
+        custom_cluster_defs: Vec::new(),
     }
 }
 
@@ -148,9 +148,7 @@ async fn test_second_ingest_skips_unchanged() {
 
 #[tokio::test]
 async fn test_modified_files_re_embedded() {
-    let (dir, idx_path) = setup_project(&[
-        ("doc.md", "# Doc\n\nOriginal content."),
-    ]);
+    let (dir, idx_path) = setup_project(&[("doc.md", "# Doc\n\nOriginal content.")]);
 
     let config = test_config();
     let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
@@ -163,7 +161,11 @@ async fn test_modified_files_re_embedded() {
     assert_eq!(r1.files_ingested, 1);
 
     // Modify the file
-    fs::write(dir.path().join("doc.md"), "# Doc\n\nModified content with more text.").unwrap();
+    fs::write(
+        dir.path().join("doc.md"),
+        "# Doc\n\nModified content with more text.",
+    )
+    .unwrap();
 
     // Second ingest — should re-embed
     let r2 = ingest_full(dir.path(), &config, &index, &provider, 512, 50, 100)
@@ -235,9 +237,7 @@ async fn test_ingest_result_counts_accurate() {
 
 #[tokio::test]
 async fn test_single_file_ingest() {
-    let (dir, idx_path) = setup_project(&[
-        ("solo.md", "# Solo\n\nSolo file content for testing."),
-    ]);
+    let (dir, idx_path) = setup_project(&[("solo.md", "# Solo\n\nSolo file content for testing.")]);
 
     let index = Index::create(&idx_path, &test_embedding_config()).unwrap();
     let provider = MockProvider::new(DIMS);

@@ -250,8 +250,7 @@ shards:
     let mut cache: serde_json::Value =
         serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
     cache["corpus_fingerprint"] = serde_json::Value::String("stale-corpus".to_string());
-    cache["topic_corpus_fingerprint"] =
-        serde_json::Value::String("stale-topic-corpus".to_string());
+    cache["topic_corpus_fingerprint"] = serde_json::Value::String("stale-topic-corpus".to_string());
     fs::write(&cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
     let reassigned = vdb.graph_data_for_shard("docs", None).unwrap();
     assert_eq!(
@@ -261,10 +260,7 @@ shards:
     let repaired: serde_json::Value =
         serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
     assert_ne!(repaired["corpus_fingerprint"], "stale-corpus");
-    assert_ne!(
-        repaired["topic_corpus_fingerprint"],
-        "stale-topic-corpus"
-    );
+    assert_ne!(repaired["topic_corpus_fingerprint"], "stale-topic-corpus");
 
     // Editing a local definition invalidates only local Topic analysis. A
     // read reports needs_ingest and must not invoke a provider or mutate the
@@ -322,9 +318,7 @@ async fn collection_topic_centroids_never_bootstrap_new_local_topics() {
     // This definition happens to equal the collection Topic, but it was
     // created after ingest. It remains needs_ingest instead of borrowing the
     // collection centroid.
-    ShardStore::new(root)
-        .add_topic("docs", definition)
-        .unwrap();
+    ShardStore::new(root).add_topic("docs", definition).unwrap();
     let graph = vdb.graph_data_for_shard("docs", None).unwrap();
     assert_eq!(
         graph.analysis.as_ref().unwrap().topics,
@@ -474,14 +468,8 @@ async fn ingest_preserves_prior_auto_state_until_lazy_recluster() {
     let after_ingest: mdvdb::shard_analysis::ShardAnalysisCache =
         serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
     assert!(after_ingest.clusters.is_some());
-    assert_eq!(
-        after_ingest.cluster_fingerprint,
-        before.cluster_fingerprint
-    );
-    assert_ne!(
-        after_ingest.corpus_fingerprint,
-        before.corpus_fingerprint
-    );
+    assert_eq!(after_ingest.cluster_fingerprint, before.cluster_fingerprint);
+    assert_ne!(after_ingest.corpus_fingerprint, before.corpus_fingerprint);
 
     let recomputed = vdb.graph_data_for_shard("docs", None).unwrap();
     assert_eq!(recomputed.nodes.len(), 4);

@@ -261,7 +261,7 @@ pub fn load_index(path: &Path) -> Result<(IndexMetadata, Index)> {
     let metadata: IndexMetadata =
         rkyv::from_bytes::<IndexMetadata, rkyv::rancor::Error>(meta_bytes)
             .map_err(|_| Error::IndexCorrupted(
-                "index format is incompatible or corrupted — delete .markdownvdb/ and re-ingest".into()
+                "index format is incompatible or corrupted — run an unscoped `mdvdb ingest` to rebuild it (never delete `.markdownvdb/config.yaml`)".into()
             ))?;
 
     // Load HNSW with the correct ScalarKind
@@ -285,9 +285,132 @@ pub fn load_index(path: &Path) -> Result<(IndexMetadata, Index)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::types::EmbeddingConfig;
+    use crate::clustering::{ClusterState, CustomClusterState};
+    use crate::index::types::{
+        ComputedDependencySnapshot, ComputedFieldDiagnostic, EmbeddingConfig, StoredChunk,
+    };
+    use crate::links::LinkGraph;
+    use crate::schema::{Schema, ScopedSchema};
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    /// Exact persisted computed-field shape immediately before
+    /// `materialized_value_json` was added. The storage version deliberately
+    /// remains unchanged, so a valid archive of this type must fail validated
+    /// decoding as the current type and take the normal self-heal path.
+    #[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct PreviousComputedFieldEntry {
+        module: String,
+        definition_fingerprint: String,
+        input_fingerprint: Option<String>,
+        dependency_snapshot: ComputedDependencySnapshot,
+        value_json: Option<String>,
+        diagnostic: Option<ComputedFieldDiagnostic>,
+    }
+
+    #[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct PreviousStoredFile {
+        relative_path: String,
+        content_hash: String,
+        embedding_body_hash: String,
+        frontmatter: Option<String>,
+        file_size: u64,
+        chunk_ids: Vec<String>,
+        indexed_at: u64,
+        computed_fields: HashMap<String, PreviousComputedFieldEntry>,
+    }
+
+    #[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct PreviousIndexMetadata {
+        chunks: HashMap<String, StoredChunk>,
+        files: HashMap<String, PreviousStoredFile>,
+        embedding_config: EmbeddingConfig,
+        last_updated: u64,
+        schema: Option<Schema>,
+        cluster_state: Option<ClusterState>,
+        link_graph: Option<LinkGraph>,
+        file_mtimes: Option<HashMap<String, u64>>,
+        scoped_schemas: Option<Vec<ScopedSchema>>,
+        custom_cluster_state: Option<CustomClusterState>,
+    }
+
+    fn write_previous_layout_index(path: &Path) {
+        let dimensions = 8;
+        let metadata = PreviousIndexMetadata {
+            chunks: HashMap::new(),
+            files: HashMap::from([(
+                "invoice.md".to_string(),
+                PreviousStoredFile {
+                    relative_path: "invoice.md".to_string(),
+                    content_hash: "previous-content-hash".to_string(),
+                    embedding_body_hash: "previous-body-hash".to_string(),
+                    frontmatter: Some(r#"{"total":4}"#.to_string()),
+                    file_size: 32,
+                    chunk_ids: Vec::new(),
+                    indexed_at: 1,
+                    computed_fields: HashMap::from([(
+                        "total".to_string(),
+                        PreviousComputedFieldEntry {
+                            module: "formula".to_string(),
+                            definition_fingerprint: "previous-definition".to_string(),
+                            input_fingerprint: Some("previous-inputs".to_string()),
+                            dependency_snapshot: ComputedDependencySnapshot::default(),
+                            value_json: Some("4".to_string()),
+                            diagnostic: None,
+                        },
+                    )]),
+                },
+            )]),
+            embedding_config: EmbeddingConfig {
+                provider: "Mock".to_string(),
+                model: "previous-layout".to_string(),
+                dimensions,
+            },
+            last_updated: 1,
+            schema: None,
+            cluster_state: None,
+            link_graph: None,
+            file_mtimes: Some(HashMap::from([("invoice.md".to_string(), 1)])),
+            scoped_schemas: None,
+            custom_cluster_state: None,
+        };
+        let meta_bytes =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&metadata).expect("serialize previous layout");
+        let decoded = rkyv::from_bytes::<PreviousIndexMetadata, rkyv::rancor::Error>(&meta_bytes)
+            .expect("previous layout is itself a valid rkyv archive");
+        assert_eq!(
+            decoded.files["invoice.md"].computed_fields["total"]
+                .value_json
+                .as_deref(),
+            Some("4")
+        );
+
+        let hnsw = create_hnsw(dimensions, usearch::ScalarKind::F32).unwrap();
+        hnsw.reserve(10).unwrap();
+        let mut hnsw_bytes = vec![0u8; hnsw.serialized_length()];
+        hnsw.save_to_buffer(&mut hnsw_bytes).unwrap();
+
+        let meta_offset = HEADER_SIZE as u64;
+        let meta_size = meta_bytes.len() as u64;
+        let hnsw_offset = meta_offset + meta_size;
+        let hnsw_size = hnsw_bytes.len() as u64;
+        let mut header = [0u8; HEADER_SIZE];
+        header[..6].copy_from_slice(MAGIC);
+        header[6..10].copy_from_slice(&VERSION.to_le_bytes());
+        header[10..18].copy_from_slice(&meta_offset.to_le_bytes());
+        header[18..26].copy_from_slice(&meta_size.to_le_bytes());
+        header[26..34].copy_from_slice(&hnsw_offset.to_le_bytes());
+        header[34..42].copy_from_slice(&hnsw_size.to_le_bytes());
+        header[42] = QUANT_F32;
+        header[43] = 0;
+        header[44..48].copy_from_slice(&(meta_bytes.len() as u32).to_le_bytes());
+
+        let mut bytes = Vec::with_capacity(HEADER_SIZE + meta_bytes.len() + hnsw_bytes.len());
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&meta_bytes);
+        bytes.extend_from_slice(&hnsw_bytes);
+        fs::write(path, bytes).unwrap();
+    }
 
     fn test_metadata() -> IndexMetadata {
         IndexMetadata {
@@ -430,6 +553,48 @@ mod tests {
     }
 
     #[test]
+    fn valid_previous_rkyv_layout_self_heals_without_a_version_bump() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("previous.idx");
+        write_previous_layout_index(&path);
+
+        let raw = fs::read(&path).unwrap();
+        assert_eq!(u32::from_le_bytes(raw[6..10].try_into().unwrap()), VERSION);
+        assert!(matches!(load_index(&path), Err(Error::IndexCorrupted(_))));
+
+        let config = EmbeddingConfig {
+            provider: "Mock".to_string(),
+            model: "current-layout".to_string(),
+            dimensions: 8,
+        };
+        let (index, rebuilt) = crate::index::state::Index::open_or_create_with_options_report(
+            &path,
+            &config,
+            WriteOptions {
+                quantization: VectorQuantization::F32,
+                compress_metadata: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            rebuilt,
+            "the incompatible current-version archive must self-heal"
+        );
+        assert_eq!(index.status().document_count, 0);
+        drop(index);
+
+        let (metadata, _) = load_index(&path).unwrap();
+        assert!(metadata.files.is_empty());
+        assert_eq!(metadata.embedding_config.model, "current-layout");
+        let healed = fs::read(path).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(healed[6..10].try_into().unwrap()),
+            VERSION,
+            "self-heal must not require an index version bump"
+        );
+    }
+
+    #[test]
     fn write_leaves_no_stray_temp_files() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("index");
@@ -443,7 +608,11 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
             .collect();
-        assert_eq!(entries, vec!["index".to_string()], "temp file must be gone: {entries:?}");
+        assert_eq!(
+            entries,
+            vec!["index".to_string()],
+            "temp file must be gone: {entries:?}"
+        );
     }
 
     #[test]

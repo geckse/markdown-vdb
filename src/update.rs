@@ -6,8 +6,7 @@ use tokio::task::JoinHandle;
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-const GITHUB_API_URL: &str =
-    "https://api.github.com/repos/geckse/markdown-vdb/releases/latest";
+const GITHUB_API_URL: &str = "https://api.github.com/repos/geckse/markdown-vdb/releases/latest";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Spawn a non-blocking background update check.
@@ -21,8 +20,7 @@ fn cache_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".mdvdb").join("last-update-check"))
 }
 
-async fn check_for_update(
-) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+async fn check_for_update() -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
     if std::env::var("MDVDB_NO_UPDATE_CHECK").is_ok() {
         return Ok(None);
     }

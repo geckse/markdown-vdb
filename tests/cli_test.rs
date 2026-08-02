@@ -73,8 +73,8 @@ fn test_status_json_without_index_returns_empty() {
         output.status.code()
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)
-        .expect("status JSON should be valid");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("status JSON should be valid");
     assert_eq!(parsed["document_count"], 0);
     assert_eq!(parsed["chunk_count"], 0);
 }
@@ -154,10 +154,7 @@ fn test_help_shows_all_subcommands() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     for cmd in ["search", "ingest", "status", "init"] {
-        assert!(
-            stdout.contains(cmd),
-            "--help output should mention '{cmd}'"
-        );
+        assert!(stdout.contains(cmd), "--help output should mention '{cmd}'");
     }
 }
 
@@ -222,7 +219,10 @@ fn test_search_json_output_format() {
     // Wrapped format: { results, query, total_results }
     assert!(json["results"].is_array(), "should have 'results' array");
     assert_eq!(json["query"].as_str().unwrap(), "rust programming");
-    assert!(json["total_results"].is_number(), "should have 'total_results'");
+    assert!(
+        json["total_results"].is_number(),
+        "should have 'total_results'"
+    );
 }
 
 #[test]
@@ -235,7 +235,10 @@ fn test_status_json_output_after_ingest() {
         .output()
         .expect("failed to run mdvdb");
 
-    assert!(output.status.success(), "status --json should succeed after ingest");
+    assert!(
+        output.status.success(),
+        "status --json should succeed after ingest"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
@@ -258,13 +261,22 @@ fn test_schema_json_output() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
-    assert!(json["fields"].is_array(), "schema should have 'fields' array");
+    assert!(
+        json["fields"].is_array(),
+        "schema should have 'fields' array"
+    );
     let fields = json["fields"].as_array().unwrap();
     assert!(!fields.is_empty(), "should have inferred schema fields");
 
     let names: Vec<&str> = fields.iter().map(|f| f["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"title"), "schema should contain 'title', got: {names:?}");
-    assert!(names.contains(&"status"), "schema should contain 'status', got: {names:?}");
+    assert!(
+        names.contains(&"title"),
+        "schema should contain 'title', got: {names:?}"
+    );
+    assert!(
+        names.contains(&"status"),
+        "schema should contain 'status', got: {names:?}"
+    );
     let attachments = fields
         .iter()
         .find(|field| field["name"] == "attachments")
@@ -292,8 +304,14 @@ fn test_get_json_output() {
     assert!(json["file_size"].as_u64().unwrap() > 0);
     assert!(!json["content_hash"].as_str().unwrap().is_empty());
     // frontmatter should be present
-    assert!(json["frontmatter"].is_object(), "get --json should include frontmatter");
-    assert_eq!(json["frontmatter"]["title"].as_str().unwrap(), "Hello World");
+    assert!(
+        json["frontmatter"].is_object(),
+        "get --json should include frontmatter"
+    );
+    assert_eq!(
+        json["frontmatter"]["title"].as_str().unwrap(),
+        "Hello World"
+    );
 }
 
 #[test]
@@ -327,7 +345,10 @@ fn test_search_limit_flag() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     let results = json["results"].as_array().unwrap();
-    assert!(results.len() <= 1, "should return at most 1 result with --limit 1");
+    assert!(
+        results.len() <= 1,
+        "should return at most 1 result with --limit 1"
+    );
 }
 
 #[test]
@@ -335,7 +356,13 @@ fn test_search_filter_flag() {
     let dir = setup_and_ingest();
 
     let output = mdvdb_bin()
-        .args(["search", "document", "--filter", "status=published", "--json"])
+        .args([
+            "search",
+            "document",
+            "--filter",
+            "status=published",
+            "--json",
+        ])
         .current_dir(dir.path())
         .output()
         .expect("failed to run mdvdb");
@@ -347,7 +374,10 @@ fn test_search_filter_flag() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
-    assert!(json["results"].is_array(), "filtered search should return results array");
+    assert!(
+        json["results"].is_array(),
+        "filtered search should return results array"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +412,10 @@ fn test_no_color_flag_disables_colors() {
         .output()
         .expect("failed to execute mdvdb");
 
-    assert!(output.status.success(), "status with --no-color should succeed");
+    assert!(
+        output.status.success(),
+        "status with --no-color should succeed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("\x1b["),
@@ -400,7 +433,10 @@ fn test_no_color_env_var() {
         .output()
         .expect("failed to execute mdvdb");
 
-    assert!(output.status.success(), "status with NO_COLOR=1 should succeed");
+    assert!(
+        output.status.success(),
+        "status with NO_COLOR=1 should succeed"
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("\x1b["),
@@ -439,7 +475,10 @@ fn test_clusters_shows_keywords() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Clusters output should include keyword text (the TF-IDF labels).
     assert!(
-        stdout.contains("keyword") || stdout.contains("Keyword") || stdout.contains("document") || stdout.len() > 20,
+        stdout.contains("keyword")
+            || stdout.contains("Keyword")
+            || stdout.contains("document")
+            || stdout.len() > 20,
         "clusters output should include keyword or cluster info, got: {stdout}"
     );
 }
@@ -492,7 +531,8 @@ fn test_ingest_json_unchanged() {
         "ingest --json should not contain ANSI codes, got: {stdout}"
     );
     // Verify it's valid JSON (no ANSI contamination).
-    let _: serde_json::Value = serde_json::from_str(&stdout).expect("ingest --json should be valid JSON");
+    let _: serde_json::Value =
+        serde_json::from_str(&stdout).expect("ingest --json should be valid JSON");
 }
 
 // ---------------------------------------------------------------------------
@@ -559,16 +599,30 @@ fn test_links_json_output() {
         .output()
         .expect("failed to run mdvdb");
 
-    assert!(output.status.success(), "links --json should succeed, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "links --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     assert_eq!(json["file"].as_str().unwrap(), "alpha.md");
     let links = &json["links"];
-    assert!(links["outgoing"].is_array(), "should have 'links.outgoing' array");
+    assert!(
+        links["outgoing"].is_array(),
+        "should have 'links.outgoing' array"
+    );
     let outgoing = links["outgoing"].as_array().unwrap();
-    assert!(outgoing.len() >= 2, "alpha.md should have at least 2 outgoing links, got {}", outgoing.len());
-    assert!(links["incoming"].is_array(), "should have 'links.incoming' array");
+    assert!(
+        outgoing.len() >= 2,
+        "alpha.md should have at least 2 outgoing links, got {}",
+        outgoing.len()
+    );
+    assert!(
+        links["incoming"].is_array(),
+        "should have 'links.incoming' array"
+    );
 }
 
 #[test]
@@ -581,15 +635,25 @@ fn test_backlinks_json_output() {
         .output()
         .expect("failed to run mdvdb");
 
-    assert!(output.status.success(), "backlinks --json should succeed, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "backlinks --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     assert_eq!(json["file"].as_str().unwrap(), "alpha.md");
-    assert!(json["backlinks"].is_array(), "should have 'backlinks' array");
+    assert!(
+        json["backlinks"].is_array(),
+        "should have 'backlinks' array"
+    );
     // beta.md links to alpha.md, so alpha should have backlinks
     let backlinks = json["backlinks"].as_array().unwrap();
-    assert!(!backlinks.is_empty(), "alpha.md should have backlinks from beta.md");
+    assert!(
+        !backlinks.is_empty(),
+        "alpha.md should have backlinks from beta.md"
+    );
 }
 
 #[test]
@@ -602,7 +666,11 @@ fn test_orphans_json_output() {
         .output()
         .expect("failed to run mdvdb");
 
-    assert!(output.status.success(), "orphans --json should succeed, stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "orphans --json should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
@@ -610,7 +678,10 @@ fn test_orphans_json_output() {
     assert!(json["orphans"].is_array(), "should have 'orphans' array");
     let orphans = json["orphans"].as_array().unwrap();
     let paths: Vec<&str> = orphans.iter().filter_map(|o| o["path"].as_str()).collect();
-    assert!(paths.contains(&"orphan.md"), "orphan.md should be in orphans list, got: {paths:?}");
+    assert!(
+        paths.contains(&"orphan.md"),
+        "orphan.md should be in orphans list, got: {paths:?}"
+    );
 }
 
 #[test]
@@ -624,7 +695,10 @@ fn test_links_nonexistent_file() {
         .expect("failed to run mdvdb");
 
     // The command should fail with an error for a nonexistent file
-    assert!(!output.status.success(), "links should fail for nonexistent file");
+    assert!(
+        !output.status.success(),
+        "links should fail for nonexistent file"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("not in index") || stderr.contains("nonexistent.md"),
@@ -669,7 +743,8 @@ fn test_status_json_unchanged() {
         "status --json should not contain ANSI codes, got: {stdout}"
     );
     // Verify it's valid JSON.
-    let _: serde_json::Value = serde_json::from_str(&stdout).expect("status --json should be valid JSON");
+    let _: serde_json::Value =
+        serde_json::from_str(&stdout).expect("status --json should be valid JSON");
 }
 
 // ---------------------------------------------------------------------------
@@ -940,8 +1015,14 @@ fn test_config_json_output() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
-    assert!(json["embedding_model"].is_string(), "should have embedding_model field");
-    assert!(json["embedding_dimensions"].is_number(), "should have embedding_dimensions field");
+    assert!(
+        json["embedding_model"].is_string(),
+        "should have embedding_model field"
+    );
+    assert!(
+        json["embedding_dimensions"].is_number(),
+        "should have embedding_dimensions field"
+    );
 }
 
 #[test]
@@ -969,7 +1050,10 @@ fn test_config_human_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Configuration"), "should contain Configuration header");
+    assert!(
+        stdout.contains("Configuration"),
+        "should contain Configuration header"
+    );
     assert!(stdout.contains("Provider"), "should show provider");
 }
 
@@ -1013,7 +1097,10 @@ fn test_doctor_human_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("mdvdb doctor"), "should contain doctor header");
+    assert!(
+        stdout.contains("mdvdb doctor"),
+        "should contain doctor header"
+    );
     assert!(stdout.contains("checks passed"), "should show pass count");
 }
 
@@ -1028,10 +1115,7 @@ fn test_help_shows_new_subcommands() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     for cmd in ["config", "doctor"] {
-        assert!(
-            stdout.contains(cmd),
-            "--help should mention '{cmd}'"
-        );
+        assert!(stdout.contains(cmd), "--help should mention '{cmd}'");
     }
 }
 
@@ -1345,7 +1429,11 @@ fn test_cli_info_scoped_json() {
     fs::write(root.join("sub/a.md"), "# A\n\nInside A.\n").unwrap();
     fs::write(root.join("sub/b.md"), "# B\n\nInside B.\n").unwrap();
 
-    let ingest = mdvdb_bin().arg("ingest").current_dir(root).output().unwrap();
+    let ingest = mdvdb_bin()
+        .arg("ingest")
+        .current_dir(root)
+        .output()
+        .unwrap();
     assert!(
         ingest.status.success(),
         "ingest should succeed, stderr: {}",
@@ -1480,7 +1568,14 @@ fn test_search_decay_half_life_flag_accepted() {
     let dir = setup_and_ingest();
 
     let output = mdvdb_bin()
-        .args(["search", "test", "--decay", "--decay-half-life", "30", "--json"])
+        .args([
+            "search",
+            "test",
+            "--decay",
+            "--decay-half-life",
+            "30",
+            "--json",
+        ])
         .current_dir(dir.path())
         .output()
         .expect("failed to run mdvdb");
@@ -1522,7 +1617,9 @@ fn test_search_json_includes_modified_at() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
-    let results = json["results"].as_array().expect("should have results array");
+    let results = json["results"]
+        .as_array()
+        .expect("should have results array");
     assert!(!results.is_empty(), "should have search results");
     // Check that modified_at is present in the file metadata.
     for result in results {
@@ -1567,9 +1664,18 @@ fn test_completions_include_decay_flags() {
         .output()
         .expect("failed to execute mdvdb");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--decay"), "bash completions should include --decay");
-    assert!(stdout.contains("--no-decay"), "bash completions should include --no-decay");
-    assert!(stdout.contains("--decay-half-life"), "bash completions should include --decay-half-life");
+    assert!(
+        stdout.contains("--decay"),
+        "bash completions should include --decay"
+    );
+    assert!(
+        stdout.contains("--no-decay"),
+        "bash completions should include --no-decay"
+    );
+    assert!(
+        stdout.contains("--decay-half-life"),
+        "bash completions should include --decay-half-life"
+    );
 
     // Zsh completions
     let output = mdvdb_bin()
@@ -1577,7 +1683,10 @@ fn test_completions_include_decay_flags() {
         .output()
         .expect("failed to execute mdvdb");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--decay"), "zsh completions should include --decay");
+    assert!(
+        stdout.contains("--decay"),
+        "zsh completions should include --decay"
+    );
 
     // Fish completions
     let output = mdvdb_bin()
@@ -1585,7 +1694,10 @@ fn test_completions_include_decay_flags() {
         .output()
         .expect("failed to execute mdvdb");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("decay"), "fish completions should include decay");
+    assert!(
+        stdout.contains("decay"),
+        "fish completions should include decay"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1668,8 +1780,14 @@ fn test_graph_compact_json_interns_contexts_and_preserves_data() {
     assert_eq!(compact["format"], "mdvdb.graph.compact");
     assert_eq!(compact["version"], 1);
     assert_eq!(compact["level"], "document");
-    assert_eq!(compact["nodes"].as_array().unwrap().len(), regular["nodes"].as_array().unwrap().len());
-    assert_eq!(compact["edges"].as_array().unwrap().len(), regular["edges"].as_array().unwrap().len());
+    assert_eq!(
+        compact["nodes"].as_array().unwrap().len(),
+        regular["nodes"].as_array().unwrap().len()
+    );
+    assert_eq!(
+        compact["edges"].as_array().unwrap().len(),
+        regular["edges"].as_array().unwrap().len()
+    );
 
     let contexts = compact["contexts"]
         .as_array()
@@ -1727,9 +1845,15 @@ fn test_graph_compact_requires_json() {
         .output()
         .expect("failed to run mdvdb");
 
-    assert!(!output.status.success(), "--compact without --json must fail");
+    assert!(
+        !output.status.success(),
+        "--compact without --json must fail"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--json"), "error should explain the requirement: {stderr}");
+    assert!(
+        stderr.contains("--json"),
+        "error should explain the requirement: {stderr}"
+    );
 }
 
 #[test]
@@ -2070,11 +2194,22 @@ fn test_clusters_add_and_list() {
 
     // Add a cluster
     let output = mdvdb_bin()
-        .args(["clusters", "add", "AI Research", "--seeds", "machine learning,neural networks", "--root"])
+        .args([
+            "clusters",
+            "add",
+            "AI Research",
+            "--seeds",
+            "machine learning,neural networks",
+            "--root",
+        ])
         .arg(root)
         .output()
         .expect("failed to run");
-    assert!(output.status.success(), "clusters add failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "clusters add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // List should show it
     let output = mdvdb_bin()
@@ -2137,7 +2272,14 @@ fn test_clusters_add_rejects_invalid_seeds() {
 
     // Seed with pipe
     let output = mdvdb_bin()
-        .args(["clusters", "add", "Test", "--seeds", "good,bad|seed", "--root"])
+        .args([
+            "clusters",
+            "add",
+            "Test",
+            "--seeds",
+            "good,bad|seed",
+            "--root",
+        ])
         .arg(root)
         .output()
         .expect("failed to run");
@@ -2162,7 +2304,11 @@ fn test_clusters_remove() {
         .arg(root)
         .output()
         .expect("failed to run");
-    assert!(output.status.success(), "remove failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "remove failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // List should only show B
     let output = mdvdb_bin()
@@ -2220,7 +2366,11 @@ fn test_clusters_custom_json_after_ingest() {
         .arg(root)
         .output()
         .expect("failed to run");
-    assert!(output.status.success(), "ingest failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "ingest failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Custom clusters JSON
     let output = mdvdb_bin()
@@ -2228,7 +2378,11 @@ fn test_clusters_custom_json_after_ingest() {
         .arg(root)
         .output()
         .expect("failed to run");
-    assert!(output.status.success(), "clusters --custom failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "clusters --custom failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let parsed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let arr = parsed.as_array().unwrap();
@@ -2360,19 +2514,27 @@ fn test_collection_golden_json_contract() {
     assert!(!json["recursive"].as_bool().unwrap());
     assert!(json["columns"].is_array(), "columns must be an array");
     assert!(json["rows"].is_array(), "rows must be an array");
-    assert!(json["total_rows"].is_number(), "total_rows must be a number");
+    assert!(
+        json["total_rows"].is_number(),
+        "total_rows must be a number"
+    );
     assert_eq!(json["limit"].as_u64().unwrap(), 10, "limit echoed when set");
     assert_eq!(json["offset"].as_u64().unwrap(), 0);
 
     // Columns: name (NOT key), field_type PascalCase, in_schema bool, etc.
     let columns = json["columns"].as_array().unwrap();
     assert!(!columns.is_empty(), "should have columns");
-    let allowed_types = ["String", "Number", "Boolean", "List", "Date", "Mixed", "Relation"];
+    let allowed_types = [
+        "String", "Number", "Boolean", "List", "Date", "Mixed", "Relation",
+    ];
     for col in columns {
         assert!(col["name"].is_string(), "column must have string 'name'");
         assert!(col.get("key").is_none(), "column uses 'name', not 'key'");
         let ft = col["field_type"].as_str().expect("field_type is a string");
-        assert!(allowed_types.contains(&ft), "field_type '{ft}' must be PascalCase enum");
+        assert!(
+            allowed_types.contains(&ft),
+            "field_type '{ft}' must be PascalCase enum"
+        );
         assert!(col["occurrence_count"].is_number());
         assert!(col["sample_values"].is_array());
         assert!(col["in_schema"].is_boolean());
@@ -2400,15 +2562,24 @@ fn test_collection_golden_json_contract() {
         let title = row["title"].as_str().expect("title is a string");
         assert!(!title.is_empty(), "title must never be empty");
         let ts = row["title_source"].as_str().unwrap();
-        assert!(valid_title_sources.contains(&ts), "title_source '{ts}' invalid");
-        assert!(row["frontmatter"].is_object(), "frontmatter must be an object, never null");
+        assert!(
+            valid_title_sources.contains(&ts),
+            "title_source '{ts}' invalid"
+        );
+        assert!(
+            row["frontmatter"].is_object(),
+            "frontmatter must be an object, never null"
+        );
         assert!(row["file_size"].is_number());
         // content_hash / indexed_at are string|null; modified_at is number|null.
         assert!(row["content_hash"].is_string() || row["content_hash"].is_null());
         assert!(row["indexed_at"].is_number() || row["indexed_at"].is_null());
         assert!(row["modified_at"].is_number() || row["modified_at"].is_null());
         let state = row["state"].as_str().unwrap();
-        assert!(valid_states.contains(&state), "state '{state}' must be lowercase enum");
+        assert!(
+            valid_states.contains(&state),
+            "state '{state}' must be lowercase enum"
+        );
     }
 
     // A plain (no-frontmatter) file yields {} and a filename-derived title.
@@ -2470,7 +2641,10 @@ fn test_collection_recursive_cli() {
         .iter()
         .map(|r| r["path"].as_str().unwrap())
         .collect();
-    assert!(r_paths.contains(&"blog/2024/nested.md"), "recursive includes nested, got {r_paths:?}");
+    assert!(
+        r_paths.contains(&"blog/2024/nested.md"),
+        "recursive includes nested, got {r_paths:?}"
+    );
 }
 
 #[test]
@@ -2478,16 +2652,31 @@ fn test_collection_sort_and_order_cli() {
     let dir = setup_collection_cli();
 
     let output = mdvdb_bin()
-        .args(["collection", "blog", "--sort", "status", "--order", "desc", "--json"])
+        .args([
+            "collection",
+            "blog",
+            "--sort",
+            "status",
+            "--order",
+            "desc",
+            "--json",
+        ])
         .current_dir(dir.path())
         .output()
         .expect("failed to run mdvdb");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let rows = json["rows"].as_array().unwrap();
     // Descending by status → "published" rows come before "draft".
     let first_status = rows[0]["frontmatter"]["status"].as_str().unwrap();
-    assert_eq!(first_status, "published", "desc status puts published first");
+    assert_eq!(
+        first_status, "published",
+        "desc status puts published first"
+    );
 }
 
 #[test]
@@ -2497,7 +2686,13 @@ fn test_collection_filter_cli_repeatable() {
     // Single filter: published direct children = launch + published2.
     let one: serde_json::Value = serde_json::from_slice(
         &mdvdb_bin()
-            .args(["collection", "blog", "--filter", "status=published", "--json"])
+            .args([
+                "collection",
+                "blog",
+                "--filter",
+                "status=published",
+                "--json",
+            ])
             .current_dir(dir.path())
             .output()
             .unwrap()
@@ -2524,8 +2719,15 @@ fn test_collection_filter_cli_repeatable() {
             .stdout,
     )
     .unwrap();
-    assert_eq!(two["total_rows"].as_u64().unwrap(), 1, "repeated --filter must AND");
-    assert_eq!(two["rows"][0]["path"].as_str().unwrap(), "blog/published2.md");
+    assert_eq!(
+        two["total_rows"].as_u64().unwrap(),
+        1,
+        "repeated --filter must AND"
+    );
+    assert_eq!(
+        two["rows"][0]["path"].as_str().unwrap(),
+        "blog/published2.md"
+    );
 }
 
 #[test]
@@ -2533,7 +2735,15 @@ fn test_collection_limit_offset_cli() {
     let dir = setup_collection_cli();
 
     let output = mdvdb_bin()
-        .args(["collection", "blog", "--limit", "1", "--offset", "1", "--json"])
+        .args([
+            "collection",
+            "blog",
+            "--limit",
+            "1",
+            "--offset",
+            "1",
+            "--json",
+        ])
         .current_dir(dir.path())
         .output()
         .expect("failed to run mdvdb");
@@ -2542,7 +2752,11 @@ fn test_collection_limit_offset_cli() {
 
     assert_eq!(json["limit"].as_u64().unwrap(), 1);
     assert_eq!(json["offset"].as_u64().unwrap(), 1);
-    assert_eq!(json["rows"].as_array().unwrap().len(), 1, "page size = limit");
+    assert_eq!(
+        json["rows"].as_array().unwrap().len(),
+        1,
+        "page size = limit"
+    );
     // total_rows independent of pagination (4 direct children).
     assert_eq!(json["total_rows"].as_u64().unwrap(), 4);
 }
@@ -2572,7 +2786,10 @@ fn test_collection_human_output_cli() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Collection"), "human output has a header");
-    assert!(stdout.contains("Showing"), "human output has a pagination footer");
+    assert!(
+        stdout.contains("Showing"),
+        "human output has a pagination footer"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2587,8 +2804,11 @@ fn test_clusters_add_description_only() {
 
     let output = mdvdb_bin()
         .args([
-            "clusters", "add", "Rust",
-            "--description", "Notes about Rust programming and cargo",
+            "clusters",
+            "add",
+            "Rust",
+            "--description",
+            "Notes about Rust programming and cargo",
             "--root",
         ])
         .arg(root)
@@ -2609,7 +2829,10 @@ fn test_clusters_add_description_only() {
     let arr = parsed.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["name"], "Rust");
-    assert_eq!(arr[0]["description"], "Notes about Rust programming and cargo");
+    assert_eq!(
+        arr[0]["description"],
+        "Notes about Rust programming and cargo"
+    );
     // Seed-less topic: seeds serialize as an empty array.
     assert!(arr[0]["seeds"].as_array().unwrap().is_empty());
 }
@@ -2627,7 +2850,10 @@ fn test_clusters_add_rejects_empty_definition() {
         .expect("failed to run");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--seeds or --description"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("--seeds or --description"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -2638,7 +2864,14 @@ fn test_clusters_add_rejects_bad_threshold() {
 
     let output = mdvdb_bin()
         .args([
-            "clusters", "add", "Bad", "--seeds", "x", "--threshold", "1.5", "--root",
+            "clusters",
+            "add",
+            "Bad",
+            "--seeds",
+            "x",
+            "--threshold",
+            "1.5",
+            "--root",
         ])
         .arg(root)
         .output()
@@ -2662,11 +2895,17 @@ fn test_clusters_update_edits_and_renames() {
 
     let output = mdvdb_bin()
         .args([
-            "clusters", "update", "Old",
-            "--seeds", "c,d",
-            "--description", "updated desc",
-            "--threshold", "0.4",
-            "--rename", "New",
+            "clusters",
+            "update",
+            "Old",
+            "--seeds",
+            "c,d",
+            "--description",
+            "updated desc",
+            "--threshold",
+            "0.4",
+            "--rename",
+            "New",
             "--root",
         ])
         .arg(root)
@@ -2758,7 +2997,11 @@ fn test_config_set_writes_yaml() {
     // Numbers parse as numbers.
     let output = mdvdb_bin()
         .args([
-            "config", "set", "clustering.topics.min_similarity", "0.45", "--root",
+            "config",
+            "set",
+            "clustering.topics.min_similarity",
+            "0.45",
+            "--root",
         ])
         .arg(root)
         .output()
@@ -2853,8 +3096,13 @@ fn test_get_populate_golden_json_contract() {
         serde_json::from_slice(&output.stdout).expect("should be valid JSON");
 
     // Both populate keys present; relations map keyed by field name.
-    let relations = json["relations"].as_object().expect("relations is an object");
-    assert!(json["referenced_by"].is_array(), "referenced_by is an array");
+    let relations = json["relations"]
+        .as_object()
+        .expect("relations is an object");
+    assert!(
+        json["referenced_by"].is_array(),
+        "referenced_by is an array"
+    );
     let clients = relations["clients"].as_array().expect("values are arrays");
 
     // Array order + duplicates preserved; non-link element skipped.
@@ -2918,8 +3166,14 @@ fn test_get_populate_keys_absent_without_flag() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let obj = json.as_object().unwrap();
-    assert!(!obj.contains_key("relations"), "relations absent without --populate");
-    assert!(!obj.contains_key("referenced_by"), "referenced_by absent without --populate");
+    assert!(
+        !obj.contains_key("relations"),
+        "relations absent without --populate"
+    );
+    assert!(
+        !obj.contains_key("referenced_by"),
+        "referenced_by absent without --populate"
+    );
 
     // referenced_by shape on the target side.
     let output = mdvdb_bin()
@@ -2929,7 +3183,11 @@ fn test_get_populate_keys_absent_without_flag() {
         .expect("failed to run mdvdb");
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["relations"], serde_json::json!({}), "no link-shaped fields → empty map");
+    assert_eq!(
+        json["relations"],
+        serde_json::json!({}),
+        "no link-shaped fields → empty map"
+    );
     let referenced_by = json["referenced_by"].as_array().unwrap();
     assert!(!referenced_by.is_empty());
     for entry in referenced_by {
@@ -2994,7 +3252,10 @@ fn test_collection_populate_golden_json() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let rows = json["rows"].as_array().unwrap();
     let i1 = rows.iter().find(|r| r["path"] == "invoices/i1.md").unwrap();
-    assert_eq!(i1["frontmatter"]["client"], "[[clients/acme]]", "raw frontmatter untouched");
+    assert_eq!(
+        i1["frontmatter"]["client"], "[[clients/acme]]",
+        "raw frontmatter untouched"
+    );
     assert_eq!(i1["relations"]["client"][0]["path"], "clients/acme.md");
     assert_eq!(i1["relations"]["client"][0]["title"], "Acme Corp");
 
@@ -3019,7 +3280,13 @@ fn test_search_populate_golden_json() {
     let dir = setup_relations_cli();
 
     let output = mdvdb_bin()
-        .args(["search", "Invoice body about Acme", "--lexical", "--populate", "--json"])
+        .args([
+            "search",
+            "Invoice body about Acme",
+            "--lexical",
+            "--populate",
+            "--json",
+        ])
         .current_dir(dir.path())
         .output()
         .expect("failed to run mdvdb");
@@ -3031,7 +3298,10 @@ fn test_search_populate_golden_json() {
         .iter()
         .find(|r| r["file"]["path"] == "invoices/i1.md")
         .expect("i1 should match");
-    assert_eq!(i1["file"]["relations"]["client"][0]["path"], "clients/acme.md");
+    assert_eq!(
+        i1["file"]["relations"]["client"][0]["path"],
+        "clients/acme.md"
+    );
 }
 
 /// Golden test: links/backlinks/graph JSON pin the always-present `field` key
@@ -3054,10 +3324,16 @@ fn test_links_and_graph_field_golden_json() {
         .filter(|l| l["entry"]["target"] == "clients/acme.md")
         .collect();
     assert_eq!(to_acme.len(), 2, "body + relation edges: {outgoing:?}");
-    let relation = to_acme.iter().find(|l| !l["entry"]["field"].is_null()).unwrap();
+    let relation = to_acme
+        .iter()
+        .find(|l| !l["entry"]["field"].is_null())
+        .unwrap();
     assert_eq!(relation["entry"]["field"], "client");
     assert_eq!(relation["entry"]["line_number"], 0, "frontmatter sentinel");
-    let body = to_acme.iter().find(|l| l["entry"]["field"].is_null()).unwrap();
+    let body = to_acme
+        .iter()
+        .find(|l| l["entry"]["field"].is_null())
+        .unwrap();
     assert!(body["entry"]["line_number"].as_u64().unwrap() > 0);
     for link in outgoing {
         assert!(
@@ -3104,7 +3380,11 @@ fn test_links_and_graph_field_golden_json() {
 fn test_relation_filter_cli() {
     let dir = setup_relations_cli();
 
-    for filter in ["client=clients/acme", "client=clients/acme.md", "client=[[clients/acme]]"] {
+    for filter in [
+        "client=clients/acme",
+        "client=clients/acme.md",
+        "client=[[clients/acme]]",
+    ] {
         let output = mdvdb_bin()
             .args(["collection", "invoices", "--filter", filter, "--json"])
             .current_dir(dir.path())
@@ -3118,11 +3398,22 @@ fn test_relation_filter_cli() {
             .iter()
             .map(|r| r["path"].as_str().unwrap())
             .collect();
-        assert_eq!(paths, vec!["invoices/i1.md"], "filter {filter} should match only i1");
+        assert_eq!(
+            paths,
+            vec!["invoices/i1.md"],
+            "filter {filter} should match only i1"
+        );
     }
 
     let output = mdvdb_bin()
-        .args(["search", "Invoice", "--lexical", "--filter", "client=clients/acme", "--json"])
+        .args([
+            "search",
+            "Invoice",
+            "--lexical",
+            "--filter",
+            "client=clients/acme",
+            "--json",
+        ])
         .current_dir(dir.path())
         .output()
         .expect("failed to run mdvdb");

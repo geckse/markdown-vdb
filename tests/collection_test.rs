@@ -458,6 +458,43 @@ fn test_collection_pagination_total_rows() {
 }
 
 #[test]
+fn test_collection_zero_limit_keeps_complete_scoped_columns() {
+    let dir = setup_collection_vault();
+    let vdb = open(&dir);
+
+    let response = vdb
+        .collection(CollectionQuery {
+            path: "blog".into(),
+            recursive: true,
+            limit: Some(0),
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert!(
+        response.rows.is_empty(),
+        "limit zero transfers no row payload"
+    );
+    assert_eq!(response.total_rows, 6);
+    for blog_field in ["date", "status", "tags", "title"] {
+        assert!(
+            response
+                .columns
+                .iter()
+                .any(|column| column.name == blog_field),
+            "column discovery must run over the complete scoped row set before pagination: {blog_field}"
+        );
+    }
+    assert!(
+        response
+            .columns
+            .iter()
+            .all(|column| column.name != "version"),
+        "the sibling docs schema must not leak into the blog scope"
+    );
+}
+
+#[test]
 fn test_collection_frontmatter_always_object() {
     let dir = setup_collection_vault();
     let vdb = open(&dir);

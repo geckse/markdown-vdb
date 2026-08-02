@@ -57,9 +57,7 @@ pub(crate) fn build_knn_graph(vectors: &BTreeMap<String, Vec<f32>>, k: usize) ->
     let n = node_paths.len();
 
     if n > KNN_BRUTE_FORCE_WARN_THRESHOLD {
-        warn!(
-            "build_knn_graph: {n} documents — exact k-NN build is O(n²) and may take a while"
-        );
+        warn!("build_knn_graph: {n} documents — exact k-NN build is O(n²) and may take a while");
     }
 
     let k = k.min(n.saturating_sub(1));
@@ -90,10 +88,7 @@ pub(crate) fn build_knn_graph(vectors: &BTreeMap<String, Vec<f32>>, k: usize) ->
 
     KnnGraph {
         node_paths,
-        edges: edge_map
-            .into_iter()
-            .map(|((u, v), w)| (u, v, w))
-            .collect(),
+        edges: edge_map.into_iter().map(|((u, v), w)| (u, v, w)).collect(),
     }
 }
 

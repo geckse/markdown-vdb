@@ -44,6 +44,7 @@ colored = "2"
 regex = "1"
 unsafe-libyaml = "0.2"
 rust_decimal = { version = "1", features = ["maths", "serde-with-arbitrary-precision"] }
+rustix = { version = "0.38", features = ["fs"] }
 oxc_allocator = "0.139"
 oxc_ast = { version = "0.139", features = ["serialize"] }
 oxc_parser = "0.139"

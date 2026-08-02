@@ -261,7 +261,9 @@ fn test_search_returns_correct_result() {
 
     // Use a known vector
     let known_vec = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-    index.upsert(&file, &chunks, std::slice::from_ref(&known_vec)).unwrap();
+    index
+        .upsert(&file, &chunks, std::slice::from_ref(&known_vec))
+        .unwrap();
 
     // Search with the same vector — should find it
     let results = index.search(&known_vec, 1).unwrap();
@@ -498,7 +500,11 @@ fn test_hnsw_key_compaction_on_save() {
     // Search should work correctly after compaction
     let query = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let results = reopened.search(&query, 7).unwrap();
-    assert_eq!(results.len(), 7, "search should find all chunks after key compaction");
+    assert_eq!(
+        results.len(),
+        7,
+        "search should find all chunks after key compaction"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -616,11 +622,16 @@ fn test_upsert_normalizes_backslash_paths() {
         chunk_index: 0,
         is_sub_split: false,
     }];
-    index.upsert(&file, &chunks, &fake_embeddings(1, 8)).unwrap();
+    index
+        .upsert(&file, &chunks, &fake_embeddings(1, 8))
+        .unwrap();
 
     // Stored keys and stored strings must use forward slashes.
     let stored = index.get_file("docs/note.md");
-    assert!(stored.is_some(), "file must be keyed by slash-separated path");
+    assert!(
+        stored.is_some(),
+        "file must be keyed by slash-separated path"
+    );
     assert_eq!(stored.unwrap().relative_path, "docs/note.md");
     assert!(index.get_file(r"docs\note.md").is_none());
 

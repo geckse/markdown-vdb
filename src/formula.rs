@@ -294,6 +294,36 @@ impl FormulaEngine {
         Ok(())
     }
 
+    /// Validate a Rollup expression whose only external input is the reserved
+    /// `values` array. Rollup never supplies arbitrary row fields, so accepting
+    /// another unresolved identifier here would defer an authoring error until
+    /// materialization.
+    pub fn validate_rollup(
+        &self,
+        formula: &str,
+        result_type: FormulaResultType,
+    ) -> Result<(), FormulaDiagnostic> {
+        let parsed = parse_formula("__validation__", formula, &self.limits)?;
+        if let Some(dependency) = parsed
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.as_str() != "values")
+        {
+            return Err(FormulaDiagnostic::new(
+                "__validation__",
+                "unknown_identifier",
+                format!(
+                    "unknown Rollup field or variable `{dependency}`; only `values` is available"
+                ),
+                None,
+            ));
+        }
+        if parsed.dependencies.is_empty() {
+            return self.validate(formula, result_type);
+        }
+        Ok(())
+    }
+
     pub fn compile(
         &self,
         definitions: impl IntoIterator<Item = FormulaDefinition>,
@@ -471,6 +501,14 @@ impl FormulaProgram {
 
     pub fn definitions(&self) -> impl Iterator<Item = &FormulaDefinition> {
         self.formulas.iter().map(|formula| &formula.definition)
+    }
+
+    pub(crate) fn dependencies_for(&self, field: &str) -> Option<&BTreeSet<String>> {
+        self.formulas
+            .iter()
+            .find(|formula| formula.definition.name == field)
+            .and_then(|formula| formula.parsed.as_ref())
+            .map(|parsed| &parsed.dependencies)
     }
 
     pub fn fingerprint(&self) -> &str {
@@ -4424,7 +4462,10 @@ mod tests {
             json!({"price": 3, "result": 99}),
         );
         assert!(result.errors.is_empty());
-        assert_eq!(result.values["result"], FormulaValue::Number(Decimal::from(6)));
+        assert_eq!(
+            result.values["result"],
+            FormulaValue::Number(Decimal::from(6))
+        );
     }
 
     #[test]

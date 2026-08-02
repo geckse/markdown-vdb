@@ -50,10 +50,10 @@ fn mock_config() -> Config {
         search_expand_limit: 3,
         vector_quantization: mdvdb::VectorQuantization::F16,
         index_compression: true,
-            edge_embeddings: true,
-            edge_boost_weight: 0.15,
-            edge_cluster_rebalance: 50,
-            custom_cluster_defs: Vec::new(),
+        edge_embeddings: true,
+        edge_boost_weight: 0.15,
+        edge_cluster_rebalance: 50,
+        custom_cluster_defs: Vec::new(),
     }
 }
 
@@ -92,7 +92,11 @@ async fn test_links_after_ingest() {
     let result = vdb.links("a.md").unwrap();
     assert_eq!(result.outgoing.len(), 2, "A should have 2 outgoing links");
 
-    let targets: Vec<&str> = result.outgoing.iter().map(|r| r.entry.target.as_str()).collect();
+    let targets: Vec<&str> = result
+        .outgoing
+        .iter()
+        .map(|r| r.entry.target.as_str())
+        .collect();
     assert!(targets.contains(&"b.md"));
     assert!(targets.contains(&"c.md"));
 }
@@ -149,9 +153,15 @@ async fn test_orphans() {
 
     let orphans = vdb.orphans().unwrap();
     let orphan_paths: Vec<&str> = orphans.iter().map(|o| o.path.as_str()).collect();
-    assert!(orphan_paths.contains(&"c.md"), "C should be an orphan, got: {orphan_paths:?}");
+    assert!(
+        orphan_paths.contains(&"c.md"),
+        "C should be an orphan, got: {orphan_paths:?}"
+    );
     assert!(!orphan_paths.contains(&"a.md"), "A should not be an orphan");
-    assert!(!orphan_paths.contains(&"b.md"), "B should not be an orphan (has incoming)");
+    assert!(
+        !orphan_paths.contains(&"b.md"),
+        "B should not be an orphan (has incoming)"
+    );
 }
 
 #[tokio::test]
@@ -159,11 +169,7 @@ async fn test_wikilinks() {
     let dir = setup_dir();
     let root = dir.path();
 
-    fs::write(
-        root.join("a.md"),
-        "# A\n\nLink to [[page-name]].\n",
-    )
-    .unwrap();
+    fs::write(root.join("a.md"), "# A\n\nLink to [[page-name]].\n").unwrap();
     fs::write(root.join("page-name.md"), "# Page Name\n\nContent.\n").unwrap();
 
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
@@ -195,7 +201,11 @@ async fn test_link_graph_persistence() {
     // Reopen and verify links are still available
     let vdb2 = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
     let result = vdb2.links("a.md").unwrap();
-    assert_eq!(result.outgoing.len(), 1, "link graph should persist across reopen");
+    assert_eq!(
+        result.outgoing.len(),
+        1,
+        "link graph should persist across reopen"
+    );
     assert_eq!(result.outgoing[0].entry.target, "b.md");
 }
 
@@ -229,7 +239,10 @@ async fn test_incremental_link_update() {
 
     let result = vdb.links("a.md").unwrap();
     assert_eq!(result.outgoing.len(), 1, "should have 1 link after update");
-    assert_eq!(result.outgoing[0].entry.target, "c.md", "link should point to c.md now");
+    assert_eq!(
+        result.outgoing[0].entry.target, "c.md",
+        "link should point to c.md now"
+    );
 }
 
 #[test]
@@ -365,7 +378,11 @@ async fn bfs_bidirectional_integration() {
     let neighbors = links::bfs_neighbors(&link_graph, &backlinks, &["a.md".to_string()], 1);
 
     // B via forward link, C via backlink (C links to A)
-    assert_eq!(neighbors.len(), 2, "should find B (forward) and C (backlink)");
+    assert_eq!(
+        neighbors.len(),
+        2,
+        "should find B (forward) and C (backlink)"
+    );
     assert_eq!(neighbors["b.md"], 1, "B at hop 1 via forward link");
     assert_eq!(neighbors["c.md"], 1, "C at hop 1 via backlink");
 }
@@ -590,8 +607,14 @@ async fn neighborhood_serialization() {
     assert_eq!(deserialized.file, result.file);
     assert_eq!(deserialized.outgoing_count, result.outgoing_count);
     assert_eq!(deserialized.incoming_count, result.incoming_count);
-    assert_eq!(deserialized.outgoing_depth_count, result.outgoing_depth_count);
-    assert_eq!(deserialized.incoming_depth_count, result.incoming_depth_count);
+    assert_eq!(
+        deserialized.outgoing_depth_count,
+        result.outgoing_depth_count
+    );
+    assert_eq!(
+        deserialized.incoming_depth_count,
+        result.incoming_depth_count
+    );
 }
 
 // ---------------------------------------------------------------------------

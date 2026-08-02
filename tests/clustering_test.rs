@@ -73,7 +73,10 @@ fn cluster_all_produces_valid_state() {
     let state = clusterer.cluster_all(&vectors, &documents, None).unwrap();
 
     // Should produce clusters
-    assert!(!state.clusters.is_empty(), "should produce at least one cluster");
+    assert!(
+        !state.clusters.is_empty(),
+        "should produce at least one cluster"
+    );
     assert_eq!(state.algorithm, "leiden");
 
     // Every document should be assigned to exactly one cluster
@@ -86,7 +89,10 @@ fn cluster_all_produces_valid_state() {
         assert!(!cluster.centroid.is_empty(), "centroid should be populated");
         assert_eq!(cluster.centroid.len(), 8, "centroid dimension should match");
         assert!(!cluster.label.is_empty(), "label should not be empty");
-        assert!(cluster.representative.is_some(), "representative should be set");
+        assert!(
+            cluster.representative.is_some(),
+            "representative should be set"
+        );
     }
 
     // Counters should be reset
@@ -280,7 +286,10 @@ fn cluster_state_json_serialization() {
 
     assert_eq!(parsed["clusters"].as_array().unwrap().len(), 2);
     assert_eq!(parsed["docs_since_rebalance"], 5);
-    assert_eq!(parsed["clusters"][0]["label"], "rust / programming / systems");
+    assert_eq!(
+        parsed["clusters"][0]["label"],
+        "rust / programming / systems"
+    );
     assert_eq!(parsed["clusters"][0]["representative"], "a.md#0");
     assert_eq!(parsed["algorithm"], "leiden");
     // Omitted when None (additive JSON for consumers).
@@ -314,8 +323,7 @@ fn assign_incremental_error_on_empty_state() {
     let clusterer = Clusterer::new(&test_config());
     let mut state = empty_state();
 
-    let result =
-        clusterer.assign_incremental(&mut state, "doc#0", &[1.0, 0.0], &HashMap::new());
+    let result = clusterer.assign_incremental(&mut state, "doc#0", &[1.0, 0.0], &HashMap::new());
     assert!(result.is_err());
 }
 
@@ -417,7 +425,10 @@ fn assign_all_to_custom_assigns_matching_documents() {
     config.topics_min_similarity = 0.5;
     let clusterer = Clusterer::new(&config);
 
-    let defs = vec![seed_only_def("Cluster A", "alpha"), seed_only_def("Cluster B", "beta")];
+    let defs = vec![
+        seed_only_def("Cluster A", "alpha"),
+        seed_only_def("Cluster B", "beta"),
+    ];
 
     // Centroid A points in x direction, centroid B in y direction
     let centroids = vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
@@ -433,7 +444,11 @@ fn assign_all_to_custom_assigns_matching_documents() {
         .unwrap();
 
     let member_paths = |i: usize| -> Vec<&str> {
-        state.clusters[i].members.iter().map(|m| m.path.as_str()).collect()
+        state.clusters[i]
+            .members
+            .iter()
+            .map(|m| m.path.as_str())
+            .collect()
     };
     assert!(member_paths(0).contains(&"close_to_a.md"));
     assert!(member_paths(0).contains(&"also_a.md"));
@@ -442,7 +457,12 @@ fn assign_all_to_custom_assigns_matching_documents() {
     // Scores are recorded and plausible.
     for cluster in &state.clusters {
         for m in &cluster.members {
-            assert!(m.score >= 0.5, "member below threshold: {} {}", m.path, m.score);
+            assert!(
+                m.score >= 0.5,
+                "member below threshold: {} {}",
+                m.path,
+                m.score
+            );
         }
     }
 
@@ -502,7 +522,10 @@ fn per_topic_threshold_tightens_assignment() {
     config.topics_min_similarity = 0.2;
     let clusterer = Clusterer::new(&config);
 
-    let mut defs = vec![seed_only_def("Strict", "alpha"), seed_only_def("Lax", "beta")];
+    let mut defs = vec![
+        seed_only_def("Strict", "alpha"),
+        seed_only_def("Lax", "beta"),
+    ];
     defs[0].threshold = Some(0.95);
     let centroids = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
 
@@ -513,8 +536,15 @@ fn per_topic_threshold_tightens_assignment() {
         .assign_all_to_custom(&defs, &centroids, &doc_vectors, "fp".to_string())
         .unwrap();
 
-    assert!(state.clusters[0].members.is_empty(), "strict topic rejects 0.707");
-    assert_eq!(state.clusters[1].members.len(), 1, "lax topic accepts 0.707");
+    assert!(
+        state.clusters[0].members.is_empty(),
+        "strict topic rejects 0.707"
+    );
+    assert_eq!(
+        state.clusters[1].members.len(),
+        1,
+        "lax topic accepts 0.707"
+    );
 }
 
 #[test]
@@ -611,7 +641,11 @@ fn custom_cluster_no_duplicate_members() {
     assert_eq!(total, 10);
 
     // No duplicates, and sorted by path.
-    let mut all: Vec<&str> = state.clusters[0].members.iter().map(|m| m.path.as_str()).collect();
+    let mut all: Vec<&str> = state.clusters[0]
+        .members
+        .iter()
+        .map(|m| m.path.as_str())
+        .collect();
     let sorted = all.clone();
     all.sort();
     all.dedup();
@@ -641,8 +675,16 @@ fn custom_cluster_state_json_shape() {
     let json = serde_json::to_string(&state).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["clusters"][0]["members"][0]["path"], "doc.md");
-    assert!(parsed["clusters"][0]["members"][0]["score"].as_f64().unwrap() > 0.8);
-    assert_eq!(parsed["clusters"][0]["description"], "machine learning notes");
+    assert!(
+        parsed["clusters"][0]["members"][0]["score"]
+            .as_f64()
+            .unwrap()
+            > 0.8
+    );
+    assert_eq!(
+        parsed["clusters"][0]["description"],
+        "machine learning notes"
+    );
     assert_eq!(parsed["unassigned"][0], "other.md");
     assert_eq!(parsed["fingerprint"], "abc123");
 }

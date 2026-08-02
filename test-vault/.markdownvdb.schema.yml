@@ -58,6 +58,45 @@ scopes:
         allowed_values:
           - draft
 
+  # Lookup examples: `client_domain` copies the current `domain` value from
+  # every document selected through `client`. A scalar relation produces a
+  # scalar result; a relation list produces an ordered result list.
+  contacts:
+    fields:
+      client:
+        field_type: relation
+        target: clients
+        description: "The client account(s) this contact works with"
+      client_domain:
+        field_type: lookup
+        relation_field: client
+        target_field: domain
+        description: "Live domain value retrieved from the related client(s)"
+
+  # Incoming Rollup examples: each Client scans invoices/ for records whose
+  # `client` relation resolves back to that Client. Both fields are maintained
+  # automatically whenever an invoice is added, removed, repointed, or edited.
+  clients:
+    fields:
+      invoice_total:
+        field_type: rollup
+        relation_direction: incoming
+        relation_scope: invoices
+        relation_field: client
+        target_field: amount
+        formula: values.reduce((sum, value) => sum + value, 0)
+        result_type: number
+        description: "Sum of all related invoice amounts"
+      invoice_count:
+        field_type: rollup
+        relation_direction: incoming
+        relation_scope: invoices
+        relation_field: client
+        target_field: amount
+        formula: values.length
+        result_type: number
+        description: "Number of related invoices"
+
   # Frontmatter relations (phase 31): folders as tables, wiki links as
   # foreign keys. `target:` scopes the app's picker and resolves bare
   # names like [[initech]] against that folder.
@@ -80,6 +119,11 @@ scopes:
           - draft
           - sent
           - paid
+      CC Domain:
+        field_type: lookup
+        relation_field: client
+        target_field: domain
+        description: "Live industry retrieved from the related Client"
 
   projects:
     fields:

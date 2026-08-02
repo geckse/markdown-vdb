@@ -45,6 +45,9 @@ pub enum Error {
     #[error("source changed while applying a module patch: {}", path.display())]
     SourceChanged { path: PathBuf },
 
+    #[error("dependency changed while applying a module patch: {dependency}")]
+    DependencyChanged { dependency: String },
+
     #[error("index already exists: {}", path.display())]
     IndexAlreadyExists { path: PathBuf },
 
@@ -65,6 +68,9 @@ pub enum Error {
 
     #[error("another mdvdb process is writing this index (e.g. `mdvdb watch`) — stop it or retry shortly: {}", path.display())]
     IndexBusy { path: PathBuf },
+
+    #[error("index has unsaved in-memory changes and cannot be refreshed safely; retry with a fresh handle: {}", path.display())]
+    IndexDirty { path: PathBuf },
 
     #[error("semantic edge error: {0}")]
     SemanticEdge(String),
@@ -221,6 +227,16 @@ mod tests {
         };
         let s = err.to_string();
         assert!(s.contains("another mdvdb process"));
+        assert!(s.contains("/tmp/.markdownvdb/index"));
+    }
+
+    #[test]
+    fn index_dirty_variant_formats() {
+        let err = Error::IndexDirty {
+            path: PathBuf::from("/tmp/.markdownvdb/index"),
+        };
+        let s = err.to_string();
+        assert!(s.contains("unsaved in-memory changes"));
         assert!(s.contains("/tmp/.markdownvdb/index"));
     }
 

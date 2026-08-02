@@ -1609,6 +1609,7 @@ dependencies = [
  "reqwest",
  "rkyv 0.8.15",
  "rust_decimal",
+ "rustix 0.38.44",
  "semver",
  "serde",
  "serde_json",

@@ -28,7 +28,9 @@ pub use error::Error;
 pub use config::{Config, VectorQuantization};
 pub use index::types::{ComputedFieldDiagnostic, ComputedFieldEntry, IndexStatus};
 pub use modules::{ModuleDescriptor, ModuleDiagnostic, ModuleEvent, ModuleReport};
-pub use schema::{FieldType, FormulaResultType, Schema, SchemaField, ScopedSchema};
+pub use schema::{
+    FieldType, FormulaResultType, RelationDirection, Schema, SchemaField, ScopedSchema,
+};
 pub use search::{
     EdgeSearchResult, GraphContextItem, MetadataFilter, SearchMode, SearchQuery, SearchResponse,
     SearchResult, SearchResultChunk, SearchResultFile, SearchTimings, SortOrder,
@@ -65,6 +67,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -78,14 +81,15 @@ use crate::index::state::Index;
 use crate::index::storage::WriteOptions;
 use crate::index::types::EmbeddingConfig;
 
-fn without_formula_overlay_fields(
+fn without_computed_overlay_fields(
     mut fields: HashMap<String, schema::OverlayField>,
 ) -> HashMap<String, schema::OverlayField> {
     fields.retain(|_, field| {
         !field
             .field_type
             .as_deref()
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("formula"))
+            .and_then(schema::parse_field_type_str)
+            .is_some_and(|field_type| field_type.is_computed())
     });
     fields
 }
@@ -300,7 +304,7 @@ pub struct DocumentInfo {
     pub content_hash: String,
     /// Frontmatter metadata, if present.
     pub frontmatter: Option<serde_json::Value>,
-    /// Successful Formula values mirrored for module provenance/diagnostics.
+    /// Successful computed values mirrored for module provenance/diagnostics.
     /// `frontmatter` is the authoritative materialized source.
     pub computed_fields: serde_json::Map<String, serde_json::Value>,
     /// Calculation errors keyed by computed field name.
@@ -398,10 +402,18 @@ pub struct CollectionColumn {
     /// Overlay-declared FK target folder for relation columns (slash-less).
     /// Always-present JSON key (`null` when unscoped), mirroring `SchemaField`.
     pub relation_target: Option<String>,
-    /// Formula source for formula columns; `null` for ordinary frontmatter.
+    /// Formula source for Formula/Rollup columns; `null` otherwise.
     pub formula: Option<String>,
-    /// Declared output type for formula columns.
+    /// Declared output type for Formula/Rollup columns.
     pub result_type: Option<schema::FormulaResultType>,
+    /// Relation field selected by Lookup/Rollup columns.
+    pub relation_field: Option<String>,
+    /// Exact target frontmatter key selected by Lookup/Rollup columns.
+    pub target_field: Option<String>,
+    /// Effective traversal direction for Lookup/Rollup columns.
+    pub relation_direction: Option<schema::RelationDirection>,
+    /// Incoming Rollup source scope; `null` for outgoing computed fields.
+    pub relation_scope: Option<String>,
 }
 
 /// One table row = one Markdown document.
@@ -415,7 +427,7 @@ pub struct CollectionRow {
     pub title_source: TitleSource,
     /// Full frontmatter as a JSON object. Always an object (`{}` if none), never null.
     pub frontmatter: serde_json::Value,
-    /// Successful Formula values mirrored for module provenance/diagnostics.
+    /// Successful computed values mirrored for module provenance/diagnostics.
     /// `frontmatter` is the authoritative materialized source.
     pub computed_fields: serde_json::Map<String, serde_json::Value>,
     /// Calculation errors keyed by computed field name.
@@ -979,6 +991,9 @@ pub struct MarkdownVdb {
     index: Arc<Index>,
     /// Full-text search index (Arc for sharing with watcher).
     fts_index: Arc<FtsIndex>,
+    /// True when an incompatible archived layout was safely recreated and a
+    /// collection-wide ingest is still required before scoped mutations.
+    index_rebuilt: AtomicBool,
 }
 
 impl MarkdownVdb {
@@ -1051,21 +1066,40 @@ impl MarkdownVdb {
             quantization: config.vector_quantization.clone(),
             compress_metadata: config.index_compression,
         };
-        let (index, rebuilt_index) = Index::open_or_create_with_options_report(
-            &index_path,
-            &embedding_config,
-            write_options,
-        )?;
-        let index = Arc::new(index);
-
         let fts_path = index_dir.join("fts");
-        let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
-        if rebuilt_index {
-            fts_index.delete_all()?;
-            fts_index.commit()?;
+        // Take the long-lived FTS writer before the project transaction lock,
+        // matching watcher event ordering. If Tantivy itself must be created,
+        // record the split before that companion-store mutation as well.
+        if !fts_path.join("meta.json").is_file() {
+            fts::begin_reconciliation(&root)?;
         }
+        let fts_index = Arc::new(FtsIndex::open_or_create(&fts_path)?);
+        let (index, rebuilt_index) = {
+            // Serialize inspection and any replacement of the vector
+            // generation. The hook is invoked before an incompatible archive
+            // is removed, closing the crash window where nonempty FTS data
+            // could otherwise survive without a reconciliation marker.
+            let _module_run_lock = modules::acquire_module_run_lock(&root)?;
+            let (index, rebuilt_index) =
+                Index::open_or_create_with_options_report_and_rebuild_hook(
+                    &index_path,
+                    &embedding_config,
+                    write_options,
+                    || fts::begin_reconciliation(&root),
+                )?;
+            let index = Arc::new(index);
+            fts::recover_if_required(&root, &index, &fts_index)?;
+            (index, rebuilt_index)
+        };
 
-        Self::finish_open(root, config, embedding_config, index, fts_index)
+        Self::finish_open(
+            root,
+            config,
+            embedding_config,
+            index,
+            fts_index,
+            rebuilt_index,
+        )
     }
 
     /// Open a markdown-vdb instance in read-only mode.
@@ -1114,9 +1148,15 @@ impl MarkdownVdb {
         let index = Arc::new(Index::open_with_options(&index_path, write_options)?);
 
         let fts_path = index_dir.join("fts");
+        if fts::reconciliation_required(&root)? {
+            return Err(Error::Fts(
+                "FTS reconciliation is pending; open the project in writable mode to repair it"
+                    .to_string(),
+            ));
+        }
         let fts_index = Arc::new(FtsIndex::open_readonly(&fts_path)?);
 
-        Self::finish_open(root, config, embedding_config, index, fts_index)
+        Self::finish_open(root, config, embedding_config, index, fts_index, false)
     }
 
     /// Shared constructor tail: validates config compatibility and builds the instance.
@@ -1126,6 +1166,7 @@ impl MarkdownVdb {
         embedding_config: EmbeddingConfig,
         index: Arc<Index>,
         fts_index: Arc<FtsIndex>,
+        index_rebuilt: bool,
     ) -> Result<Self> {
         // Check config compatibility: dimensions must match.
         let status = index.status();
@@ -1153,6 +1194,7 @@ impl MarkdownVdb {
             provider: Mutex::new(None),
             index,
             fts_index,
+            index_rebuilt: AtomicBool::new(index_rebuilt),
         })
     }
 
@@ -1181,39 +1223,84 @@ impl MarkdownVdb {
         modules::ModuleRunner::builtins().descriptors()
     }
 
-    /// Run one compiled-in module and atomically persist its derived state.
-    pub fn run_module(&self, module: &str, scope: Option<&str>) -> Result<modules::ModuleReport> {
-        // Manual runs are a watcher-off catch-up surface. Refresh indexed source
-        // snapshots from Markdown first without touching vectors; a changed body
-        // remains detectable through `embedding_body_hash` and will be embedded
-        // by the next ingest/watch event.
-        if module == formula::FORMULA_MODULE_ID {
-            let prefix = modules::normalize_module_scope(scope);
-            for (path, stored) in self.index.get_all_files() {
-                if prefix
-                    .as_ref()
-                    .is_some_and(|scope| !path_util::path_is_in_scope(&path, scope))
-                {
-                    continue;
-                }
-                let relative = Path::new(&path);
-                let Ok(file) = parser::parse_markdown_file(&self.root, relative) else {
-                    continue;
-                };
-                if file.content_hash != stored.content_hash {
-                    self.index.refresh_source_metadata(&file)?;
-                }
-            }
+    /// Run a compiled-in materializing module together with its prerequisite or
+    /// dependent modules, then atomically persist the resulting derived state.
+    pub fn run_module(
+        &self,
+        module: &str,
+        scope: Option<&str>,
+    ) -> Result<modules::ModuleRunReport> {
+        if self.index_rebuilt.load(Ordering::Acquire) {
+            return Err(Error::Config(
+                "the archived index was incompatible and has been recreated; run an unscoped `mdvdb ingest` before running computed modules"
+                    .to_string(),
+            ));
+        }
+        let runner = modules::ModuleRunner::builtins();
+        if !runner
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == module)
+        {
+            return Err(Error::Config(format!("unknown module `{module}`")));
         }
 
-        let event = modules::ModuleEvent::ManualRun {
-            scope: scope.map(str::to_string),
-        };
-        let report = modules::ModuleRunner::builtins()
-            .run_one(module, &self.root, &self.index, &event)
+        // Keep membership catch-up, computed writes, index persistence, and any
+        // lexical self-heal in one project-scoped critical section.
+        let lock = modules::acquire_module_run_lock(&self.root)?;
+        let reports =
+            runner.run_dependency_aware_locked(&self.root, &self.index, module, scope, &lock)?;
+        // Manual dependency catch-up can add provisional source metadata or
+        // remove deleted documents without embedding. If it changed membership,
+        // rebuild the lexical projection from the just-saved vector/index
+        // generation before returning so same-process and subsequent read-only
+        // queries cannot observe stale deleted chunks.
+        fts::recover_if_required(&self.root, &self.index, &self.fts_index)?;
+        let requested = reports
+            .iter()
+            .find(|report| report.module == module)
+            .cloned()
             .ok_or_else(|| Error::Config(format!("unknown module `{module}`")))?;
-        self.index.save()?;
-        Ok(report)
+        Ok(modules::ModuleRunReport {
+            requested,
+            module_reports: reports,
+        })
+    }
+
+    /// Run a module pipeline while the caller retains the project module lock.
+    /// This is the second half of the desktop overlay transaction protocol.
+    pub fn run_module_locked(
+        &self,
+        module: &str,
+        scope: Option<&str>,
+        lock: &modules::ModuleRunLock,
+    ) -> Result<modules::ModuleRunReport> {
+        if self.index_rebuilt.load(Ordering::Acquire) {
+            return Err(Error::Config(
+                "the archived index was incompatible and has been recreated; run an unscoped `mdvdb ingest` before running computed modules"
+                    .to_string(),
+            ));
+        }
+        let runner = modules::ModuleRunner::builtins();
+        if !runner
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == module)
+        {
+            return Err(Error::Config(format!("unknown module `{module}`")));
+        }
+        let reports =
+            runner.run_dependency_aware_locked(&self.root, &self.index, module, scope, lock)?;
+        fts::recover_if_required(&self.root, &self.index, &self.fts_index)?;
+        let requested = reports
+            .iter()
+            .find(|report| report.module == module)
+            .cloned()
+            .ok_or_else(|| Error::Config(format!("unknown module `{module}`")))?;
+        Ok(modules::ModuleRunReport {
+            requested,
+            module_reports: reports,
+        })
     }
 
     /// Return cached diagnostics for a module without executing formulas.
@@ -1303,6 +1390,19 @@ impl MarkdownVdb {
     ///
     /// Pipeline: discover → parse → hash-compare → chunk → embed → upsert → remove deleted → save.
     pub async fn ingest(&self, options: IngestOptions) -> Result<IngestResult> {
+        if self.index_rebuilt.load(Ordering::Acquire) && options.file.is_some() {
+            return Err(Error::Config(
+                "the archived index was incompatible and has been recreated; the first recovery ingest must be unscoped"
+                    .to_string(),
+                ));
+        }
+        // Serialize the complete raw-index -> computed-field -> save lifecycle,
+        // then refresh the generation that may have been committed while this
+        // process was waiting. This prevents two ingest/watch processes from
+        // later saving divergent branches of the same index generation.
+        let module_run_lock = modules::acquire_module_run_lock(&self.root)?;
+        self.index.reload_from_disk_if_clean()?;
+        fts::recover_if_required(&self.root, &self.index, &self.fts_index)?;
         let start_time = std::time::Instant::now();
 
         // Helper: emit progress if callback is set.
@@ -1341,7 +1441,6 @@ impl MarkdownVdb {
         // Check cancellation after discovery.
         if is_cancelled() {
             self.index.save()?;
-            self.fts_index.commit()?;
             return Ok(IngestResult {
                 files_indexed: 0,
                 files_skipped: 0,
@@ -1355,13 +1454,6 @@ impl MarkdownVdb {
                 timings: None,
                 cancelled: true,
             });
-        }
-
-        // Full ingest: clear FTS index for a clean rebuild.
-        if options.full {
-            debug!("full ingest: clearing FTS index for rebuild");
-            self.fts_index.delete_all()?;
-            self.fts_index.commit()?;
         }
 
         // Consistency guard: if FTS has 0 docs but vector index has docs,
@@ -1462,11 +1554,9 @@ impl MarkdownVdb {
                         continue;
                     }
                     if embedding_unchanged {
-                        debug!(path = %path.display(), "frontmatter-only change, refreshing metadata");
+                        debug!(path = %path.display(), "frontmatter-only change, queueing metadata refresh");
                         current_hashes.insert(path.clone(), md.content_hash.clone());
-                        self.index.refresh_source_metadata(&md)?;
                         metadata_only_files.insert(path.clone(), md);
-                        result.files_indexed += 1;
                         continue;
                     }
                 }
@@ -1545,7 +1635,6 @@ impl MarkdownVdb {
             result.cancelled = true;
             result.duration_secs = start_time.elapsed().as_secs_f64();
             self.index.save()?;
-            self.fts_index.commit()?;
             return Ok(result);
         }
 
@@ -1588,8 +1677,32 @@ impl MarkdownVdb {
             result.cancelled = true;
             result.duration_secs = start_time.elapsed().as_secs_f64();
             self.index.save()?;
-            self.fts_index.commit()?;
             return Ok(result);
+        }
+
+        // From this point onward the operation may mutate either companion
+        // store. Leave a durable recovery marker until the vector save and FTS
+        // commit have both succeeded. All ordinary cancellation exits occur
+        // above this boundary and therefore do not create the marker.
+        fts::begin_reconciliation(&self.root)?;
+
+        // A full rebuild replaces FTS in one final commit. Do not stage (or
+        // commit) the clear until every cancellation point has passed, or a
+        // cancelled reindex would destroy the still-valid lexical index.
+        if options.full {
+            debug!("full ingest: staging FTS rebuild");
+            self.fts_index.delete_all()?;
+        }
+
+        // Parsing is still a read-only phase. Apply frontmatter-only refreshes
+        // only after the last pre-upsert cancellation barrier so cancellation
+        // cannot persist a new source hash without running computed-field
+        // modules for that same source revision.
+        let mut metadata_refreshes: Vec<_> = metadata_only_files.values().collect();
+        metadata_refreshes.sort_by(|left, right| left.path.cmp(&right.path));
+        for md in metadata_refreshes {
+            self.index.refresh_source_metadata(md)?;
+            result.files_indexed += 1;
         }
 
         // Upsert files with their embeddings.
@@ -1866,7 +1979,8 @@ impl MarkdownVdb {
             let relation_ctx = relations::RelationContext::new(
                 self.index.get_file_hashes().keys().cloned().collect(),
                 graph_overlay,
-            );
+            )
+            .with_computed_field_owners(self.computed_field_owners());
             let mut graph = self
                 .index
                 .get_link_graph()
@@ -1903,7 +2017,8 @@ impl MarkdownVdb {
             // known_files = the discovered on-disk set (matches body-link
             // Valid/Broken classification downstream).
             let relation_ctx =
-                relations::RelationContext::new(discovered_paths.clone(), graph_overlay);
+                relations::RelationContext::new(discovered_paths.clone(), graph_overlay)
+                    .with_computed_field_owners(self.computed_field_owners());
             let mut graph = links::build_link_graph(&all_md_files, &relation_ctx);
             // Preserve semantic edges and edge cluster state from the earlier
             // edge-embedding pass (which stored them before this rebuild).
@@ -2173,17 +2288,24 @@ impl MarkdownVdb {
                 renamed: Vec::new(),
             }
         };
-        result.module_reports =
-            modules::ModuleRunner::builtins().run(&self.root, &self.index, &module_event);
+        result.module_reports = modules::ModuleRunner::builtins().run_locked(
+            &self.root,
+            &self.index,
+            &module_event,
+            &module_run_lock,
+        )?;
         let save_start = std::time::Instant::now();
-        // The index is written once, atomically, with raw/schema/module state in
-        // agreement. FTS is committed afterwards and contains no formula data.
-        self.index.save()?;
+        // The module runner writes the index once, atomically, while its
+        // cross-process guard still covers raw/schema/module state.
         self.fts_index.commit()?;
+        fts::finish_reconciliation(&self.root)?;
 
         let save_secs = save_start.elapsed().as_secs_f64();
 
         result.duration_secs = start_time.elapsed().as_secs_f64();
+        if options.file.is_none() {
+            self.index_rebuilt.store(false, Ordering::Release);
+        }
         result.timings = Some(IngestTimings {
             discover_secs,
             parse_secs,
@@ -2503,7 +2625,7 @@ impl MarkdownVdb {
         }
         .reclassify_legacy_file_fields();
 
-        // Ordinary overlay annotations remain live, but formula definitions
+        // Ordinary overlay annotations remain live, but computed definitions
         // come only from the persisted module snapshot. This prevents a
         // read-only query from exposing new definitions alongside stale values.
         // A malformed overlay likewise falls back to the cached schema and its
@@ -2511,7 +2633,7 @@ impl MarkdownVdb {
         let global_fields = schema::Schema::load_overlay(&self.root)
             .ok()
             .flatten()
-            .map(|value| without_formula_overlay_fields(value.fields));
+            .map(|value| without_computed_overlay_fields(value.fields));
         Ok(schema::Schema::merge(base, global_fields))
     }
 
@@ -2541,7 +2663,7 @@ impl MarkdownVdb {
             .ok()
             .flatten()
             .map(|value| {
-                without_formula_overlay_fields(schema::Schema::resolve_overlay_for_path(
+                without_computed_overlay_fields(schema::Schema::resolve_overlay_for_path(
                     &value,
                     Some(path_prefix),
                 ))
@@ -2643,6 +2765,12 @@ sources:
         cancel: CancellationToken,
         event_callback: Option<watcher::WatchEventCallback>,
     ) -> Result<()> {
+        if self.index_rebuilt.load(Ordering::Acquire) {
+            return Err(Error::Config(
+                "the archived index was incompatible and has been recreated; run an unscoped `mdvdb ingest` before starting the watcher"
+                    .to_string(),
+            ));
+        }
         let w = watcher::Watcher::new(
             self.config.clone(),
             &self.root,
@@ -3777,11 +3905,7 @@ sources:
                 path: PathBuf::from(relative_path),
             })?;
 
-        // Parse frontmatter from stored JSON string.
-        let frontmatter = file
-            .frontmatter
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok());
+        let frontmatter = file.effective_frontmatter();
 
         let modified_at = self.index.get_file_mtime(relative_path);
 
@@ -3823,6 +3947,26 @@ sources:
             self.index.get_file_hashes().keys().cloned().collect(),
             overlay,
         )
+        .with_computed_field_owners(self.computed_field_owners())
+    }
+
+    /// Persisted computed ownership used to keep stale materialized values out
+    /// of relation graph/populate semantics while definitions are changing.
+    fn computed_field_owners(&self) -> HashMap<String, std::collections::HashSet<String>> {
+        self.index
+            .get_all_files()
+            .into_iter()
+            .filter_map(|(path, file)| {
+                let fields: std::collections::HashSet<String> = file
+                    .computed_fields
+                    .iter()
+                    .filter(|(field, entry)| file.materialized_field_matches(field, entry))
+                    .map(|(field, _)| field)
+                    .cloned()
+                    .collect();
+                (!fields.is_empty()).then_some((path, fields))
+            })
+            .collect()
     }
 
     /// Resolve every link-shaped frontmatter value of `source` to a
@@ -3859,8 +4003,7 @@ sources:
                         let stored_fm: Option<serde_json::Value> = self
                             .index
                             .get_file(&path)
-                            .and_then(|f| f.frontmatter)
-                            .and_then(|s| serde_json::from_str(&s).ok());
+                            .and_then(|file| file.effective_frontmatter());
                         let title_fm = stored_fm.clone().unwrap_or_else(|| serde_json::json!({}));
                         (Some(derive_title(&path, &title_fm).0), stored_fm)
                     } else {
@@ -3907,8 +4050,7 @@ sources:
                         let source_fm = self
                             .index
                             .get_file(&entry.source)
-                            .and_then(|f| f.frontmatter)
-                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .and_then(|file| file.effective_frontmatter())
                             .unwrap_or_else(|| serde_json::json!({}));
                         Some(relations::ReferencedBy {
                             title: derive_title(&entry.source, &source_fm).0,
@@ -4076,8 +4218,7 @@ sources:
         let stored = self.index.get_file(path);
         let frontmatter = stored
             .as_ref()
-            .and_then(|f| f.frontmatter.as_deref())
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|file| file.effective_frontmatter())
             .filter(|v| v.is_object())
             .unwrap_or_else(|| serde_json::json!({}));
         let (title, title_source) = derive_title(path, &frontmatter);
@@ -4170,6 +4311,10 @@ sources:
                 relation_target: f.relation_target.clone(),
                 formula: f.formula.clone(),
                 result_type: f.result_type,
+                relation_field: f.relation_field.clone(),
+                target_field: f.target_field.clone(),
+                relation_direction: f.relation_direction,
+                relation_scope: f.relation_scope.clone(),
             });
         }
 
@@ -4194,6 +4339,10 @@ sources:
                 relation_target: None,
                 formula: None,
                 result_type: None,
+                relation_field: None,
+                target_field: None,
+                relation_direction: None,
+                relation_scope: None,
             });
         }
 
@@ -4530,8 +4679,7 @@ sources:
             let Some(fm) = self
                 .index
                 .get_file(path)
-                .and_then(|f| f.frontmatter)
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .and_then(|file| file.effective_frontmatter())
             else {
                 continue;
             };
@@ -4701,16 +4849,13 @@ fn derive_title(path: &str, frontmatter: &serde_json::Value) -> (String, TitleSo
     (stem.to_string(), TitleSource::Filename)
 }
 
-/// Return source frontmatter for query/display semantics. Formula values are
-/// materialized into Markdown; the computed cache is bookkeeping only.
+/// Return the already ownership-filtered frontmatter used by collection
+/// filtering and sorting. Indexed rows are built through
+/// [`StoredFile::effective_frontmatter`], which hides diagnostics that still
+/// own their materialized key while preserving ordinary keys reclaimed after
+/// an invalid/missing-schema cleanup tombstone released ownership.
 fn effective_collection_frontmatter(row: &CollectionRow) -> serde_json::Value {
-    let mut frontmatter = row.frontmatter.clone();
-    if let Some(object) = frontmatter.as_object_mut() {
-        for field in row.computed_field_errors.keys() {
-            object.remove(field);
-        }
-    }
-    frontmatter
+    row.frontmatter.clone()
 }
 
 /// Sort collection rows in place.
@@ -4768,6 +4913,24 @@ mod collection_unit_tests {
             state: tree::FileState::Indexed,
             relations: None,
         }
+    }
+
+    #[test]
+    fn collection_effective_frontmatter_preserves_a_reclaimed_ordinary_key() {
+        let mut row = row("notes/reclaimed.md", json!({"legacy": 7}));
+        row.computed_field_errors.insert(
+            "legacy".to_string(),
+            ComputedFieldDiagnostic {
+                module: formula::FORMULA_MODULE_ID.to_string(),
+                field: "legacy".to_string(),
+                code: "invalid_schema".to_string(),
+                message: "released cleanup tombstone".to_string(),
+                span_start: None,
+                span_end: None,
+            },
+        );
+
+        assert_eq!(effective_collection_frontmatter(&row)["legacy"], 7);
     }
 
     // --- normalize_collection_scope ---

@@ -346,7 +346,10 @@ mod tests {
         let text = "word ".repeat(100);
         let truncated = truncate_to_tokens(&text, 10);
         assert!(count_tokens(&truncated) <= 10);
-        assert!(text.starts_with(&truncated), "must keep a prefix of the input");
+        assert!(
+            text.starts_with(&truncated),
+            "must keep a prefix of the input"
+        );
     }
 
     #[test]

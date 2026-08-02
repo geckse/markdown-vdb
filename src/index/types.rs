@@ -35,6 +35,90 @@ pub struct ComputedFieldDiagnostic {
     pub span_end: Option<usize>,
 }
 
+/// Internal dependency provenance for one computed field evaluation.
+///
+/// This state is archived with the index and copied through the durable
+/// computed-write intent, but is deliberately omitted from public JSON. The
+/// hashes are coordination data for convergence and diagnostics, never a
+/// second source of displayed values.
+#[doc(hidden)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[rkyv(derive(Debug))]
+pub struct ComputedDependencySnapshot {
+    #[serde(default)]
+    pub(crate) paths: BTreeMap<String, ComputedDependencyPathState>,
+    #[serde(default)]
+    pub(crate) incoming_scopes: BTreeMap<String, BTreeMap<String, ComputedDependencyPathState>>,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[rkyv(derive(Debug))]
+pub(crate) struct ComputedDependencyPathState {
+    pub(crate) exists: bool,
+    pub(crate) content_hash: Option<String>,
+}
+
+impl ComputedDependencySnapshot {
+    pub(crate) fn owner_source(path: &str) -> Self {
+        Self {
+            paths: BTreeMap::from([(
+                path.to_string(),
+                ComputedDependencyPathState {
+                    exists: true,
+                    content_hash: None,
+                },
+            )]),
+            incoming_scopes: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owner(path: &str, content_hash: &str) -> Self {
+        Self {
+            paths: BTreeMap::from([(
+                path.to_string(),
+                ComputedDependencyPathState {
+                    exists: true,
+                    content_hash: Some(content_hash.to_string()),
+                },
+            )]),
+            incoming_scopes: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn from_states(
+        paths: BTreeMap<String, ComputedDependencyPathState>,
+        incoming_scopes: BTreeMap<String, BTreeMap<String, ComputedDependencyPathState>>,
+    ) -> Self {
+        Self {
+            paths,
+            incoming_scopes,
+        }
+    }
+}
+
 /// A module-owned computed field persisted alongside a file.
 #[derive(
     Debug,
@@ -53,10 +137,37 @@ pub struct ComputedFieldEntry {
     pub module: String,
     /// Fingerprint of the definition used to calculate the entry.
     pub definition_fingerprint: String,
+    /// Fingerprint of the cross-document inputs used for this calculation.
+    /// Persisted for catch-up/convergence checks but omitted from public JSON.
+    #[serde(skip, default)]
+    pub input_fingerprint: Option<String>,
+    /// Internal dependency path/existence/hash snapshot for this evaluation.
+    /// This is intentionally unavailable in public computed-field JSON.
+    #[doc(hidden)]
+    #[serde(skip, default)]
+    pub dependency_snapshot: ComputedDependencySnapshot,
     /// Successful result encoded as one complete JSON value.
     pub value_json: Option<String>,
+    /// Exact semantic value last written into the corresponding frontmatter
+    /// key by this module. This is an internal ownership proof, not a display
+    /// cache: diagnostics clear `value_json`, while this proof survives only
+    /// until a verified cleanup removes the materialization. A raw/user edit
+    /// that no longer matches this value immediately revokes deletion and
+    /// suppression authority.
+    #[doc(hidden)]
+    #[serde(skip, default)]
+    pub materialized_value_json: Option<String>,
     /// Calculation diagnostic, present when the value could not be produced.
     pub diagnostic: Option<ComputedFieldDiagnostic>,
+}
+
+impl ComputedFieldEntry {
+    /// Whether this cache entry carries a prior materialization proof. This is
+    /// not deletion authority by itself; callers must use
+    /// [`StoredFile::materialized_field_matches`] against the current source.
+    pub(crate) fn has_materialized_proof(&self) -> bool {
+        self.materialized_value_json.is_some()
+    }
 }
 
 /// A chunk stored in the index, with rkyv derives for zero-copy deserialization.
@@ -103,7 +214,7 @@ pub struct StoredFile {
     pub indexed_at: u64,
     /// Module bookkeeping and diagnostics, keyed by field name.
     ///
-    /// Successful Formula values are also materialized into `frontmatter`;
+    /// Successful computed values are also materialized into `frontmatter`;
     /// this cache records ownership and the definition fingerprint.
     pub computed_fields: HashMap<String, ComputedFieldEntry>,
 }
@@ -221,11 +332,61 @@ impl From<&MarkdownFile> for StoredFile {
 }
 
 impl StoredFile {
+    /// Whether the current indexed source still contains the exact semantic
+    /// value last materialized by `entry`. Merely having provenance is never
+    /// sufficient ownership evidence: an ordinary/user replacement under the
+    /// same key must not be hidden or deleted.
+    pub fn materialized_field_matches(&self, field: &str, entry: &ComputedFieldEntry) -> bool {
+        let Some(expected) = entry
+            .materialized_value_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        else {
+            return false;
+        };
+        self.frontmatter
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned())
+            .and_then(|frontmatter| frontmatter.get(field).cloned())
+            .is_some_and(|actual| actual == expected)
+    }
+
+    /// Permanently release any ownership proof invalidated by a raw source
+    /// refresh. This prevents an old proof from becoming active again merely
+    /// because a later ordinary value happens to equal the old computed value.
+    pub(crate) fn reconcile_materialized_proofs(&mut self) {
+        let frontmatter = self
+            .frontmatter
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| value.as_object().cloned());
+        for (field, entry) in &mut self.computed_fields {
+            let matches = entry
+                .materialized_value_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|expected| {
+                    frontmatter
+                        .as_ref()
+                        .and_then(|frontmatter| frontmatter.get(field))
+                        .map(|actual| actual == &expected)
+                })
+                .unwrap_or(false);
+            if !matches {
+                entry.materialized_value_json = None;
+            }
+        }
+    }
+
     /// Decode all successful computed values, omitting diagnostics and invalid JSON.
     pub fn computed_values_json(&self) -> serde_json::Map<String, serde_json::Value> {
         self.computed_fields
             .iter()
             .filter_map(|(field, entry)| {
+                if entry.diagnostic.is_some() || !self.materialized_field_matches(field, entry) {
+                    return None;
+                }
                 let value = entry.value_json.as_deref()?;
                 serde_json::from_str(value)
                     .ok()
@@ -249,7 +410,7 @@ impl StoredFile {
 
     /// Return the source frontmatter used by filtering and sorting.
     ///
-    /// Formula values are materialized before this snapshot is stored, so the
+    /// Computed values are materialized before this snapshot is stored, so the
     /// source value is authoritative and the computed cache is bookkeeping only.
     pub fn effective_frontmatter(&self) -> Option<serde_json::Value> {
         let mut value: serde_json::Value = self
@@ -258,7 +419,7 @@ impl StoredFile {
             .and_then(|raw| serde_json::from_str(raw).ok())?;
         if let Some(object) = value.as_object_mut() {
             for (field, entry) in &self.computed_fields {
-                if entry.module == "formula" && entry.diagnostic.is_some() {
+                if entry.diagnostic.is_some() && self.materialized_field_matches(field, entry) {
                     object.remove(field);
                 }
             }
@@ -362,7 +523,10 @@ mod tests {
             ComputedFieldEntry {
                 module: "formula".to_string(),
                 definition_fingerprint: "abc".to_string(),
+                input_fingerprint: None,
+                dependency_snapshot: ComputedDependencySnapshot::default(),
                 value_json: Some("1.9".to_string()),
+                materialized_value_json: Some("1.9".to_string()),
                 diagnostic: None,
             },
         );
@@ -371,7 +535,10 @@ mod tests {
             ComputedFieldEntry {
                 module: "formula".to_string(),
                 definition_fingerprint: "def".to_string(),
+                input_fingerprint: None,
+                dependency_snapshot: ComputedDependencySnapshot::default(),
                 value_json: None,
+                materialized_value_json: Some("999".to_string()),
                 diagnostic: Some(ComputedFieldDiagnostic {
                     module: "formula".to_string(),
                     field: "total".to_string(),
@@ -384,7 +551,7 @@ mod tests {
         );
 
         let computed = stored.computed_values_json();
-        assert_eq!(computed["tax"], serde_json::json!(1.9));
+        assert!(!computed.contains_key("tax"));
         assert!(!computed.contains_key("total"));
 
         let errors = stored.computed_errors_json();
@@ -399,6 +566,34 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_str(stored.frontmatter.as_deref().unwrap()).unwrap();
         assert_eq!(raw, serde_json::json!({"price": 10, "total": 999}));
+    }
+
+    #[test]
+    fn computed_dependency_provenance_is_not_public_json() {
+        let entry = ComputedFieldEntry {
+            module: "lookup_rollup".to_string(),
+            definition_fingerprint: "definition".to_string(),
+            input_fingerprint: Some("private-input-fingerprint".to_string()),
+            dependency_snapshot: ComputedDependencySnapshot::owner(
+                "clients/acme.md",
+                "private-content-hash",
+            ),
+            value_json: Some("\"acme.example\"".to_string()),
+            materialized_value_json: Some("\"acme.example\"".to_string()),
+            diagnostic: None,
+        };
+
+        let public = serde_json::to_value(&entry).unwrap();
+        assert!(public.get("input_fingerprint").is_none());
+        assert!(public.get("dependency_snapshot").is_none());
+        assert!(public.get("materialized_value_json").is_none());
+        assert!(!public.to_string().contains("private-content-hash"));
+
+        let decoded: ComputedFieldEntry = serde_json::from_value(public).unwrap();
+        assert!(decoded.input_fingerprint.is_none());
+        assert!(decoded.materialized_value_json.is_none());
+        assert!(decoded.dependency_snapshot.paths.is_empty());
+        assert!(decoded.dependency_snapshot.incoming_scopes.is_empty());
     }
 
     #[test]
@@ -420,7 +615,10 @@ mod tests {
             ComputedFieldEntry {
                 module: "formula".to_string(),
                 definition_fingerprint: "abc".to_string(),
+                input_fingerprint: None,
+                dependency_snapshot: ComputedDependencySnapshot::default(),
                 value_json: Some("\"calculated\"".to_string()),
+                materialized_value_json: Some("\"calculated\"".to_string()),
                 diagnostic: None,
             },
         );

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::parser::MarkdownFile;
@@ -23,9 +24,49 @@ pub enum FieldType {
     Relation,
     /// A frontmatter reference to a collection-local, non-Markdown file.
     File,
+    /// A structured JSON object or nested collection.
+    Json,
+    /// A schema-defined value copied from a field on a related document.
+    Lookup,
+    /// A schema-defined formula evaluated over values from related documents.
+    Rollup,
 }
 
-/// The declared output type of a formula field.
+impl FieldType {
+    /// Whether values for this schema type are owned and materialized by a
+    /// built-in computed-field module rather than edited as ordinary metadata.
+    pub fn is_computed(&self) -> bool {
+        matches!(self, Self::Formula | Self::Lookup | Self::Rollup)
+    }
+}
+
+/// Direction used to collect documents for a Lookup or Rollup field.
+///
+/// Overlay YAML uses lowercase `outgoing` / `incoming`; API responses retain
+/// the crate's established PascalCase enum representation.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    Serialize,
+    serde::Deserialize,
+)]
+#[rkyv(derive(Debug))]
+pub enum RelationDirection {
+    /// Follow the selected Relation field on the document being computed.
+    Outgoing,
+    /// Find documents in `relation_scope` whose selected Relation points back
+    /// to the document being computed. Supported by Rollup fields only.
+    Incoming,
+}
+
+/// The declared output type of a Formula or Rollup expression.
 #[derive(
     Debug,
     Clone,
@@ -88,7 +129,7 @@ pub struct InferredField {
 }
 
 /// A field definition from the user-provided overlay file.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct OverlayField {
     /// Human-readable description of the field.
     pub description: Option<String>,
@@ -103,10 +144,20 @@ pub struct OverlayField {
     /// Target folder for relation fields (the FK's "table"). Accepts `clients`
     /// or `clients/` on read; emitted slash-less. Implies `field_type: relation`.
     pub target: Option<String>,
-    /// JavaScript-like expression evaluated by the built-in formula module.
+    /// JavaScript-like expression evaluated for Formula and Rollup fields.
     pub formula: Option<String>,
-    /// Declared formula output type (e.g. "number", "date_time", "json").
+    /// Declared Formula/Rollup output type (e.g. "number", "date_time", "json").
     pub result_type: Option<String>,
+    /// Relation field used as the source of Lookup/Rollup related documents.
+    pub relation_field: Option<String>,
+    /// Exact top-level frontmatter field copied or aggregated from each target.
+    pub target_field: Option<String>,
+    /// Rollup traversal direction (`outgoing`, default, or `incoming`).
+    /// Lookup definitions always use outgoing traversal and reject this key.
+    pub relation_direction: Option<String>,
+    /// Folder containing documents scanned by an incoming Rollup. Required for
+    /// incoming traversal and forbidden for outgoing traversal.
+    pub relation_scope: Option<String>,
 }
 
 /// A scope's field overlay, defining field annotations for a path prefix.
@@ -148,12 +199,20 @@ pub struct SchemaField {
     /// Overlay-declared FK target folder for relation fields (slash-less).
     /// Serializes as `null` when absent (always-present JSON key per contract).
     pub relation_target: Option<String>,
-    /// Formula expression for `Formula` fields, otherwise `None`.
+    /// Expression for `Formula`/`Rollup` fields, otherwise `None`.
     /// Serializes as `null` when absent.
     pub formula: Option<String>,
-    /// Declared formula output type for `Formula` fields, otherwise `None`.
+    /// Declared output type for `Formula`/`Rollup` fields, otherwise `None`.
     /// Serializes as `null` when absent.
     pub result_type: Option<FormulaResultType>,
+    /// Relation field selected by Lookup/Rollup definitions, otherwise `None`.
+    pub relation_field: Option<String>,
+    /// Exact target frontmatter field selected by Lookup/Rollup definitions.
+    pub target_field: Option<String>,
+    /// Effective traversal direction for Lookup/Rollup definitions.
+    pub relation_direction: Option<RelationDirection>,
+    /// Normalized incoming Rollup source folder (slash-less), otherwise `None`.
+    pub relation_scope: Option<String>,
 }
 
 /// A schema tagged with its path scope, persisted in the index.
@@ -195,7 +254,8 @@ fn is_date_string(s: &str) -> bool {
 /// Link rules run ahead of the plain arms: Markdown targets classify as
 /// `Relation`, while targets with an explicit non-Markdown extension classify
 /// as `File`. Homogeneous arrays retain that type; arrays mixing both classify
-/// as `Mixed`. Empty arrays remain `List` because they carry no type evidence.
+/// as `Mixed`. Arrays containing nested arrays/objects are `Json`; empty and
+/// scalar arrays remain `List`.
 pub(crate) fn infer_field_type(value: &serde_json::Value) -> FieldType {
     match value {
         serde_json::Value::Bool(_) => FieldType::Boolean,
@@ -215,6 +275,14 @@ pub(crate) fn infer_field_type(value: &serde_json::Value) -> FieldType {
         serde_json::Value::Array(items) => {
             if items.is_empty() {
                 return FieldType::List;
+            }
+            if items.iter().any(|item| {
+                matches!(
+                    item,
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_)
+                )
+            }) {
+                return FieldType::Json;
             }
             let kinds: Option<Vec<_>> = items
                 .iter()
@@ -242,8 +310,8 @@ pub(crate) fn infer_field_type(value: &serde_json::Value) -> FieldType {
                 None => FieldType::List,
             }
         }
-        serde_json::Value::Object(_) => FieldType::String, // treat objects as string
-        serde_json::Value::Null => FieldType::String,      // null defaults to string
+        serde_json::Value::Object(_) => FieldType::Json,
+        serde_json::Value::Null => FieldType::String, // null defaults to string
     }
 }
 
@@ -264,9 +332,21 @@ pub(crate) fn parse_field_type_str(s: &str) -> Option<FieldType> {
         "list" | "array" => Some(FieldType::List),
         "date" => Some(FieldType::Date),
         "mixed" => Some(FieldType::Mixed),
+        "json" => Some(FieldType::Json),
         "formula" => Some(FieldType::Formula),
         "relation" => Some(FieldType::Relation),
         "file" => Some(FieldType::File),
+        "lookup" => Some(FieldType::Lookup),
+        "rollup" => Some(FieldType::Rollup),
+        _ => None,
+    }
+}
+
+/// Convert an overlay traversal direction to a [`RelationDirection`].
+pub fn parse_relation_direction_str(s: &str) -> Option<RelationDirection> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "outgoing" => Some(RelationDirection::Outgoing),
+        "incoming" => Some(RelationDirection::Incoming),
         _ => None,
     }
 }
@@ -294,49 +374,156 @@ fn validate_overlay_field(location: &str, name: &str, field: &OverlayField) -> c
         })?),
         None => None,
     };
-    let is_formula = parsed_field_type == Some(FieldType::Formula);
+    let is_formula = matches!(parsed_field_type.as_ref(), Some(FieldType::Formula));
+    let is_lookup = matches!(parsed_field_type.as_ref(), Some(FieldType::Lookup));
+    let is_rollup = matches!(parsed_field_type.as_ref(), Some(FieldType::Rollup));
+    let is_computed = is_formula || is_lookup || is_rollup;
 
-    if is_formula && matches!(name, "title" | "path") {
+    if is_computed && matches!(name, "title" | "path") {
+        let kind = if is_formula {
+            "formula"
+        } else if is_lookup {
+            "lookup"
+        } else {
+            "rollup"
+        };
         return Err(crate::error::Error::Config(format!(
-            "`{name}` is reserved and cannot be a formula field in `{location}`"
+            "`{name}` is reserved and cannot be a {kind} field in `{location}`"
         )));
     }
 
-    if is_formula {
+    if is_formula || is_rollup {
+        let kind = if is_formula { "formula" } else { "rollup" };
         if field
             .formula
             .as_deref()
             .is_none_or(|formula| formula.trim().is_empty())
         {
             return Err(crate::error::Error::Config(format!(
-                "formula field `{location}.{name}` requires a non-empty `formula`"
+                "{kind} field `{location}.{name}` requires a non-empty `formula`"
             )));
         }
 
         let result_type = field.result_type.as_deref().ok_or_else(|| {
             crate::error::Error::Config(format!(
-                "formula field `{location}.{name}` requires `result_type`"
+                "{kind} field `{location}.{name}` requires `result_type`"
             ))
         })?;
         if parse_formula_result_type_str(result_type).is_none() {
             return Err(crate::error::Error::Config(format!(
-                "invalid result_type `{result_type}` for formula field `{location}.{name}`"
-            )));
-        }
-        if field.target.is_some() {
-            return Err(crate::error::Error::Config(format!(
-                "formula field `{location}.{name}` cannot declare a relation `target`"
+                "invalid result_type `{result_type}` for {kind} field `{location}.{name}`"
             )));
         }
     } else {
         if field.formula.is_some() {
             return Err(crate::error::Error::Config(format!(
-                "`formula` on `{location}.{name}` requires `field_type: formula`"
+                "`formula` on `{location}.{name}` requires `field_type: formula` or `field_type: rollup`"
             )));
         }
         if field.result_type.is_some() {
             return Err(crate::error::Error::Config(format!(
-                "`result_type` on `{location}.{name}` requires `field_type: formula`"
+                "`result_type` on `{location}.{name}` requires `field_type: formula` or `field_type: rollup`"
+            )));
+        }
+    }
+
+    if is_lookup || is_rollup {
+        let kind = if is_lookup { "lookup" } else { "rollup" };
+        let relation_field = field
+            .relation_field
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                crate::error::Error::Config(format!(
+                    "{kind} field `{location}.{name}` requires `relation_field`"
+                ))
+            })?;
+        if relation_field.trim() == name {
+            return Err(crate::error::Error::Config(format!(
+                "{kind} field `{location}.{name}` cannot use itself as `relation_field`"
+            )));
+        }
+        field
+            .target_field
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                crate::error::Error::Config(format!(
+                    "{kind} field `{location}.{name}` requires `target_field`"
+                ))
+            })?;
+        if field.target.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "{kind} field `{location}.{name}` cannot declare a relation `target`"
+            )));
+        }
+    } else {
+        if field.relation_field.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "`relation_field` on `{location}.{name}` requires `field_type: lookup` or `field_type: rollup`"
+            )));
+        }
+        if field.target_field.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "`target_field` on `{location}.{name}` requires `field_type: lookup` or `field_type: rollup`"
+            )));
+        }
+    }
+
+    if is_formula && field.target.is_some() {
+        return Err(crate::error::Error::Config(format!(
+            "formula field `{location}.{name}` cannot declare a relation `target`"
+        )));
+    }
+
+    if is_lookup {
+        if field.relation_direction.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "lookup field `{location}.{name}` is always outgoing and cannot declare `relation_direction`"
+            )));
+        }
+        if field.relation_scope.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "lookup field `{location}.{name}` is always outgoing and cannot declare `relation_scope`"
+            )));
+        }
+    } else if is_rollup {
+        let direction = match field.relation_direction.as_deref() {
+            Some(value) => parse_relation_direction_str(value).ok_or_else(|| {
+                crate::error::Error::Config(format!(
+                    "invalid relation_direction `{value}` for rollup field `{location}.{name}`"
+                ))
+            })?,
+            None => RelationDirection::Outgoing,
+        };
+        match direction {
+            RelationDirection::Outgoing if field.relation_scope.is_some() => {
+                return Err(crate::error::Error::Config(format!(
+                    "outgoing rollup field `{location}.{name}` cannot declare `relation_scope`"
+                )));
+            }
+            RelationDirection::Incoming
+                if field
+                    .relation_scope
+                    .as_deref()
+                    .and_then(normalize_relation_scope)
+                    .is_none() =>
+            {
+                return Err(crate::error::Error::Config(format!(
+                    "incoming rollup field `{location}.{name}` requires a non-empty `relation_scope`"
+                )));
+            }
+            _ => {}
+        }
+    } else {
+        if field.relation_direction.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "`relation_direction` on `{location}.{name}` requires `field_type: rollup`"
+            )));
+        }
+        if field.relation_scope.is_some() {
+            return Err(crate::error::Error::Config(format!(
+                "`relation_scope` on `{location}.{name}` requires an incoming rollup"
             )));
         }
     }
@@ -364,6 +551,26 @@ fn normalize_target(target: &str) -> Option<String> {
         None
     } else {
         Some(t.to_string())
+    }
+}
+
+pub(crate) fn normalize_field_reference(field: &str) -> Option<String> {
+    let field = field.trim();
+    (!field.is_empty()).then(|| field.to_string())
+}
+
+pub(crate) fn normalize_relation_scope(scope: &str) -> Option<String> {
+    let scope = crate::path_util::normalize_path_input(scope.trim());
+    let scope = scope.strip_prefix("./").unwrap_or(&scope).trim_matches('/');
+    if scope.is_empty()
+        || scope == "."
+        || scope
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        None
+    } else {
+        Some(scope.to_string())
     }
 }
 
@@ -486,6 +693,10 @@ impl Schema {
                     relation_target: None,
                     formula: None,
                     result_type: None,
+                    relation_field: None,
+                    target_field: None,
+                    relation_direction: None,
+                    relation_scope: None,
                 }
             })
             .collect();
@@ -508,20 +719,47 @@ impl Schema {
 
     /// Load an optional overlay from `.markdownvdb.schema.yml` in the project root.
     pub fn load_overlay(project_root: &Path) -> crate::Result<Option<OverlaySchema>> {
-        let path = project_root.join(".markdownvdb.schema.yml");
-        if !path.exists() {
-            debug!("no schema overlay file found at {}", path.display());
-            return Ok(None);
-        }
+        Self::load_overlay_with_fingerprint(project_root).map(|(overlay, _)| overlay)
+    }
 
-        let contents = std::fs::read_to_string(&path)?;
-        let overlay: OverlaySchema = serde_yaml::from_str(&contents).map_err(|e| {
+    /// Load and validate the overlay from one exact byte snapshot, returning a
+    /// fingerprint suitable for module input metadata and pre-write CAS.
+    pub(crate) fn load_overlay_with_fingerprint(
+        project_root: &Path,
+    ) -> crate::Result<(Option<OverlaySchema>, String)> {
+        let path = project_root.join(".markdownvdb.schema.yml");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                debug!("no schema overlay file found at {}", path.display());
+                return Ok((None, "missing".to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let fingerprint = format!("sha256:{:x}", Sha256::digest(&bytes));
+        let contents = std::str::from_utf8(&bytes).map_err(|error| {
+            crate::error::Error::Config(format!(
+                "failed to read {} as UTF-8: {error}",
+                path.display()
+            ))
+        })?;
+        let overlay: OverlaySchema = serde_yaml::from_str(contents).map_err(|e| {
             crate::error::Error::Config(format!("failed to parse {}: {e}", path.display()))
         })?;
         validate_overlay(&overlay)?;
 
         debug!(field_count = overlay.fields.len(), "loaded schema overlay");
-        Ok(Some(overlay))
+        Ok((Some(overlay), fingerprint))
+    }
+
+    /// Fingerprint the current overlay bytes without parsing them.
+    pub(crate) fn overlay_source_fingerprint(project_root: &Path) -> crate::Result<String> {
+        let path = project_root.join(".markdownvdb.schema.yml");
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(format!("sha256:{:x}", Sha256::digest(bytes))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_string()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Resolve overlay fields for a given path prefix.
@@ -580,8 +818,16 @@ impl Schema {
                 .result_type
                 .as_deref()
                 .and_then(parse_formula_result_type_str);
+            let relation_field = ov
+                .relation_field
+                .as_deref()
+                .and_then(normalize_field_reference);
+            let target_field = ov
+                .target_field
+                .as_deref()
+                .and_then(normalize_field_reference);
             if let Some(field) = merged.get_mut(name) {
-                let had_cached_formula_stats = field.field_type == FieldType::Formula;
+                let previous_field_type = field.field_type.clone();
                 // Apply overlay to existing inferred field
                 if let Some(desc) = &ov.description {
                     field.description = Some(desc.clone());
@@ -605,18 +851,46 @@ impl Schema {
                 } else {
                     None
                 };
-                if field.field_type == FieldType::Formula {
+                let is_formula = field.field_type == FieldType::Formula;
+                let is_lookup = field.field_type == FieldType::Lookup;
+                let is_rollup = field.field_type == FieldType::Rollup;
+                if is_formula || is_rollup {
                     field.formula = ov.formula.clone();
                     field.result_type = formula_result_type;
-                    // Formula samples/counts come from successful cached results,
-                    // never from a colliding raw frontmatter field.
-                    if !had_cached_formula_stats {
-                        field.occurrence_count = 0;
-                        field.sample_values.clear();
-                    }
                 } else {
                     field.formula = None;
                     field.result_type = None;
+                }
+                if is_lookup || is_rollup {
+                    field.relation_field = relation_field.clone();
+                    field.target_field = target_field.clone();
+                    field.relation_direction = Some(if is_lookup {
+                        RelationDirection::Outgoing
+                    } else {
+                        ov.relation_direction
+                            .as_deref()
+                            .and_then(parse_relation_direction_str)
+                            .unwrap_or(RelationDirection::Outgoing)
+                    });
+                    field.relation_scope =
+                        if field.relation_direction == Some(RelationDirection::Incoming) {
+                            ov.relation_scope
+                                .as_deref()
+                                .and_then(normalize_relation_scope)
+                        } else {
+                            None
+                        };
+                } else {
+                    field.relation_field = None;
+                    field.target_field = None;
+                    field.relation_direction = None;
+                    field.relation_scope = None;
+                }
+                // Computed samples/counts come from successful module-owned
+                // results, never from a colliding materialized/raw field.
+                if field.field_type.is_computed() && previous_field_type != field.field_type {
+                    field.occurrence_count = 0;
+                    field.sample_values.clear();
                 }
             } else {
                 // Overlay-only field: not seen in any file
@@ -635,6 +909,27 @@ impl Schema {
                     None
                 };
                 let is_formula = field_type == FieldType::Formula;
+                let is_lookup = field_type == FieldType::Lookup;
+                let is_rollup = field_type == FieldType::Rollup;
+                let relation_direction = if is_lookup {
+                    Some(RelationDirection::Outgoing)
+                } else if is_rollup {
+                    Some(
+                        ov.relation_direction
+                            .as_deref()
+                            .and_then(parse_relation_direction_str)
+                            .unwrap_or(RelationDirection::Outgoing),
+                    )
+                } else {
+                    None
+                };
+                let relation_scope = if relation_direction == Some(RelationDirection::Incoming) {
+                    ov.relation_scope
+                        .as_deref()
+                        .and_then(normalize_relation_scope)
+                } else {
+                    None
+                };
 
                 merged.insert(
                     name.clone(),
@@ -647,12 +942,28 @@ impl Schema {
                         allowed_values: ov.allowed_values.clone(),
                         required: ov.required.unwrap_or(false),
                         relation_target,
-                        formula: if is_formula { ov.formula.clone() } else { None },
-                        result_type: if is_formula {
+                        formula: if is_formula || is_rollup {
+                            ov.formula.clone()
+                        } else {
+                            None
+                        },
+                        result_type: if is_formula || is_rollup {
                             formula_result_type
                         } else {
                             None
                         },
+                        relation_field: if is_lookup || is_rollup {
+                            relation_field
+                        } else {
+                            None
+                        },
+                        target_field: if is_lookup || is_rollup {
+                            target_field
+                        } else {
+                            None
+                        },
+                        relation_direction,
+                        relation_scope,
                     },
                 );
             }
@@ -737,8 +1048,65 @@ mod tests {
         assert_eq!(parse_field_type_str("array"), Some(FieldType::List));
         assert_eq!(parse_field_type_str("date"), Some(FieldType::Date));
         assert_eq!(parse_field_type_str("mixed"), Some(FieldType::Mixed));
+        assert_eq!(parse_field_type_str("json"), Some(FieldType::Json));
         assert_eq!(parse_field_type_str("formula"), Some(FieldType::Formula));
+        assert_eq!(parse_field_type_str("lookup"), Some(FieldType::Lookup));
+        assert_eq!(parse_field_type_str("ROLLUP"), Some(FieldType::Rollup));
         assert_eq!(parse_field_type_str("unknown"), None);
+        assert_eq!(serde_json::to_string(&FieldType::Json).unwrap(), "\"Json\"");
+        assert_eq!(
+            serde_json::to_string(&FieldType::Lookup).unwrap(),
+            "\"Lookup\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FieldType::Rollup).unwrap(),
+            "\"Rollup\""
+        );
+        assert!(FieldType::Formula.is_computed());
+        assert!(FieldType::Lookup.is_computed());
+        assert!(FieldType::Rollup.is_computed());
+        assert!(!FieldType::Relation.is_computed());
+    }
+
+    #[test]
+    fn relation_direction_parsing_and_serialization() {
+        assert_eq!(
+            parse_relation_direction_str(" outgoing "),
+            Some(RelationDirection::Outgoing)
+        );
+        assert_eq!(
+            parse_relation_direction_str("INCOMING"),
+            Some(RelationDirection::Incoming)
+        );
+        assert_eq!(parse_relation_direction_str("sideways"), None);
+        assert_eq!(
+            serde_json::to_string(&RelationDirection::Incoming).unwrap(),
+            "\"Incoming\""
+        );
+    }
+
+    #[test]
+    fn lookup_rollup_reference_normalization_is_safe_and_canonical() {
+        assert_eq!(
+            normalize_field_reference(" client ").as_deref(),
+            Some("client")
+        );
+        assert_eq!(normalize_field_reference("  "), None);
+        assert_eq!(
+            normalize_relation_scope(r" ./invoices\paid/ ").as_deref(),
+            Some("invoices/paid")
+        );
+        for invalid in [
+            "",
+            "/",
+            ".",
+            "./",
+            "../invoices",
+            "invoices/../clients",
+            "invoices//paid",
+        ] {
+            assert_eq!(normalize_relation_scope(invalid), None, "scope: {invalid}");
+        }
     }
 
     #[test]
@@ -806,6 +1174,14 @@ mod tests {
         assert_eq!(
             infer_field_type(&serde_json::json!(["a", "b"])),
             FieldType::List
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!({"nested": true})),
+            FieldType::Json
+        );
+        assert_eq!(
+            infer_field_type(&serde_json::json!([{"nested": true}])),
+            FieldType::Json
         );
     }
 
@@ -898,11 +1274,11 @@ mod tests {
     }
 
     #[test]
-    fn infer_nested_objects_as_string() {
+    fn infer_nested_objects_as_json() {
         let files = vec![make_file(serde_json::json!({"meta": {"nested": "value"}}))];
         let schema = Schema::infer(&files);
         assert_eq!(schema.fields[0].name, "meta");
-        assert_eq!(schema.fields[0].field_type, FieldType::String);
+        assert_eq!(schema.fields[0].field_type, FieldType::Json);
     }
 
     #[test]
@@ -984,6 +1360,89 @@ scopes:
     }
 
     #[test]
+    fn load_and_merge_lookup_and_rollup_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = r#"
+scopes:
+  contacts:
+    fields:
+      client_domain:
+        field_type: lookup
+        relation_field: " client "
+        target_field: " domain "
+  clients:
+    fields:
+      outgoing_total:
+        field_type: rollup
+        relation_field: invoices
+        target_field: total
+        formula: values.reduce((sum, value) => sum + value, 0)
+        result_type: number
+      incoming_total:
+        field_type: rollup
+        relation_field: client
+        target_field: total
+        relation_direction: incoming
+        relation_scope: invoices/
+        formula: values.reduce((sum, value) => sum + value, 0)
+        result_type: number
+"#;
+        std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+        let overlay = Schema::load_overlay(dir.path()).unwrap().unwrap();
+
+        let contact_overlay = Schema::resolve_overlay_for_path(&overlay, Some("contacts/a.md"));
+        let contact_inferred = Schema::infer(&[make_file(serde_json::json!({
+            "client_domain": "stale.example"
+        }))]);
+        let contacts = Schema::merge(contact_inferred, Some(contact_overlay));
+        let lookup = contacts.get_field("client_domain").unwrap();
+        assert_eq!(lookup.field_type, FieldType::Lookup);
+        assert_eq!(lookup.relation_field.as_deref(), Some("client"));
+        assert_eq!(lookup.target_field.as_deref(), Some("domain"));
+        assert_eq!(lookup.relation_direction, Some(RelationDirection::Outgoing));
+        assert_eq!(lookup.relation_scope, None);
+        assert_eq!(lookup.formula, None);
+        assert_eq!(lookup.result_type, None);
+        assert_eq!(lookup.occurrence_count, 0);
+        assert!(lookup.sample_values.is_empty());
+
+        let client_overlay = Schema::resolve_overlay_for_path(&overlay, Some("clients/a.md"));
+        let clients = Schema::merge(Schema::infer(&[]), Some(client_overlay));
+        let outgoing = clients.get_field("outgoing_total").unwrap();
+        assert_eq!(outgoing.field_type, FieldType::Rollup);
+        assert_eq!(
+            outgoing.relation_direction,
+            Some(RelationDirection::Outgoing)
+        );
+        assert_eq!(outgoing.relation_scope, None);
+        assert_eq!(outgoing.result_type, Some(FormulaResultType::Number));
+        assert!(outgoing.formula.as_deref().unwrap().contains("reduce"));
+
+        let incoming = clients.get_field("incoming_total").unwrap();
+        assert_eq!(incoming.field_type, FieldType::Rollup);
+        assert_eq!(incoming.relation_field.as_deref(), Some("client"));
+        assert_eq!(incoming.target_field.as_deref(), Some("total"));
+        assert_eq!(
+            incoming.relation_direction,
+            Some(RelationDirection::Incoming)
+        );
+        assert_eq!(incoming.relation_scope.as_deref(), Some("invoices"));
+
+        let json = serde_json::to_value(incoming).unwrap();
+        for key in [
+            "relation_field",
+            "target_field",
+            "relation_direction",
+            "relation_scope",
+            "formula",
+            "result_type",
+        ] {
+            assert!(json.as_object().unwrap().contains_key(key), "missing {key}");
+        }
+        assert_eq!(json["relation_direction"], "Incoming");
+    }
+
+    #[test]
     fn load_overlay_rejects_invalid_formula_metadata() {
         let invalid_overlays = [
             (
@@ -1030,6 +1489,92 @@ scopes:
     }
 
     #[test]
+    fn load_overlay_rejects_invalid_lookup_rollup_metadata() {
+        let invalid_overlays = [
+            (
+                "lookup missing relation",
+                "fields:\n  value:\n    field_type: lookup\n    target_field: domain\n",
+            ),
+            (
+                "lookup missing target field",
+                "fields:\n  value:\n    field_type: lookup\n    relation_field: client\n",
+            ),
+            (
+                "lookup self relation",
+                "fields:\n  client:\n    field_type: lookup\n    relation_field: client\n    target_field: domain\n",
+            ),
+            (
+                "lookup formula",
+                "fields:\n  value:\n    field_type: lookup\n    relation_field: client\n    target_field: domain\n    formula: values[0]\n",
+            ),
+            (
+                "lookup direction",
+                "fields:\n  value:\n    field_type: lookup\n    relation_field: client\n    target_field: domain\n    relation_direction: outgoing\n",
+            ),
+            (
+                "lookup scope",
+                "fields:\n  value:\n    field_type: lookup\n    relation_field: client\n    target_field: domain\n    relation_scope: clients\n",
+            ),
+            (
+                "rollup missing relation",
+                "fields:\n  total:\n    field_type: rollup\n    target_field: amount\n    formula: values.length\n    result_type: number\n",
+            ),
+            (
+                "rollup missing target field",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: invoices\n    formula: values.length\n    result_type: number\n",
+            ),
+            (
+                "rollup missing formula",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: invoices\n    target_field: amount\n    result_type: number\n",
+            ),
+            (
+                "rollup missing result type",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: invoices\n    target_field: amount\n    formula: values.length\n",
+            ),
+            (
+                "rollup bad direction",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: invoices\n    target_field: amount\n    relation_direction: sideways\n    formula: values.length\n    result_type: number\n",
+            ),
+            (
+                "incoming rollup missing scope",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: client\n    target_field: amount\n    relation_direction: incoming\n    formula: values.length\n    result_type: number\n",
+            ),
+            (
+                "incoming rollup empty scope",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: client\n    target_field: amount\n    relation_direction: incoming\n    relation_scope: ' / '\n    formula: values.length\n    result_type: number\n",
+            ),
+            (
+                "outgoing rollup scope",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: invoices\n    target_field: amount\n    relation_scope: invoices\n    formula: values.length\n    result_type: number\n",
+            ),
+            (
+                "computed relation target",
+                "fields:\n  total:\n    field_type: rollup\n    relation_field: invoices\n    target_field: amount\n    target: invoices\n    formula: values.length\n    result_type: number\n",
+            ),
+            (
+                "metadata on ordinary field",
+                "fields:\n  total:\n    field_type: number\n    relation_field: invoices\n    target_field: amount\n",
+            ),
+            (
+                "reserved lookup field",
+                "fields:\n  path:\n    field_type: lookup\n    relation_field: client\n    target_field: domain\n",
+            ),
+        ];
+
+        for (case, yaml) in invalid_overlays {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(".markdownvdb.schema.yml"), yaml).unwrap();
+            assert!(
+                matches!(
+                    Schema::load_overlay(dir.path()),
+                    Err(crate::error::Error::Config(_))
+                ),
+                "{case} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn merge_without_overlay_returns_inferred() {
         let files = vec![make_file(serde_json::json!({"title": "Hello"}))];
         let inferred = Schema::infer(&files);
@@ -1053,6 +1598,7 @@ scopes:
                 target: None,
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1075,6 +1621,7 @@ scopes:
                 target: None,
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1101,6 +1648,7 @@ scopes:
                 target: None,
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1141,6 +1689,7 @@ scopes:
             target: None,
             formula: None,
             result_type: None,
+            ..OverlayField::default()
         }
     }
 
@@ -1537,6 +2086,7 @@ fields:
                 target: Some("assets".to_string()),
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1579,6 +2129,7 @@ fields:
                 target: Some("documents".to_string()),
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
 
@@ -1664,6 +2215,7 @@ fields:
                 target: Some("clients/".to_string()),
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1688,6 +2240,7 @@ fields:
                 target: Some("clients".to_string()),
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));
@@ -1709,6 +2262,7 @@ fields:
                 target: Some("clients".to_string()),
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let merged = Schema::merge(inferred, Some(overlay));

@@ -1,7 +1,7 @@
 mod format;
 mod update;
 
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
@@ -507,9 +507,9 @@ enum ModuleAction {
     List,
     /// Validate module input without changing the index
     Validate {
-        /// Module id (`formula`)
+        /// Module id (`formula` or `lookup_rollup`)
         module: String,
-        /// Formula expression to validate
+        /// Formula expression to validate (`values` is reserved by Rollup)
         #[arg(long)]
         formula: String,
         /// Declared formula result type
@@ -518,7 +518,19 @@ enum ModuleAction {
     },
     /// Recompute a module's persisted derived data
     Run {
-        /// Module id (`formula`)
+        /// Module id (`formula` or `lookup_rollup`)
+        module: String,
+        /// Optional folder scope
+        #[arg(long, conflicts_with = "shard")]
+        path: Option<String>,
+        /// Optional configured Shard scope
+        #[arg(long, conflicts_with = "path")]
+        shard: Option<String>,
+    },
+    /// Hold the project module lock across a trusted frontend overlay edit.
+    #[command(hide = true)]
+    Transaction {
+        /// Module id (`formula` or `lookup_rollup`)
         module: String,
         /// Optional folder scope
         #[arg(long, conflicts_with = "shard")]
@@ -529,7 +541,7 @@ enum ModuleAction {
     },
     /// Show persisted diagnostics for a module
     Status {
-        /// Module id (`formula`)
+        /// Module id (`formula` or `lookup_rollup`)
         module: String,
         /// Optional folder scope
         #[arg(long, conflicts_with = "shard")]
@@ -1447,8 +1459,7 @@ async fn run() -> anyhow::Result<()> {
                 }
                 None => {
                     if args.custom {
-                        let vdb =
-                            MarkdownVdb::open_readonly_with_config(cwd.clone(), config)?;
+                        let vdb = MarkdownVdb::open_readonly_with_config(cwd.clone(), config)?;
                         let (custom, unassigned_count) = if let Some(shard_id) = shard_id.as_deref()
                         {
                             (
@@ -1510,8 +1521,7 @@ async fn run() -> anyhow::Result<()> {
                             println!("  Unassigned: {unassigned_count} documents");
                         }
                     } else {
-                        let vdb =
-                            MarkdownVdb::open_readonly_with_config(cwd.clone(), config)?;
+                        let vdb = MarkdownVdb::open_readonly_with_config(cwd.clone(), config)?;
                         let clusters = if let Some(shard_id) = shard_id.as_deref() {
                             vdb.clusters_for_shard(shard_id)?
                         } else {
@@ -1830,17 +1840,24 @@ async fn run() -> anyhow::Result<()> {
                 formula,
                 result_type,
             } => {
-                if module != mdvdb::formula::FORMULA_MODULE_ID {
+                if module != mdvdb::formula::FORMULA_MODULE_ID && module != "lookup_rollup" {
                     anyhow::bail!("unknown module `{module}`");
                 }
                 let result_type = result_type
                     .parse::<mdvdb::FormulaResultType>()
                     .map_err(anyhow::Error::msg)?;
-                let diagnostics = mdvdb::formula::FormulaEngine::default()
-                    .validate(&formula, result_type)
-                    .err()
-                    .into_iter()
-                    .collect::<Vec<_>>();
+                let engine = mdvdb::formula::FormulaEngine::default();
+                let validation = if module == "lookup_rollup" {
+                    engine.validate_rollup(&formula, result_type)
+                } else {
+                    engine.validate(&formula, result_type)
+                };
+                let mut diagnostics = validation.err().into_iter().collect::<Vec<_>>();
+                if module == "lookup_rollup" {
+                    for diagnostic in &mut diagnostics {
+                        diagnostic.module = module.clone();
+                    }
+                }
                 let output = FormulaValidationOutput {
                     valid: diagnostics.is_empty(),
                     diagnostics,
@@ -1870,11 +1887,53 @@ async fn run() -> anyhow::Result<()> {
                 } else {
                     println!(
                         "{}: evaluated {} files, updated {} fields, {} diagnostics",
-                        report.module,
-                        report.files_evaluated,
-                        report.fields_updated,
-                        report.diagnostics.len()
+                        report.requested.module,
+                        report.requested.files_evaluated,
+                        report.requested.fields_updated,
+                        report.requested.diagnostics.len()
                     );
+                }
+            }
+            ModuleAction::Transaction {
+                module,
+                path,
+                shard,
+            } => {
+                let scope_path = resolve_shard_or_path(&cwd, path.as_deref(), shard.as_deref())?;
+                // Writable open briefly takes the same project lock while it
+                // reconciles the vector/FTS stores. Complete that setup first,
+                // then acquire the long-lived transaction lock advertised to
+                // the frontend; attempting to open after locking would
+                // self-contend on a non-reentrant filesystem lock.
+                let vdb = MarkdownVdb::open_with_config(cwd.clone(), config)?;
+                let lock = mdvdb::modules::acquire_module_run_lock(&cwd)?;
+                if json {
+                    println!("{{\"status\":\"locked\"}}");
+                } else {
+                    println!("locked");
+                }
+                std::io::stdout().flush()?;
+
+                let mut instruction = String::new();
+                std::io::stdin().lock().read_line(&mut instruction)?;
+                if instruction.trim() != "run" {
+                    if json {
+                        println!("{{\"status\":\"aborted\"}}");
+                    }
+                } else {
+                    let report = vdb.run_module_locked(&module, scope_path.as_deref(), &lock)?;
+                    if json {
+                        serde_json::to_writer_pretty(std::io::stdout(), &report)?;
+                        writeln!(std::io::stdout())?;
+                    } else {
+                        println!(
+                            "{}: evaluated {} files, updated {} fields, {} diagnostics",
+                            report.requested.module,
+                            report.requested.files_evaluated,
+                            report.requested.fields_updated,
+                            report.requested.diagnostics.len()
+                        );
+                    }
                 }
             }
             ModuleAction::Status {

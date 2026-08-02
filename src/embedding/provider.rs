@@ -39,9 +39,7 @@ pub fn create_provider(config: &Config) -> crate::Result<Box<dyn EmbeddingProvid
             config.embedding_model.clone(),
             config.embedding_dimensions,
         ))),
-        EmbeddingProviderType::Mock => {
-            Ok(Box::new(MockProvider::new(config.embedding_dimensions)))
-        }
+        EmbeddingProviderType::Mock => Ok(Box::new(MockProvider::new(config.embedding_dimensions))),
         EmbeddingProviderType::Custom => {
             let endpoint = config.embedding_endpoint.as_ref().ok_or_else(|| {
                 Error::EmbeddingProvider(

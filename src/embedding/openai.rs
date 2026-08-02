@@ -375,7 +375,11 @@ mod tests {
         let texts = vec![text; 5];
         // Budget fits exactly 2 texts per request.
         let groups = plan_requests(&texts, tokens * 2, 100, 1000);
-        assert_eq!(groups.len(), 3, "5 texts at 2-per-budget should yield 3 groups");
+        assert_eq!(
+            groups.len(),
+            3,
+            "5 texts at 2-per-budget should yield 3 groups"
+        );
         assert_eq!(groups[0].len(), 2);
         assert_eq!(groups[1].len(), 2);
         assert_eq!(groups[2].len(), 1);
@@ -398,7 +402,10 @@ mod tests {
         let groups = plan_requests(&texts, 1000, 100, 50);
         assert_eq!(groups.len(), 1);
         assert!(crate::chunker::count_tokens(&groups[0][0]) <= 50);
-        assert!(huge.starts_with(&groups[0][0]), "truncation must keep a prefix");
+        assert!(
+            huge.starts_with(&groups[0][0]),
+            "truncation must keep a prefix"
+        );
         assert_eq!(groups[0][1], "small");
     }
 

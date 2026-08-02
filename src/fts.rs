@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -8,6 +10,121 @@ use tantivy::schema::{
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument};
 
 use crate::error::{Error, Result};
+use crate::index::state::Index as VectorIndex;
+
+const RECONCILIATION_MARKER: &str = "fts-reconcile-required";
+
+fn reconciliation_marker_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".markdownvdb")
+        .join(RECONCILIATION_MARKER)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Return whether a previous vector/FTS transaction needs reconciliation.
+pub(crate) fn reconciliation_required(project_root: &Path) -> Result<bool> {
+    reconciliation_marker_path(project_root)
+        .try_exists()
+        .map_err(Error::Io)
+}
+
+/// Durably record that vector and FTS state may temporarily describe different
+/// generations. The marker is deliberately created before either store is
+/// mutated and remains valid even if the process exits midway through writing
+/// its small payload.
+pub(crate) fn begin_reconciliation(project_root: &Path) -> Result<()> {
+    let state_dir = project_root.join(".markdownvdb");
+    std::fs::create_dir_all(&state_dir)?;
+    let marker_path = reconciliation_marker_path(project_root);
+
+    let mut marker = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_path)
+    {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(Error::Io(error)),
+    };
+    marker.write_all(b"1\n")?;
+    marker.sync_all()?;
+    sync_directory(&state_dir)
+}
+
+/// Rebuild the complete FTS projection from the authoritative persisted vector
+/// index snapshot. A full replacement is required: a nonempty FTS index can be
+/// stale just as easily as an empty one.
+pub(crate) fn rebuild_from_vector_index(fts_index: &FtsIndex, index: &VectorIndex) -> Result<()> {
+    fts_index.delete_all()?;
+
+    let files = index.get_all_files();
+    let mut paths: Vec<_> = files.keys().cloned().collect();
+    paths.sort();
+    for path in paths {
+        let file = &files[&path];
+        let mut chunks = Vec::with_capacity(file.chunk_ids.len());
+        for chunk_id in &file.chunk_ids {
+            let chunk = index.get_chunk(chunk_id).ok_or_else(|| {
+                Error::Fts(format!(
+                    "cannot reconcile FTS: vector index file '{path}' references missing chunk '{chunk_id}'"
+                ))
+            })?;
+            chunks.push(FtsChunkData {
+                chunk_id: chunk_id.clone(),
+                source_path: chunk.source_path,
+                content: strip_markdown(&chunk.content),
+                heading_hierarchy: chunk.heading_hierarchy.join(" > "),
+            });
+        }
+        if !chunks.is_empty() {
+            fts_index.upsert_chunks(&path, &chunks)?;
+        }
+    }
+
+    fts_index.commit()
+}
+
+/// Repair a transaction interrupted after either store had changed. The marker
+/// is retired only after the rebuilt FTS commit succeeds.
+pub(crate) fn recover_if_required(
+    project_root: &Path,
+    index: &VectorIndex,
+    fts_index: &FtsIndex,
+) -> Result<bool> {
+    if !reconciliation_required(project_root)? {
+        return Ok(false);
+    }
+
+    tracing::warn!("recovering interrupted vector/FTS transaction");
+    rebuild_from_vector_index(fts_index, index)?;
+    finish_reconciliation(project_root)?;
+    Ok(true)
+}
+
+/// Retire the reconciliation marker after both companion stores are durable.
+/// Syncing the state directory before deletion orders the vector index rename
+/// ahead of marker retirement on filesystems that persist directory entries
+/// independently.
+pub(crate) fn finish_reconciliation(project_root: &Path) -> Result<()> {
+    let state_dir = project_root.join(".markdownvdb");
+    let marker_path = reconciliation_marker_path(project_root);
+    sync_directory(&state_dir)?;
+    match std::fs::remove_file(&marker_path) {
+        Ok(()) => sync_directory(&state_dir),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
 
 /// Data for a single chunk to be indexed in the FTS index.
 #[derive(Debug, Clone)]
@@ -112,7 +229,10 @@ impl FtsIndex {
     /// Deletes all existing chunks for the source path, then adds the new chunks.
     /// Call [`commit`] after all upserts are done.
     pub fn upsert_chunks(&self, source_path: &str, chunks: &[FtsChunkData]) -> Result<()> {
-        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let writer_mutex = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
         let writer = writer_mutex.lock();
         // Delete existing docs for this source path.
         let term = tantivy::Term::from_field_text(self.fields.source_path, source_path);
@@ -135,7 +255,10 @@ impl FtsIndex {
     ///
     /// Call [`commit`] after removals are done.
     pub fn remove_file(&self, source_path: &str) -> Result<()> {
-        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let writer_mutex = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
         let writer = writer_mutex.lock();
         let term = tantivy::Term::from_field_text(self.fields.source_path, source_path);
         writer.delete_term(term);
@@ -161,8 +284,10 @@ impl FtsIndex {
 
         let searcher = reader.searcher();
 
-        let mut query_parser =
-            QueryParser::for_index(&self.index, vec![self.fields.content, self.fields.heading_hierarchy]);
+        let mut query_parser = QueryParser::for_index(
+            &self.index,
+            vec![self.fields.content, self.fields.heading_hierarchy],
+        );
         query_parser.set_field_boost(self.fields.heading_hierarchy, 1.5);
 
         let (query, _errors) = query_parser.parse_query_lenient(query_str);
@@ -176,9 +301,16 @@ impl FtsIndex {
             let doc: TantivyDocument = searcher
                 .doc(doc_address)
                 .map_err(|e| Error::Fts(e.to_string()))?;
-            if let Some(chunk_id) = doc.get_first(self.fields.chunk_id).and_then(|v: &tantivy::schema::OwnedValue| {
-                if let tantivy::schema::OwnedValue::Str(s) = v { Some(s.as_str()) } else { None }
-            }) {
+            if let Some(chunk_id) =
+                doc.get_first(self.fields.chunk_id)
+                    .and_then(|v: &tantivy::schema::OwnedValue| {
+                        if let tantivy::schema::OwnedValue::Str(s) = v {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
+            {
                 results.push(FtsResult {
                     chunk_id: chunk_id.to_string(),
                     score,
@@ -190,7 +322,10 @@ impl FtsIndex {
 
     /// Commit all pending writes to the index and reload the reader.
     pub fn commit(&self) -> Result<()> {
-        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let writer_mutex = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
         let mut writer = writer_mutex.lock();
         writer.commit().map_err(|e| Error::Fts(e.to_string()))?;
         Ok(())
@@ -210,9 +345,14 @@ impl FtsIndex {
 
     /// Delete all documents from the index.
     pub fn delete_all(&self) -> Result<()> {
-        let writer_mutex = self.writer.as_ref().ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
+        let writer_mutex = self
+            .writer
+            .as_ref()
+            .ok_or_else(|| Error::Fts("FTS index opened in read-only mode".into()))?;
         let writer = writer_mutex.lock();
-        writer.delete_all_documents().map_err(|e| Error::Fts(e.to_string()))?;
+        writer
+            .delete_all_documents()
+            .map_err(|e| Error::Fts(e.to_string()))?;
         Ok(())
     }
 }
@@ -266,6 +406,9 @@ pub fn strip_markdown(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunker::chunk_document;
+    use crate::index::types::EmbeddingConfig;
+    use crate::parser::parse_markdown_file;
     use tempfile::TempDir;
 
     #[test]
@@ -403,5 +546,121 @@ mod tests {
         let chunk_ids: Vec<&str> = results.iter().map(|r| r.chunk_id.as_str()).collect();
         assert!(chunk_ids.contains(&"a.md#0"));
         assert!(chunk_ids.contains(&"b.md#0"));
+    }
+
+    #[test]
+    fn durable_marker_recovers_a_nonempty_stale_fts_index() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+        std::fs::write(
+            root.join("doc.md"),
+            "# Current\n\nThe authoritative vector snapshot contains platypuses.\n",
+        )
+        .unwrap();
+
+        let file = parse_markdown_file(root, Path::new("doc.md")).unwrap();
+        let chunks = chunk_document(&file, 512, 0).unwrap();
+        assert!(!chunks.is_empty());
+        let embedding_config = EmbeddingConfig {
+            provider: "test".into(),
+            model: "test".into(),
+            dimensions: 8,
+        };
+        let index =
+            VectorIndex::create(&root.join(".markdownvdb").join("index"), &embedding_config)
+                .unwrap();
+        let embeddings = vec![vec![1.0; 8]; chunks.len()];
+        index.upsert(&file, &chunks, &embeddings).unwrap();
+        index.save().unwrap();
+
+        let fts_index = FtsIndex::open_or_create(&root.join(".markdownvdb").join("fts")).unwrap();
+        fts_index
+            .upsert_chunks(
+                "obsolete.md",
+                &[FtsChunkData {
+                    chunk_id: "obsolete.md#0".into(),
+                    source_path: "obsolete.md".into(),
+                    content: "This stale committed generation contains narwhals.".into(),
+                    heading_hierarchy: "Obsolete".into(),
+                }],
+            )
+            .unwrap();
+        fts_index.commit().unwrap();
+        assert!(!fts_index.search("narwhals", 10).unwrap().is_empty());
+        assert!(fts_index.search("platypuses", 10).unwrap().is_empty());
+
+        // Simulate a process dying after committing the vector generation but
+        // before replacing an already-populated FTS generation.
+        begin_reconciliation(root).unwrap();
+        assert!(reconciliation_required(root).unwrap());
+
+        assert!(recover_if_required(root, &index, &fts_index).unwrap());
+        assert!(!reconciliation_required(root).unwrap());
+        assert!(fts_index.search("narwhals", 10).unwrap().is_empty());
+        let current = fts_index.search("platypuses", 10).unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].chunk_id, chunks[0].id);
+    }
+
+    #[test]
+    fn incompatible_vector_rebuild_marks_before_replacing_nonempty_fts() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let state_dir = root.join(".markdownvdb");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(root.join("doc.md"), "# Old\n\nSearchable quokkas.\n").unwrap();
+
+        let file = parse_markdown_file(root, Path::new("doc.md")).unwrap();
+        let chunks = chunk_document(&file, 512, 0).unwrap();
+        let embedding_config = EmbeddingConfig {
+            provider: "test".into(),
+            model: "test".into(),
+            dimensions: 8,
+        };
+        let index_path = state_dir.join("index");
+        let index = VectorIndex::create(&index_path, &embedding_config).unwrap();
+        index
+            .upsert(&file, &chunks, &vec![vec![1.0; 8]; chunks.len()])
+            .unwrap();
+        index.save().unwrap();
+
+        let fts_index = FtsIndex::open_or_create(&state_dir.join("fts")).unwrap();
+        fts_index
+            .upsert_chunks(
+                "doc.md",
+                &[FtsChunkData {
+                    chunk_id: "doc.md#0".into(),
+                    source_path: "doc.md".into(),
+                    content: "Searchable quokkas.".into(),
+                    heading_hierarchy: "Old".into(),
+                }],
+            )
+            .unwrap();
+        fts_index.commit().unwrap();
+        drop(index);
+
+        // Force the archived-version gate, then stop at the exact historical
+        // crash boundary: vector replacement has completed but FTS repair has
+        // not started. The pre-rebuild hook must already be durable.
+        let mut archived = std::fs::read(&index_path).unwrap();
+        archived[6..10].copy_from_slice(&(crate::index::storage::VERSION + 1).to_le_bytes());
+        std::fs::write(&index_path, archived).unwrap();
+        let (rebuilt, was_rebuilt) =
+            VectorIndex::open_or_create_with_options_report_and_rebuild_hook(
+                &index_path,
+                &embedding_config,
+                crate::index::storage::WriteOptions::default(),
+                || begin_reconciliation(root),
+            )
+            .unwrap();
+        assert!(was_rebuilt);
+        assert!(reconciliation_required(root).unwrap());
+        assert!(!fts_index.search("quokkas", 10).unwrap().is_empty());
+
+        assert!(recover_if_required(root, &rebuilt, &fts_index).unwrap());
+        assert!(!reconciliation_required(root).unwrap());
+        assert!(fts_index.search("quokkas", 10).unwrap().is_empty());
+        assert_eq!(fts_index.num_docs().unwrap(), 0);
     }
 }

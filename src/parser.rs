@@ -161,65 +161,50 @@ pub struct Heading {
     pub line_number: usize,
 }
 
+/// True only for an exact frontmatter delimiter at column zero.
+///
+/// Keep every frontmatter reader/writer on this predicate. In particular,
+/// indented `---` inside a block scalar and suffix-bearing lines such as
+/// `--- # comment` are YAML content, never envelope boundaries.
+pub(crate) fn is_frontmatter_delimiter_line(line: &str) -> bool {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line == "---"
+}
+
 /// Extract YAML frontmatter from markdown content.
 ///
-/// Frontmatter must appear at the very start of the file, delimited by `---` lines.
-/// Returns `None` if no frontmatter is present or if it is malformed.
+/// Frontmatter must appear at the very start of the file, delimited by exact
+/// column-zero `---` lines. Returns `None` if no frontmatter is present or if
+/// it is malformed.
 pub fn extract_frontmatter(content: &str) -> (Option<serde_json::Value>, &str) {
     let trimmed = content.trim_start_matches('\u{feff}'); // strip BOM
-    if !trimmed.starts_with("---") {
-        return (None, content);
-    }
-
-    // Find the opening delimiter line end
-    let after_open = match trimmed[3..].find('\n') {
-        Some(i) => 3 + i + 1,
+    let after_open = match trimmed.find('\n') {
+        Some(index) => index + 1,
         None => return (None, content),
     };
-
-    // Only whitespace allowed after opening ---
-    if !trimmed[3..after_open].trim().is_empty() {
+    if !is_frontmatter_delimiter_line(&trimmed[..after_open]) {
         return (None, content);
     }
 
-    // Find closing ---
-    let rest = &trimmed[after_open..];
-    let closing_pos = rest.find("\n---").or_else(|| {
-        // Handle case where --- is at the very start of rest (empty frontmatter)
-        if rest.starts_with("---") {
-            Some(0)
-        } else {
-            None
-        }
-    });
-
-    let closing_pos = match closing_pos {
-        Some(p) => p,
-        None => {
+    let mut cursor = after_open;
+    let (closing_start, body_start) = loop {
+        if cursor >= trimmed.len() {
             tracing::warn!("frontmatter missing closing ---");
             return (None, content);
         }
+        let remaining = &trimmed[cursor..];
+        let line_len = remaining
+            .find('\n')
+            .map_or(remaining.len(), |index| index + 1);
+        let line = &remaining[..line_len];
+        if is_frontmatter_delimiter_line(line) {
+            break (cursor, cursor + line_len);
+        }
+        cursor += line_len;
     };
 
-    let yaml_str = if closing_pos == 0 && rest.starts_with("---") {
-        ""
-    } else {
-        &rest[..closing_pos]
-    };
-
-    // Find where the body starts (after closing --- line)
-    let after_closing_start = after_open
-        + closing_pos
-        + if closing_pos == 0 && rest.starts_with("---") {
-            0
-        } else {
-            1
-        };
-    let after_closing = &trimmed[after_closing_start..];
-    let body_start = match after_closing.find('\n') {
-        Some(i) => after_closing_start + i + 1,
-        None => trimmed.len(),
-    };
+    let yaml_str = &trimmed[after_open..closing_start];
     let body = &trimmed[body_start..];
 
     let yaml_trimmed = yaml_str.trim();
@@ -319,14 +304,10 @@ fn count_yaml_float_numbers(value: &serde_yaml::Value) -> usize {
         {
             1
         }
-        serde_yaml::Value::Sequence(values) => {
-            values.iter().map(count_yaml_float_numbers).sum()
-        }
+        serde_yaml::Value::Sequence(values) => values.iter().map(count_yaml_float_numbers).sum(),
         serde_yaml::Value::Mapping(values) => values
             .iter()
-            .map(|(key, value)| {
-                count_yaml_float_numbers(key) + count_yaml_float_numbers(value)
-            })
+            .map(|(key, value)| count_yaml_float_numbers(key) + count_yaml_float_numbers(value))
             .sum(),
         serde_yaml::Value::Tagged(tagged) => count_yaml_float_numbers(&tagged.value),
         _ => 0,
@@ -650,6 +631,46 @@ mod tests {
     }
 
     #[test]
+    fn extract_frontmatter_uses_only_exact_column_zero_delimiters() {
+        let block_scalar = concat!(
+            "---\n",
+            "title: Safe\n",
+            "notes: |-\n",
+            "  before\n",
+            "  ---\n",
+            "  after\n",
+            "---\n",
+            "Body\n",
+        );
+        let (frontmatter, body) = extract_frontmatter(block_scalar);
+        let frontmatter = frontmatter.unwrap();
+        assert_eq!(frontmatter["title"], "Safe");
+        assert_eq!(frontmatter["notes"], "before\n---\nafter");
+        assert_eq!(body, "Body\n");
+
+        for ambiguous in [
+            "--- #comment\ntitle: Safe\n---\nBody\n",
+            "--- garbage\ntitle: Safe\n---\nBody\n",
+            "---   \ntitle: Safe\n---\nBody\n",
+            "---\ntitle: Safe\n--- #comment\nBody\n",
+            "---\ntitle: Safe\n--- garbage\nBody\n",
+            "---\ntitle: Safe\n---   \nBody\n",
+        ] {
+            let (frontmatter, body) = extract_frontmatter(ambiguous);
+            assert!(frontmatter.is_none(), "{ambiguous:?}");
+            assert_eq!(body, ambiguous, "{ambiguous:?}");
+        }
+    }
+
+    #[test]
+    fn exact_frontmatter_delimiters_support_bom_and_crlf() {
+        let content = "\u{feff}---\r\ntitle: Safe\r\n---\r\nBody\r\n";
+        let (frontmatter, body) = extract_frontmatter(content);
+        assert_eq!(frontmatter.unwrap()["title"], "Safe");
+        assert_eq!(body, "Body\r\n");
+    }
+
+    #[test]
     fn extract_frontmatter_missing_closing() {
         let content = "---\ntitle: Oops\nNo closing delimiter";
         let (fm, _body) = extract_frontmatter(content);
@@ -708,7 +729,12 @@ mod tests {
             serde_json::Value::String("0.1000000000000000000000000001".to_string())
         );
         assert_eq!(fm["scientific"].to_string(), "1.234567890123456789e+5");
-        let keyed_value = fm["float_key"].as_object().unwrap().values().next().unwrap();
+        let keyed_value = fm["float_key"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap();
         assert_eq!(keyed_value.to_string(), "9.876543210987654321");
     }
 

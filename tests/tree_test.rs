@@ -50,10 +50,10 @@ fn mock_config() -> Config {
         search_expand_limit: 3,
         vector_quantization: mdvdb::VectorQuantization::F16,
         index_compression: true,
-            edge_embeddings: true,
-            edge_boost_weight: 0.15,
-            edge_cluster_rebalance: 50,
-            custom_cluster_defs: Vec::new(),
+        edge_embeddings: true,
+        edge_boost_weight: 0.15,
+        edge_cluster_rebalance: 50,
+        custom_cluster_defs: Vec::new(),
     }
 }
 
@@ -287,11 +287,26 @@ async fn test_file_tree_json_serialization() {
     let json = serde_json::to_value(&tree).unwrap();
 
     assert!(json.get("root").is_some(), "JSON should have 'root' field");
-    assert!(json.get("total_files").is_some(), "JSON should have 'total_files'");
-    assert!(json.get("indexed_count").is_some(), "JSON should have 'indexed_count'");
-    assert!(json.get("modified_count").is_some(), "JSON should have 'modified_count'");
-    assert!(json.get("new_count").is_some(), "JSON should have 'new_count'");
-    assert!(json.get("deleted_count").is_some(), "JSON should have 'deleted_count'");
+    assert!(
+        json.get("total_files").is_some(),
+        "JSON should have 'total_files'"
+    );
+    assert!(
+        json.get("indexed_count").is_some(),
+        "JSON should have 'indexed_count'"
+    );
+    assert!(
+        json.get("modified_count").is_some(),
+        "JSON should have 'modified_count'"
+    );
+    assert!(
+        json.get("new_count").is_some(),
+        "JSON should have 'new_count'"
+    );
+    assert!(
+        json.get("deleted_count").is_some(),
+        "JSON should have 'deleted_count'"
+    );
 
     let root = json.get("root").unwrap();
     assert_eq!(root.get("name").unwrap(), ".");
@@ -301,7 +316,10 @@ async fn test_file_tree_json_serialization() {
     // Verify file node has state
     let children = root.get("children").unwrap().as_array().unwrap();
     assert!(!children.is_empty());
-    let file_node = children.iter().find(|c| !c.get("is_dir").unwrap().as_bool().unwrap()).unwrap();
+    let file_node = children
+        .iter()
+        .find(|c| !c.get("is_dir").unwrap().as_bool().unwrap())
+        .unwrap();
     assert!(file_node.get("state").is_some());
     assert_eq!(file_node.get("state").unwrap(), "indexed");
 

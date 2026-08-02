@@ -513,6 +513,79 @@ async fn test_fts_auto_rebuild_from_rkyv() {
 }
 
 #[tokio::test]
+async fn test_writable_open_recovers_marked_nonempty_stale_fts() {
+    let (dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    assert!(!vdb.fts_index().search("rust", 10).unwrap().is_empty());
+
+    // Model a crash after the authoritative vector generation was committed
+    // while a different, nonempty FTS generation was still on disk.
+    vdb.fts_index().delete_all().unwrap();
+    vdb.fts_index()
+        .upsert_chunks(
+            "obsolete.md",
+            &[mdvdb::fts::FtsChunkData {
+                chunk_id: "obsolete.md#0".into(),
+                source_path: "obsolete.md".into(),
+                content: "narwhals belong only to the stale generation".into(),
+                heading_hierarchy: "Obsolete".into(),
+            }],
+        )
+        .unwrap();
+    vdb.fts_index().commit().unwrap();
+    fs::write(
+        dir.path()
+            .join(".markdownvdb")
+            .join("fts-reconcile-required"),
+        "1\n",
+    )
+    .unwrap();
+    drop(vdb);
+
+    let reopened = MarkdownVdb::open_with_config(dir.path().to_path_buf(), mock_config()).unwrap();
+    assert!(
+        !dir.path()
+            .join(".markdownvdb")
+            .join("fts-reconcile-required")
+            .exists(),
+        "successful writable recovery should retire the marker"
+    );
+    assert!(reopened
+        .fts_index()
+        .search("narwhals", 10)
+        .unwrap()
+        .is_empty());
+    assert!(!reopened.fts_index().search("rust", 10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_writable_open_safely_reconciles_fts_after_incompatible_vector_rebuild() {
+    let (dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    assert!(!vdb.fts_index().search("rust", 10).unwrap().is_empty());
+    drop(vdb);
+
+    let index_path = dir.path().join(".markdownvdb").join("index");
+    let mut archived = fs::read(&index_path).unwrap();
+    archived[6..10].copy_from_slice(&(mdvdb::index::storage::VERSION + 1).to_le_bytes());
+    fs::write(&index_path, archived).unwrap();
+
+    let reopened = MarkdownVdb::open_with_config(dir.path().to_path_buf(), mock_config()).unwrap();
+    assert_eq!(reopened.status().document_count, 0);
+    assert_eq!(reopened.fts_index().num_docs().unwrap(), 0);
+    assert!(reopened.fts_index().search("rust", 10).unwrap().is_empty());
+    assert!(!dir
+        .path()
+        .join(".markdownvdb")
+        .join("fts-reconcile-required")
+        .exists());
+
+    // The required unscoped recovery ingest repopulates both generations.
+    reopened.ingest(IngestOptions::default()).await.unwrap();
+    assert!(!reopened.fts_index().search("rust", 10).unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_full_ingest_rebuilds_fts() {
     let (_dir, vdb) = setup_project();
 
@@ -532,6 +605,84 @@ async fn test_full_ingest_rebuilds_fts() {
         fts_after > 0,
         "FTS should have docs after full re-ingest, got {fts_after}"
     );
+}
+
+#[tokio::test]
+async fn cancelled_full_ingest_preserves_fts_until_next_rebuild() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb/config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    let note_path = root.join("note.md");
+    fs::write(
+        &note_path,
+        "# Search fixture\n\nA cuttlefish appears in the indexed revision.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    let old_query = || {
+        SearchQuery::new("cuttlefish")
+            .with_mode(SearchMode::Lexical)
+            .with_limit(10)
+    };
+    let new_query = || {
+        SearchQuery::new("platypus")
+            .with_mode(SearchMode::Lexical)
+            .with_limit(10)
+    };
+    let docs_before = vdb.fts_index().num_docs().unwrap();
+    assert!(docs_before > 0);
+    assert!(!vdb.search(old_query()).await.unwrap().results.is_empty());
+
+    fs::write(
+        &note_path,
+        "# Search fixture\n\nA platypus appears in the replacement revision.\n",
+    )
+    .unwrap();
+    let token = tokio_util::sync::CancellationToken::new();
+    let callback_token = token.clone();
+    let cancelled = vdb
+        .ingest(IngestOptions {
+            full: true,
+            progress: Some(Box::new(move |phase| {
+                if matches!(phase, mdvdb::IngestPhase::Parsing { .. }) {
+                    callback_token.cancel();
+                }
+            })),
+            cancel: Some(token),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(cancelled.cancelled);
+    assert!(
+        !root
+            .join(".markdownvdb")
+            .join("fts-reconcile-required")
+            .exists(),
+        "cancellation before the mutation boundary must not create a recovery marker"
+    );
+    assert_eq!(vdb.fts_index().num_docs().unwrap(), docs_before);
+    assert!(!vdb.search(old_query()).await.unwrap().results.is_empty());
+    assert!(vdb.search(new_query()).await.unwrap().results.is_empty());
+
+    let rebuilt = vdb
+        .ingest(IngestOptions {
+            full: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(!rebuilt.cancelled);
+    assert!(vdb.search(old_query()).await.unwrap().results.is_empty());
+    assert!(!vdb.search(new_query()).await.unwrap().results.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1081,6 +1232,104 @@ async fn test_ingest_cancellation() {
 
     let result = vdb.ingest(opts).await.unwrap();
     assert!(result.cancelled, "result should indicate cancellation");
+}
+
+#[tokio::test]
+async fn cancellation_after_frontmatter_parse_does_not_commit_partial_formula_state() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::create_dir_all(root.join("invoices")).unwrap();
+    fs::write(
+        root.join(".markdownvdb/config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".markdownvdb.schema.yml"),
+        r#"scopes:
+  invoices:
+    fields:
+      total:
+        field_type: formula
+        formula: price * quantity
+        result_type: number
+"#,
+    )
+    .unwrap();
+    let invoice_path = root.join("invoices/a.md");
+    fs::write(
+        &invoice_path,
+        "---\nprice: 2\nquantity: 3\n---\n\n# Invoice\n\nUnchanged body.\n",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    let before = vdb.index().get_file("invoices/a.md").unwrap();
+    let before_frontmatter: serde_json::Value =
+        serde_json::from_str(before.frontmatter.as_deref().unwrap()).unwrap();
+    assert_eq!(before_frontmatter["price"], serde_json::json!(2));
+    assert_eq!(before_frontmatter["total"], serde_json::json!(6));
+
+    let current = fs::read_to_string(&invoice_path).unwrap();
+    fs::write(&invoice_path, current.replacen("price: 2", "price: 5", 1)).unwrap();
+
+    // Cancel from the Embedding notification: parsing has completed, but the
+    // ingest has not crossed its final pre-upsert cancellation barrier.
+    let token = tokio_util::sync::CancellationToken::new();
+    let callback_token = token.clone();
+    let cancelled = vdb
+        .ingest(IngestOptions {
+            progress: Some(Box::new(move |phase| {
+                if matches!(phase, mdvdb::IngestPhase::Embedding { .. }) {
+                    callback_token.cancel();
+                }
+            })),
+            cancel: Some(token),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    assert!(cancelled.cancelled);
+    assert_eq!(cancelled.files_indexed, 0);
+    assert!(cancelled.module_reports.is_empty());
+    let after_cancel = vdb.index().get_file("invoices/a.md").unwrap();
+    assert_eq!(after_cancel.content_hash, before.content_hash);
+    assert_eq!(after_cancel.frontmatter, before.frontmatter);
+    assert_eq!(after_cancel.computed_fields, before.computed_fields);
+    let reopened =
+        MarkdownVdb::open_readonly_with_config(root.to_path_buf(), mock_config()).unwrap();
+    let persisted_after_cancel = reopened.index().get_file("invoices/a.md").unwrap();
+    assert_eq!(persisted_after_cancel.content_hash, before.content_hash);
+    assert_eq!(persisted_after_cancel.frontmatter, before.frontmatter);
+    assert_eq!(
+        persisted_after_cancel.computed_fields,
+        before.computed_fields
+    );
+    drop(reopened);
+
+    // The next uncancelled ingest must still see the pending source revision
+    // and recompute Formula without re-embedding the unchanged body.
+    let caught_up = vdb.ingest(IngestOptions::default()).await.unwrap();
+    assert_eq!(caught_up.files_indexed, 1);
+    assert_eq!(caught_up.api_calls, 0);
+    assert!(!caught_up.module_reports.is_empty());
+
+    let parsed =
+        mdvdb::parser::parse_markdown_file(root, PathBuf::from("invoices/a.md").as_path()).unwrap();
+    assert_eq!(
+        parsed.frontmatter.as_ref().unwrap()["price"],
+        serde_json::json!(5)
+    );
+    assert_eq!(
+        parsed.frontmatter.as_ref().unwrap()["total"],
+        serde_json::json!(15)
+    );
+    let caught_up_file = vdb.index().get_file("invoices/a.md").unwrap();
+    assert_eq!(caught_up_file.content_hash, parsed.content_hash);
 }
 
 // ---------------------------------------------------------------------------

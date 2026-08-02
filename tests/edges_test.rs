@@ -53,7 +53,7 @@ fn mock_config() -> Config {
         edge_embeddings: true,
         edge_boost_weight: 0.15,
         edge_cluster_rebalance: 50,
-            custom_cluster_defs: Vec::new(),
+        custom_cluster_defs: Vec::new(),
     }
 }
 
@@ -141,10 +141,7 @@ async fn test_ingest_edges_filtered_by_file() {
     vdb.ingest(IngestOptions::default()).await.unwrap();
 
     let alpha_edges = vdb.edges(Some("alpha.md")).unwrap();
-    assert!(
-        !alpha_edges.is_empty(),
-        "alpha.md should have edges"
-    );
+    assert!(!alpha_edges.is_empty(), "alpha.md should have edges");
     for edge in &alpha_edges {
         assert!(
             edge.source == "alpha.md" || edge.target == "alpha.md",
@@ -225,8 +222,14 @@ async fn test_edge_weighted_boost_differs_from_flat() {
     let response_flat = vdb_flat.search(q2).await.unwrap();
 
     // Both should return results
-    assert!(!response_edge.results.is_empty(), "edge-boosted search should have results");
-    assert!(!response_flat.results.is_empty(), "flat-boosted search should have results");
+    assert!(
+        !response_edge.results.is_empty(),
+        "edge-boosted search should have results"
+    );
+    assert!(
+        !response_flat.results.is_empty(),
+        "flat-boosted search should have results"
+    );
 
     // Scores may differ when edge boost is active vs not
     // We just verify both work without error — exact score differences depend on mock embeddings
@@ -268,7 +271,12 @@ async fn test_incremental_edge_update() {
     .unwrap();
 
     // Re-ingest with --full to ensure complete rebuild
-    vdb.ingest(IngestOptions { full: true, ..Default::default() }).await.unwrap();
+    vdb.ingest(IngestOptions {
+        full: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
 
     let edges_after = vdb.edges(None).unwrap();
     let alpha_edges_after = vdb.edges(Some("alpha.md")).unwrap();
@@ -294,7 +302,9 @@ async fn test_incremental_edge_update() {
     );
 
     // New edges should include delta connections
-    let has_delta_edges = edges_after.iter().any(|e| e.source == "delta.md" || e.target == "delta.md");
+    let has_delta_edges = edges_after
+        .iter()
+        .any(|e| e.source == "delta.md" || e.target == "delta.md");
     assert!(
         has_delta_edges,
         "delta.md should have edges after re-ingest"
@@ -375,11 +385,7 @@ async fn test_backward_compat_no_edges() {
     let mut cfg_no_edges = mock_config();
     cfg_no_edges.edge_embeddings = false;
 
-    fs::write(
-        root.join("a.md"),
-        "# A\n\nLink to [B](b.md).\n",
-    )
-    .unwrap();
+    fs::write(root.join("a.md"), "# A\n\nLink to [B](b.md).\n").unwrap();
     fs::write(root.join("b.md"), "# B\n\nContent of B.\n").unwrap();
 
     let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), cfg_no_edges).unwrap();
@@ -543,7 +549,10 @@ fn test_cli_edges_json_returns_valid_json() {
 
     // Should have top-level fields
     assert!(parsed["edges"].is_array(), "should have 'edges' array");
-    assert!(parsed["total_edges"].is_number(), "should have 'total_edges'");
+    assert!(
+        parsed["total_edges"].is_number(),
+        "should have 'total_edges'"
+    );
 
     let edges = parsed["edges"].as_array().unwrap();
     assert!(!edges.is_empty(), "should have at least one edge");
@@ -553,8 +562,14 @@ fn test_cli_edges_json_returns_valid_json() {
     assert!(edge["edge_id"].is_string(), "edge should have edge_id");
     assert!(edge["source"].is_string(), "edge should have source");
     assert!(edge["target"].is_string(), "edge should have target");
-    assert!(edge["context_text"].is_string(), "edge should have context_text");
-    assert!(edge["line_number"].is_number(), "edge should have line_number");
+    assert!(
+        edge["context_text"].is_string(),
+        "edge should have context_text"
+    );
+    assert!(
+        edge["line_number"].is_number(),
+        "edge should have line_number"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -578,8 +593,7 @@ fn test_cli_edges_file_filter_json() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("should be valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     let edges = parsed["edges"].as_array().unwrap();
     assert!(!edges.is_empty(), "alpha.md should have edges");
@@ -664,8 +678,7 @@ fn test_cli_search_edge_search_json() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("should be valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
 
     // Should have edge_results array
     assert!(

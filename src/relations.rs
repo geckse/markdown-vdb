@@ -69,9 +69,13 @@ pub struct RelationContext {
     target_cache: Mutex<HashMap<String, HashMap<String, String>>>,
     /// Per-directory cache of fields explicitly pinned as `field_type: file`.
     file_field_cache: Mutex<HashMap<String, HashSet<String>>>,
-    /// Per-directory cache of materialized Formula fields. Their values are
-    /// source metadata, but formulas do not create relation graph edges.
-    formula_field_cache: Mutex<HashMap<String, HashSet<String>>>,
+    /// Per-directory cache of schema-declared computed fields. Their values
+    /// are source metadata, but computed outputs never create relation edges.
+    computed_field_cache: Mutex<HashMap<String, HashSet<String>>>,
+    /// Persisted module ownership keyed by source path. This remains effective
+    /// while a definition is being removed or when the live overlay is invalid,
+    /// preventing stale link-shaped computed values from becoming graph edges.
+    computed_field_owners: HashMap<String, HashSet<String>>,
 }
 
 impl RelationContext {
@@ -82,8 +86,20 @@ impl RelationContext {
             overlay,
             target_cache: Mutex::new(HashMap::new()),
             file_field_cache: Mutex::new(HashMap::new()),
-            formula_field_cache: Mutex::new(HashMap::new()),
+            computed_field_cache: Mutex::new(HashMap::new()),
+            computed_field_owners: HashMap::new(),
         }
+    }
+
+    /// Add persisted computed-field ownership to this resolution context.
+    ///
+    /// The ordinary constructor remains source-compatible for read paths that
+    /// only have the live overlay. Graph/module paths with an index snapshot
+    /// should supply ownership so definition removal cannot transiently turn a
+    /// materialized computed string into a relation.
+    pub fn with_computed_field_owners(mut self, owners: HashMap<String, HashSet<String>>) -> Self {
+        self.computed_field_owners = owners;
+        self
     }
 
     /// An empty context (no known files, no overlay). Useful in tests.
@@ -146,13 +162,22 @@ impl RelationContext {
         fields.contains(field)
     }
 
-    /// Whether `(source file, field)` is declared as a Formula field.
-    pub fn is_formula_field(&self, source: &str, field: &str) -> bool {
+    /// Whether `(source file, field)` is module-owned or declared as Formula,
+    /// Lookup, or Rollup. Computed values are materialized metadata but are not
+    /// user-authored foreign keys and must never enter populate/link traversal.
+    pub fn is_computed_field(&self, source: &str, field: &str) -> bool {
+        if self
+            .computed_field_owners
+            .get(source)
+            .is_some_and(|fields| fields.contains(field))
+        {
+            return true;
+        }
         let Some(overlay) = self.overlay.as_ref() else {
             return false;
         };
         let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-        let mut cache = self.formula_field_cache.lock();
+        let mut cache = self.computed_field_cache.lock();
         let fields = cache.entry(dir.to_string()).or_insert_with(|| {
             let prefix = if dir.is_empty() {
                 String::new()
@@ -165,12 +190,19 @@ impl RelationContext {
                     field
                         .field_type
                         .as_deref()
-                        .filter(|kind| kind.eq_ignore_ascii_case("formula"))
+                        .and_then(crate::schema::parse_field_type_str)
+                        .filter(crate::schema::FieldType::is_computed)
                         .map(|_| name)
                 })
                 .collect()
         });
         fields.contains(field)
+    }
+
+    /// Backward-compatible Formula predicate. New consumers should call
+    /// [`Self::is_computed_field`] so Lookup/Rollup outputs are also excluded.
+    pub fn is_formula_field(&self, source: &str, field: &str) -> bool {
+        self.is_computed_field(source, field)
     }
 }
 
@@ -307,12 +339,30 @@ pub fn resolve_relation_target(
     target_folder: Option<&str>,
     known_files: &HashSet<String>,
 ) -> Option<(String, bool)> {
+    let candidates = relation_target_candidates(source, target, target_folder);
+    let fallback = candidates.first()?.clone();
+    candidates
+        .into_iter()
+        .find(|candidate| known_files.contains(candidate))
+        .map(|candidate| (candidate, true))
+        .or(Some((fallback, false)))
+}
+
+/// Return every target candidate in the exact order used by
+/// [`resolve_relation_target`]. Candidates after the first existing path do
+/// not affect the current winner, but exposing the ordered set lets computed
+/// modules snapshot absent higher-priority paths for their pre-write CAS.
+pub(crate) fn relation_target_candidates(
+    source: &str,
+    target: &str,
+    target_folder: Option<&str>,
+) -> Vec<String> {
     let t = target.trim();
     let t = t.split('#').next().unwrap_or(t);
     let t = crate::path_util::normalize_path_input(t);
     let t = t.trim().trim_start_matches('/');
     if t.is_empty() {
-        return None;
+        return Vec::new();
     }
 
     if t.contains('/') {
@@ -324,14 +374,12 @@ pub fn resolve_relation_target(
         } else {
             format!("{s}.md")
         };
-        if known_files.contains(&root_candidate) {
-            return Some((root_candidate, true));
-        }
         let source_rel = crate::links::resolve_link(source, t);
-        if !source_rel.is_empty() && known_files.contains(&source_rel) {
-            return Some((source_rel, true));
+        let mut candidates = vec![root_candidate.clone()];
+        if !source_rel.is_empty() && source_rel != root_candidate {
+            candidates.push(source_rel);
         }
-        return Some((root_candidate, false));
+        return candidates;
     }
 
     if let Some(folder) = target_folder {
@@ -342,17 +390,15 @@ pub fn resolve_relation_target(
         } else {
             format!("{folder}/{t}.md")
         };
-        let exists = known_files.contains(&candidate);
-        return Some((candidate, exists));
+        return vec![candidate];
     }
 
     // Step 3: source-dir-relative (same as body links).
     let resolved = crate::links::resolve_link(source, t);
     if resolved.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let exists = known_files.contains(&resolved);
-    Some((resolved, exists))
+    vec![resolved]
 }
 
 #[cfg(test)]
@@ -495,6 +541,22 @@ mod tests {
     // --- resolution-order matrix ---
 
     #[test]
+    fn relation_target_candidates_preserve_winner_order() {
+        assert_eq!(
+            relation_target_candidates("invoices/i1.md", "sub/note", None),
+            vec!["sub/note.md", "invoices/sub/note.md"]
+        );
+        assert_eq!(
+            relation_target_candidates("invoices/i1.md", "acme", Some("clients")),
+            vec!["clients/acme.md"]
+        );
+        assert_eq!(
+            relation_target_candidates("invoices/i1.md", "other", None),
+            vec!["invoices/other.md"]
+        );
+    }
+
+    #[test]
     fn resolve_root_relative_hit() {
         let kf = known(&["clients/acme.md", "invoices/i1.md"]);
         let r = resolve_relation_target("invoices/i1.md", "clients/acme", None, &kf);
@@ -595,6 +657,7 @@ mod tests {
                 target: Some("clients/".to_string()),
                 formula: None,
                 result_type: None,
+                ..OverlayField::default()
             },
         );
         let mut scopes = HashMap::new();
@@ -628,5 +691,46 @@ mod tests {
     fn target_for_without_overlay_is_none() {
         let ctx = RelationContext::empty();
         assert_eq!(ctx.target_for("invoices/i1.md", "client"), None);
+    }
+
+    #[test]
+    fn computed_field_detection_covers_all_computed_schema_types() {
+        let computed = ["formula", "lookup", "rollup"]
+            .into_iter()
+            .map(|kind| {
+                (
+                    kind.to_string(),
+                    OverlayField {
+                        field_type: Some(kind.to_string()),
+                        ..OverlayField::default()
+                    },
+                )
+            })
+            .collect();
+        let overlay = OverlaySchema {
+            fields: HashMap::new(),
+            scopes: HashMap::from([("invoices".to_string(), ScopeOverlay { fields: computed })]),
+        };
+        let ctx = RelationContext::new(HashSet::new(), Some(overlay));
+
+        for field in ["formula", "lookup", "rollup"] {
+            assert!(ctx.is_computed_field("invoices/i1.md", field));
+            // Existing graph/populate call sites use this compatibility method.
+            assert!(ctx.is_formula_field("invoices/i1.md", field));
+        }
+        assert!(!ctx.is_computed_field("invoices/i1.md", "client"));
+        assert!(!ctx.is_computed_field("invoices-old/i1.md", "lookup"));
+    }
+
+    #[test]
+    fn persisted_computed_ownership_survives_missing_overlay() {
+        let ctx = RelationContext::empty().with_computed_field_owners(HashMap::from([(
+            "contacts/c1.md".to_string(),
+            HashSet::from(["client_domain".to_string()]),
+        )]));
+
+        assert!(ctx.is_computed_field("contacts/c1.md", "client_domain"));
+        assert!(!ctx.is_computed_field("contacts/c2.md", "client_domain"));
+        assert!(!ctx.is_computed_field("contacts/c1.md", "client"));
     }
 }

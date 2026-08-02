@@ -541,10 +541,7 @@ fn merge_topic_yaml(
                 .cloned()
                 .unwrap_or_default();
 
-            mapping.insert(
-                string_value(NAME_KEY),
-                Value::String(topic.name.clone()),
-            );
+            mapping.insert(string_value(NAME_KEY), Value::String(topic.name.clone()));
             set_optional_string(&mut mapping, "description", topic.description.as_deref());
             if topic.seeds.is_empty() {
                 mapping.remove(string_value("seeds"));

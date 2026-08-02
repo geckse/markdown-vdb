@@ -2,20 +2,20 @@ use colored::Colorize;
 use serde_json::Value;
 use std::time::SystemTime;
 
-use mdvdb::search::{GraphContextItem, SearchResult};
-use mdvdb::schema::{FieldType, Schema};
+use mdvdb::config::Config;
 use mdvdb::links::{LinkQueryResult, LinkState, NeighborhoodResult, OrphanFile, ResolvedLink};
+use mdvdb::schema::{FieldType, Schema};
+use mdvdb::search::{GraphContextItem, SearchResult};
 use mdvdb::tree::{FileState, FileTree};
-use mdvdb::CollectionResponse;
 use mdvdb::ClusterSummary;
-use mdvdb::IndexStatus;
+use mdvdb::CollectionResponse;
 use mdvdb::DocumentInfo;
+use mdvdb::GraphData;
+use mdvdb::IndexStatus;
 use mdvdb::IngestResult;
-use mdvdb::{IngestPreview, PreviewFileStatus};
 use mdvdb::VaultInfo;
 use mdvdb::{CheckStatus, DoctorResult};
-use mdvdb::config::Config;
-use mdvdb::GraphData;
+use mdvdb::{IngestPreview, PreviewFileStatus};
 
 /// Format a timestamp as a human-readable relative time string.
 ///
@@ -129,11 +129,7 @@ pub fn print_logo() {
 /// Print the logo followed by version and tagline.
 pub fn print_version() {
     print_logo();
-    println!(
-        "  {} {}",
-        "v".dimmed(),
-        env!("CARGO_PKG_VERSION").bold()
-    );
+    println!("  {} {}", "v".dimmed(), env!("CARGO_PKG_VERSION").bold());
     println!(
         "  {}",
         "Filesystem-native vector database for Markdown".dimmed()
@@ -147,11 +143,7 @@ pub fn print_version() {
 pub fn render_bar(filled: usize, total: usize) -> String {
     let filled = filled.min(total);
     let unfilled = total - filled;
-    format!(
-        "{}{}",
-        "█".repeat(filled),
-        "░".repeat(unfilled),
-    )
+    format!("{}{}", "█".repeat(filled), "░".repeat(unfilled),)
 }
 
 /// Print search results with colored formatting to stdout.
@@ -263,7 +255,11 @@ pub fn print_graph_context(items: &[GraphContextItem]) {
         let hop_items: Vec<&GraphContextItem> =
             items.iter().filter(|i| i.hop_distance == hop).collect();
 
-        let hop_label = if hop == 1 { "1 hop" } else { &format!("{hop} hops") };
+        let hop_label = if hop == 1 {
+            "1 hop"
+        } else {
+            &format!("{hop} hops")
+        };
         println!(
             "\n  {}",
             format!("─── Graph Context ({hop_label}) ───").dimmed()
@@ -290,11 +286,7 @@ pub fn print_graph_context(items: &[GraphContextItem]) {
 
             // Line range
             let line_range = format!("{}-{}", item.chunk.start_line, item.chunk.end_line);
-            println!(
-                "     {} {}",
-                "Lines:".dimmed(),
-                line_range
-            );
+            println!("     {} {}", "Lines:".dimmed(), line_range);
 
             // Content preview (first 150 chars, dimmed)
             let preview: String = item.chunk.content.chars().take(150).collect();
@@ -352,12 +344,7 @@ pub fn print_ingest_result(result: &IngestResult) {
             result.files_failed.to_string().red().bold()
         );
         for err in &result.errors {
-            eprintln!(
-                "    {} {}: {}",
-                "✗".red().bold(),
-                err.path,
-                err.message
-            );
+            eprintln!("    {} {}: {}", "✗".red().bold(), err.path, err.message);
         }
     }
 
@@ -372,22 +359,14 @@ pub fn print_ingest_result(result: &IngestResult) {
             let rem = secs - (mins as f64 * 60.0);
             format!("{}m {:.1}s", mins, rem)
         };
-        println!(
-            "  {}     {}",
-            "Elapsed:".dimmed(),
-            duration_str.dimmed()
-        );
+        println!("  {}     {}", "Elapsed:".dimmed(), duration_str.dimmed());
     }
     println!();
 }
 
 /// Print an ingestion preview with colored formatting to stdout.
 pub fn print_ingest_preview(preview: &IngestPreview) {
-    println!(
-        "\n  {} {}\n",
-        "⊙".cyan().bold(),
-        "Ingest Preview".bold()
-    );
+    println!("\n  {} {}\n", "⊙".cyan().bold(), "Ingest Preview".bold());
     println!(
         "  {}    {}",
         "Total files:".dimmed(),
@@ -429,10 +408,7 @@ pub fn print_ingest_preview(preview: &IngestPreview) {
             };
             println!(
                 "    {} {}  {} chunks, {} tokens",
-                icon,
-                color_path,
-                file.chunks,
-                file.estimated_tokens
+                icon, color_path, file.chunks, file.estimated_tokens
             );
         }
     }
@@ -473,13 +449,13 @@ pub fn print_status(status: &IndexStatus) {
         format_file_size(status.file_size).yellow()
     );
     let updated = format_timestamp(unix_to_system_time(status.last_updated));
-    println!(
-        "  {}    {}",
-        "Updated:".cyan(),
-        updated
-    );
+    println!("  {}    {}", "Updated:".cyan(), updated);
     println!();
-    println!("  {} {}", "Embedding:".cyan(), status.embedding_config.provider.bold());
+    println!(
+        "  {} {}",
+        "Embedding:".cyan(),
+        status.embedding_config.provider.bold()
+    );
     println!(
         "  {}      {}",
         "Model:".cyan(),
@@ -592,11 +568,7 @@ pub fn print_document(doc: &DocumentInfo) {
             format_timestamp(unix_to_system_time(mtime))
         );
     }
-    println!(
-        "  {}     {}",
-        "Hash:".cyan(),
-        doc.content_hash.dimmed()
-    );
+    println!("  {}     {}", "Hash:".cyan(), doc.content_hash.dimmed());
     println!(
         "  {}   {}",
         "Chunks:".cyan(),
@@ -684,11 +656,7 @@ pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
     }
 
     if let Some(prefix) = scope {
-        println!(
-            "\n  {} {}",
-            "Scope:".bold(),
-            prefix.cyan()
-        );
+        println!("\n  {} {}", "Scope:".bold(), prefix.cyan());
     }
 
     println!(
@@ -707,11 +675,22 @@ pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
             FieldType::List => "list".to_string(),
             FieldType::Date => "date".to_string(),
             FieldType::Mixed => "mixed".to_string(),
+            FieldType::Json => "json".to_string(),
             FieldType::Formula => field
                 .result_type
                 .as_ref()
                 .map(|result| format!("formula → {result}"))
                 .unwrap_or_else(|| "formula".to_string()),
+            FieldType::Lookup => field
+                .target_field
+                .as_ref()
+                .map(|target| format!("lookup → {target}"))
+                .unwrap_or_else(|| "lookup".to_string()),
+            FieldType::Rollup => field
+                .result_type
+                .as_ref()
+                .map(|result| format!("rollup → {result}"))
+                .unwrap_or_else(|| "rollup".to_string()),
             FieldType::Relation => match &field.relation_target {
                 Some(target) => format!("relation → {target}"),
                 None => "relation".to_string(),
@@ -750,8 +729,17 @@ pub fn print_schema(schema: &Schema, total_docs: usize, scope: Option<&str>) {
 
         // Sample values (dimmed)
         if !field.sample_values.is_empty() {
-            let samples: Vec<&str> = field.sample_values.iter().take(5).map(|s| s.as_str()).collect();
-            println!("    {} {}", "Samples:".dimmed(), samples.join(", ").dimmed());
+            let samples: Vec<&str> = field
+                .sample_values
+                .iter()
+                .take(5)
+                .map(|s| s.as_str())
+                .collect();
+            println!(
+                "    {} {}",
+                "Samples:".dimmed(),
+                samples.join(", ").dimmed()
+            );
         }
 
         // Allowed values
@@ -800,11 +788,22 @@ pub fn print_collection(resp: &CollectionResponse) {
                 FieldType::List => "list".to_string(),
                 FieldType::Date => "date".to_string(),
                 FieldType::Mixed => "mixed".to_string(),
+                FieldType::Json => "json".to_string(),
                 FieldType::Formula => col
                     .result_type
                     .as_ref()
                     .map(|result| format!("formula → {result}"))
                     .unwrap_or_else(|| "formula".to_string()),
+                FieldType::Lookup => col
+                    .target_field
+                    .as_ref()
+                    .map(|target| format!("lookup → {target}"))
+                    .unwrap_or_else(|| "lookup".to_string()),
+                FieldType::Rollup => col
+                    .result_type
+                    .as_ref()
+                    .map(|result| format!("rollup → {result}"))
+                    .unwrap_or_else(|| "rollup".to_string()),
                 FieldType::Relation => match &col.relation_target {
                     Some(target) => format!("relation → {target}"),
                     None => "relation".to_string(),
@@ -822,7 +821,12 @@ pub fn print_collection(resp: &CollectionResponse) {
             } else {
                 col.name.dimmed().to_string()
             };
-            println!("    {} {}{}", name, format!("({type_str})").dimmed(), required_tag);
+            println!(
+                "    {} {}{}",
+                name,
+                format!("({type_str})").dimmed(),
+                required_tag
+            );
         }
     }
 
@@ -843,7 +847,12 @@ pub fn print_collection(resp: &CollectionResponse) {
                 FileState::New => "new".blue(),
                 FileState::Deleted => "deleted".red(),
             };
-            println!("  {}  {}  {}", row.title.bold(), row.path.dimmed(), state_tag);
+            println!(
+                "  {}  {}  {}",
+                row.title.bold(),
+                row.path.dimmed(),
+                state_tag
+            );
         }
     }
 
@@ -906,7 +915,11 @@ pub fn print_clusters(clusters: &[ClusterSummary]) {
 
         // Keywords (blue)
         if !cluster.keywords.is_empty() {
-            let kw: Vec<String> = cluster.keywords.iter().map(|k| format!("{}", k.blue())).collect();
+            let kw: Vec<String> = cluster
+                .keywords
+                .iter()
+                .map(|k| format!("{}", k.blue()))
+                .collect();
             println!("    {} {}", "Keywords:".dimmed(), kw.join(", "));
         }
 
@@ -934,10 +947,7 @@ pub fn print_watch_started(dirs: &[String]) {
     for dir in dirs {
         println!("  {}  {}", "→".green(), dir);
     }
-    println!(
-        "\n  {}",
-        "Press Ctrl+C to stop".dimmed()
-    );
+    println!("\n  {}", "Press Ctrl+C to stop".dimmed());
 }
 
 /// Print a single watch event with status icon, path, chunk count, and duration.
@@ -962,23 +972,27 @@ pub fn print_watch_event(report: &mdvdb::WatchEventReport) {
     if let Some(ref err) = report.error {
         println!(
             "  {} {} {} {} — {}",
-            icon, label, report.path.bold(), duration, err.red()
+            icon,
+            label,
+            report.path.bold(),
+            duration,
+            err.red()
         );
     } else {
         println!(
             "  {} {} {}{} {}",
-            icon, label, report.path.bold(), chunks.dimmed(), duration
+            icon,
+            label,
+            report.path.bold(),
+            chunks.dimmed(),
+            duration
         );
     }
 }
 
 /// Print init success message with green checkmark.
 pub fn print_init_success(path: &str) {
-    println!(
-        "\n  {} {}\n",
-        "✓".green().bold(),
-        "Initialized".bold()
-    );
+    println!("\n  {} {}\n", "✓".green().bold(), "Initialized".bold());
     println!(
         "  {} {}",
         "Config:".dimmed(),
@@ -1002,11 +1016,7 @@ pub fn print_links(result: &LinkQueryResult) {
         .filter(|r| r.state == LinkState::Broken)
         .count();
 
-    println!(
-        "\n  {} {}\n",
-        "●".cyan().bold(),
-        result.file.bold()
-    );
+    println!("\n  {} {}\n", "●".cyan().bold(), result.file.bold());
 
     // Outgoing links
     let outgoing_count = result.outgoing.len();
@@ -1103,7 +1113,11 @@ pub fn print_links(result: &LinkQueryResult) {
         incoming_count.to_string().yellow()
     );
     if broken_count > 0 {
-        summary.push_str(&format!(", {} {}", broken_count.to_string().red().bold(), "broken".red()));
+        summary.push_str(&format!(
+            ", {} {}",
+            broken_count.to_string().red().bold(),
+            "broken".red()
+        ));
     }
     println!("  {}", summary);
     println!();
@@ -1263,7 +1277,8 @@ pub fn print_edges(edges: &[mdvdb::links::SemanticEdge]) {
     }
 
     // Collect cluster stats
-    let mut cluster_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut cluster_counts: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
     for edge in edges {
         let rel = edge.relationship_type.as_deref().unwrap_or("unknown");
         *cluster_counts.entry(rel).or_insert(0) += 1;
@@ -1284,12 +1299,7 @@ pub fn print_edges(edges: &[mdvdb::links::SemanticEdge]) {
         let mut sorted: Vec<_> = cluster_counts.into_iter().collect();
         sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
         for (label, count) in &sorted {
-            println!(
-                "    {} {} ({})",
-                "•".dimmed(),
-                label.cyan(),
-                count
-            );
+            println!("    {} {} ({})", "•".dimmed(), label.cyan(), count);
         }
     }
 
@@ -1303,11 +1313,7 @@ pub fn print_init_global_success(path: &str) {
         "✓".green().bold(),
         "User config initialized".bold()
     );
-    println!(
-        "  {} {}",
-        "Config:".dimmed(),
-        path.bold()
-    );
+    println!("  {} {}", "Config:".dimmed(), path.bold());
     println!(
         "  {}",
         "Uncomment and set your API key and default settings.".dimmed()
@@ -1324,11 +1330,7 @@ pub fn print_config(config: &Config, user_config_path: Option<&std::path::Path>)
         "Provider:".cyan(),
         config.embedding_provider
     );
-    println!(
-        "  {}        {}",
-        "Model:".cyan(),
-        config.embedding_model
-    );
+    println!("  {}        {}", "Model:".cyan(), config.embedding_model);
     println!(
         "  {}   {}",
         "Dimensions:".cyan(),
@@ -1347,22 +1349,14 @@ pub fn print_config(config: &Config, user_config_path: Option<&std::path::Path>)
     };
     println!("  {}      {}", "API key:".cyan(), key_status);
 
-    println!(
-        "  {}  {}",
-        "Ollama host:".cyan(),
-        config.ollama_host
-    );
+    println!("  {}  {}", "Ollama host:".cyan(), config.ollama_host);
 
     let dirs: Vec<String> = config
         .source_dirs
         .iter()
         .map(|d| d.to_string_lossy().to_string())
         .collect();
-    println!(
-        "  {}  {}",
-        "Source dirs:".cyan(),
-        dirs.join(", ")
-    );
+    println!("  {}  {}", "Source dirs:".cyan(), dirs.join(", "));
 
     if !config.ignore_patterns.is_empty() {
         println!(
@@ -1405,7 +1399,11 @@ pub fn print_config(config: &Config, user_config_path: Option<&std::path::Path>)
 
     if let Some(path) = user_config_path {
         println!();
-        let status = if path.is_file() { "exists" } else { "not found" };
+        let status = if path.is_file() {
+            "exists"
+        } else {
+            "not found"
+        };
         println!(
             "  {} {} ({})",
             "User config:".dimmed(),
@@ -1428,12 +1426,7 @@ pub fn print_doctor(result: &DoctorResult) {
         };
 
         // Pad the check name for alignment.
-        println!(
-            "  {} {:<25} {}",
-            icon,
-            check.name,
-            check.detail.dimmed()
-        );
+        println!("  {} {:<25} {}", icon, check.name, check.detail.dimmed());
     }
 
     println!(
@@ -1449,11 +1442,7 @@ pub fn print_graph_summary(data: &GraphData) {
     let level_display = if is_chunk { "Chunk" } else { "Document" };
     let node_term = if is_chunk { "Chunks" } else { "Nodes" };
 
-    println!(
-        "\n  {} {}\n",
-        "●".cyan().bold(),
-        "Graph Data".bold()
-    );
+    println!("\n  {} {}\n", "●".cyan().bold(), "Graph Data".bold());
     println!(
         "  {}     {}",
         "Level:".cyan(),
@@ -1473,32 +1462,24 @@ pub fn print_graph_summary(data: &GraphData) {
     if is_chunk {
         // Show edge weight range
         if !data.edges.is_empty() {
-            let weights: Vec<f64> = data.edges.iter()
-                .filter_map(|e| e.weight)
-                .collect();
+            let weights: Vec<f64> = data.edges.iter().filter_map(|e| e.weight).collect();
             if !weights.is_empty() {
                 let min_w = weights.iter().cloned().fold(f64::INFINITY, f64::min);
                 let max_w = weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                println!(
-                    "  {}   {:.4} — {:.4}",
-                    "Weights:".cyan(),
-                    min_w,
-                    max_w
-                );
+                println!("  {}   {:.4} — {:.4}", "Weights:".cyan(), min_w, max_w);
             }
         }
 
         // Show sample chunk labels
-        let labels: Vec<&str> = data.nodes.iter()
+        let labels: Vec<&str> = data
+            .nodes
+            .iter()
             .filter_map(|n| n.label.as_deref())
             .filter(|l| !l.is_empty())
             .take(5)
             .collect();
         if !labels.is_empty() {
-            println!(
-                "\n  {}",
-                "Sample labels:".dimmed()
-            );
+            println!("\n  {}", "Sample labels:".dimmed());
             for label in &labels {
                 println!("    {} {}", "•".cyan(), label);
             }
@@ -1613,10 +1594,7 @@ pub fn print_link_neighborhood(result: &NeighborhoodResult) {
 ///
 /// Uses the accumulated `prefix` string for proper depth indentation,
 /// appending `│   ` or `    ` depending on position in the tree.
-fn print_neighborhood_children(
-    children: &[mdvdb::links::NeighborhoodNode],
-    prefix: &str,
-) {
+fn print_neighborhood_children(children: &[mdvdb::links::NeighborhoodNode], prefix: &str) {
     for (i, child) in children.iter().enumerate() {
         let is_last = i == children.len() - 1;
         let connector = if is_last { "└──" } else { "├──" };
@@ -1689,10 +1667,16 @@ mod tests {
         let time = SystemTime::now() - Duration::from_secs(86400 * 60);
         let result = format_timestamp(time);
         // Should NOT contain "days ago"
-        assert!(!result.contains("days ago"), "Expected date format, got: {}", result);
+        assert!(
+            !result.contains("days ago"),
+            "Expected date format, got: {}",
+            result
+        );
         // Should match YYYY-MM-DD HH:MM:SS pattern
         assert!(
-            result.len() == 19 && result.chars().nth(4) == Some('-') && result.chars().nth(10) == Some(' '),
+            result.len() == 19
+                && result.chars().nth(4) == Some('-')
+                && result.chars().nth(10) == Some(' '),
             "Expected YYYY-MM-DD HH:MM:SS format, got: {}",
             result
         );
