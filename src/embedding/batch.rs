@@ -1,9 +1,68 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
 
-use super::provider::EmbeddingProvider;
+use super::provider::{EmbeddingProvider, EmbeddingPurpose};
+
+static WORKING_BATCH_SIZES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+fn working_batch_size(provider: &dyn EmbeddingProvider, configured: usize) -> usize {
+    let cache = WORKING_BATCH_SIZES.get_or_init(|| Mutex::new(HashMap::new()));
+    cache
+        .lock()
+        .ok()
+        .and_then(|sizes| sizes.get(&provider.batch_cache_key()).copied())
+        .unwrap_or(configured)
+        .min(configured)
+        .max(1)
+}
+
+fn remember_batch_size(provider: &dyn EmbeddingProvider, size: usize) {
+    let cache = WORKING_BATCH_SIZES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut sizes) = cache.lock() {
+        sizes
+            .entry(provider.batch_cache_key())
+            .and_modify(|current| *current = (*current).min(size))
+            .or_insert(size);
+    }
+}
+
+async fn embed_batch_adaptively(
+    provider: &dyn EmbeddingProvider,
+    chunk_ids: Vec<String>,
+    texts: Vec<String>,
+) -> crate::Result<(Vec<(String, Vec<f32>)>, usize)> {
+    let mut queue = VecDeque::from([(chunk_ids, texts)]);
+    let mut pairs = Vec::new();
+    let mut api_calls = 0;
+
+    while let Some((chunk_ids, texts)) = queue.pop_front() {
+        api_calls += 1;
+        match provider
+            .embed_batch_for(&texts, EmbeddingPurpose::Document)
+            .await
+        {
+            Ok(vectors) => pairs.extend(chunk_ids.into_iter().zip(vectors)),
+            Err(error) if texts.len() > 1 && provider.is_batch_size_error(&error) => {
+                let midpoint = texts.len() / 2;
+                remember_batch_size(provider, texts.len().div_ceil(2));
+                let right_ids = chunk_ids[midpoint..].to_vec();
+                let left_ids = chunk_ids[..midpoint].to_vec();
+                let right_texts = texts[midpoint..].to_vec();
+                let left_texts = texts[..midpoint].to_vec();
+                // Push right first so the left half is processed first and
+                // input ordering remains stable.
+                queue.push_front((right_ids, right_texts));
+                queue.push_front((left_ids, left_texts));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((pairs, api_calls))
+}
 
 /// A markdown chunk to be embedded.
 ///
@@ -82,13 +141,18 @@ pub async fn embed_chunks(
         });
     }
 
-    // Split into batches
-    let batches: Vec<Vec<&Chunk>> = to_embed.chunks(batch_size).map(|b| b.to_vec()).collect();
+    // Split into batches, reusing the smallest provider/model size that worked
+    // after a size-limit response earlier in this process.
+    let effective_batch_size = working_batch_size(provider, batch_size);
+    let batches: Vec<Vec<&Chunk>> = to_embed
+        .chunks(effective_batch_size)
+        .map(|b| b.to_vec())
+        .collect();
     let total_batches = batches.len();
     tracing::info!(
         chunks = to_embed.len(),
         batches = total_batches,
-        batch_size,
+        batch_size = effective_batch_size,
         "embedding chunks"
     );
 
@@ -97,19 +161,18 @@ pub async fn embed_chunks(
 
     const MAX_CONCURRENT: usize = 4;
 
-    type BatchResult = crate::Result<(usize, Vec<(String, Vec<f32>)>)>;
+    type BatchResult = crate::Result<(usize, Vec<(String, Vec<f32>)>, usize)>;
     let mut stream = stream::iter(batches.into_iter().enumerate().map(|(batch_idx, batch)| {
         let chunk_ids: Vec<String> = batch.iter().map(|c| c.id.clone()).collect();
         let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
         async move {
-            let vectors = provider.embed_batch(&texts).await?;
+            let (pairs, api_calls) = embed_batch_adaptively(provider, chunk_ids, texts).await?;
             tracing::info!(
                 batch = batch_idx + 1,
                 total = total_batches,
                 "batch complete"
             );
-            let pairs: Vec<(String, Vec<f32>)> = chunk_ids.into_iter().zip(vectors).collect();
-            let result: BatchResult = Ok((batch_idx, pairs));
+            let result: BatchResult = Ok((batch_idx, pairs, api_calls));
             result
         }
     }))
@@ -120,8 +183,8 @@ pub async fn embed_chunks(
     let mut completed_count: usize = 0;
 
     while let Some(result) = stream.next().await {
-        let (_batch_idx, pairs) = result?;
-        api_calls += 1;
+        let (_batch_idx, pairs, batch_api_calls) = result?;
+        api_calls += batch_api_calls;
         completed_count += 1;
         for (id, vector) in pairs {
             embeddings.insert(id, vector);
@@ -149,6 +212,37 @@ pub async fn embed_chunks(
 mod tests {
     use super::*;
     use crate::embedding::mock::MockProvider;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct LimitedBatchProvider {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for LimitedBatchProvider {
+        async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if texts.len() > 2 {
+                return Err(crate::Error::EmbeddingProvider(
+                    "413 payload too large".into(),
+                ));
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+
+        fn model(&self) -> &str {
+            "adaptive-test-model"
+        }
+
+        fn name(&self) -> &str {
+            "limited-test-provider"
+        }
+    }
 
     fn make_chunk(id: &str, path: &str, content: &str) -> Chunk {
         Chunk {
@@ -264,5 +358,34 @@ mod tests {
         assert!(result.embeddings.is_empty());
         assert!(result.skipped.is_empty());
         assert_eq!(result.api_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn adaptively_splits_and_caches_provider_batch_limit() {
+        let provider = LimitedBatchProvider {
+            calls: AtomicUsize::new(0),
+        };
+        let chunks = (0..5)
+            .map(|index| make_chunk(&format!("a.md#{index}"), "a.md", "text"))
+            .collect::<Vec<_>>();
+        let existing = HashMap::new();
+        let current = HashMap::from([(PathBuf::from("a.md"), "changed".to_string())]);
+
+        let first = embed_chunks(&provider, &chunks, &existing, &current, 5, None)
+            .await
+            .unwrap();
+        assert_eq!(first.embeddings.len(), 5);
+        assert!(first.api_calls > 3, "failed oversized calls are counted");
+
+        let calls_before = provider.calls.load(Ordering::SeqCst);
+        let second = embed_chunks(&provider, &chunks, &existing, &current, 5, None)
+            .await
+            .unwrap();
+        let second_calls = provider.calls.load(Ordering::SeqCst) - calls_before;
+        assert_eq!(second.embeddings.len(), 5);
+        assert_eq!(
+            second_calls, 3,
+            "cached size 2 avoids another oversized call"
+        );
     }
 }

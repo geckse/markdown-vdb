@@ -97,6 +97,53 @@ fn test_init_creates_config_file() {
         dir.path().join(".markdownvdb").join("config.yaml").exists(),
         ".markdownvdb/config.yaml should be created"
     );
+    let config = fs::read_to_string(dir.path().join(".markdownvdb/config.yaml")).unwrap();
+    assert!(config.contains("dimensions: auto"));
+}
+
+#[test]
+fn test_embedding_models_catalogless_provider_accepts_free_text() {
+    let dir = TempDir::new().unwrap();
+    let output = mdvdb_bin()
+        .args(["embedding", "models", "--provider", "azure", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to execute embedding models");
+
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["provider"], "azure-openai");
+    assert_eq!(json["discovery_available"], false);
+    assert_eq!(json["models"], serde_json::json!([]));
+}
+
+#[test]
+fn test_config_json_keeps_model_opaque_and_redacts_secrets() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir_all(dir.path().join(".markdownvdb")).unwrap();
+    fs::write(
+        dir.path().join(".markdownvdb/config.yaml"),
+        "embedding:\n  provider: openrouter\n  model: vendor/unseen-model@revision\n  dimensions: auto\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join(".markdownvdb/.env"),
+        "OPENROUTER_API_KEY=must-not-appear\n",
+    )
+    .unwrap();
+
+    let output = mdvdb_bin()
+        .args(["config", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["embedding_model"], "vendor/unseen-model@revision");
+    assert_eq!(json["embedding_dimensions"], "auto");
+    assert!(!stdout.contains("must-not-appear"));
+    assert!(json.get("openai_api_key").is_none());
 }
 
 #[test]

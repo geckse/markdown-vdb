@@ -27,14 +27,22 @@ pub struct YamlConfig {
 }
 
 /// Embedding provider settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct YamlEmbedding {
     pub provider: String,
     pub model: String,
+    #[serde(
+        deserialize_with = "deserialize_embedding_dimensions",
+        serialize_with = "serialize_embedding_dimensions"
+    )]
     pub dimensions: usize,
     pub batch_size: usize,
     pub endpoint: Option<String>,
+    pub purpose: EmbeddingPurposeConfig,
+    pub azure: AzureEmbeddingConfig,
+    pub huggingface: HuggingFaceEmbeddingConfig,
+    pub bedrock: BedrockEmbeddingConfig,
 }
 
 impl Default for YamlEmbedding {
@@ -42,11 +50,166 @@ impl Default for YamlEmbedding {
         Self {
             provider: "openai".to_string(),
             model: "text-embedding-3-small".to_string(),
-            dimensions: 1536,
+            dimensions: 0,
             batch_size: 100,
             endpoint: None,
+            purpose: EmbeddingPurposeConfig::default(),
+            azure: AzureEmbeddingConfig::default(),
+            huggingface: HuggingFaceEmbeddingConfig::default(),
+            bedrock: BedrockEmbeddingConfig::default(),
         }
     }
+}
+
+fn deserialize_embedding_dimensions<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DimensionsValue {
+        Number(usize),
+        Text(String),
+    }
+
+    match DimensionsValue::deserialize(deserializer)? {
+        DimensionsValue::Number(value) if value > 0 => Ok(value),
+        DimensionsValue::Number(_) => Err(serde::de::Error::custom(
+            "embedding dimensions must be 'auto' or a positive integer",
+        )),
+        DimensionsValue::Text(value) if value.eq_ignore_ascii_case("auto") => Ok(0),
+        DimensionsValue::Text(value) => Err(serde::de::Error::custom(format!(
+            "invalid embedding dimensions '{value}': expected 'auto' or a positive integer"
+        ))),
+    }
+}
+
+fn serialize_embedding_dimensions<S>(value: &usize, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if *value == 0 {
+        serializer.serialize_str("auto")
+    } else {
+        serializer.serialize_u64(*value as u64)
+    }
+}
+
+/// Model-independent query/document transformation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct EmbeddingPurposeConfig {
+    /// `none`, `native`, or `prefix`.
+    pub mode: String,
+    pub query: Option<String>,
+    pub document: Option<String>,
+}
+
+impl Default for EmbeddingPurposeConfig {
+    fn default() -> Self {
+        Self {
+            mode: "none".to_string(),
+            query: None,
+            document: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AzureEmbeddingConfig {
+    /// `api_key` or `bearer`.
+    pub auth: String,
+}
+
+impl Default for AzureEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            auth: "api_key".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HuggingFaceEmbeddingConfig {
+    /// `serverless` or `endpoint`.
+    pub mode: String,
+    pub endpoint: Option<String>,
+    pub normalize: bool,
+    pub truncate: bool,
+    pub truncation_direction: String,
+    pub query_prompt_name: Option<String>,
+    pub document_prompt_name: Option<String>,
+}
+
+impl Default for HuggingFaceEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            mode: "serverless".to_string(),
+            endpoint: None,
+            normalize: true,
+            truncate: true,
+            truncation_direction: "right".to_string(),
+            query_prompt_name: None,
+            document_prompt_name: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BedrockInvocation {
+    Single,
+    Batch,
+}
+
+impl Default for BedrockInvocation {
+    fn default() -> Self {
+        Self::Single
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BedrockEmbeddingConfig {
+    pub region: Option<String>,
+    pub profile: Option<String>,
+    pub endpoint: Option<String>,
+    /// `titan`, `cohere`, or `custom`; never inferred from the model ID.
+    pub format: String,
+    pub invocation: BedrockInvocation,
+    pub request_template: Option<serde_json::Value>,
+    pub embeddings_pointer: String,
+    pub item_embedding_pointer: Option<String>,
+    pub query_purpose: Option<String>,
+    pub document_purpose: Option<String>,
+}
+
+impl Default for BedrockEmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            region: None,
+            profile: None,
+            endpoint: None,
+            format: "titan".to_string(),
+            invocation: BedrockInvocation::Single,
+            request_template: None,
+            embeddings_pointer: "/embedding".to_string(),
+            item_embedding_pointer: None,
+            query_purpose: None,
+            document_purpose: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct EmbeddingProviderOptions {
+    pub purpose: EmbeddingPurposeConfig,
+    pub azure: AzureEmbeddingConfig,
+    pub huggingface: HuggingFaceEmbeddingConfig,
+    pub bedrock: BedrockEmbeddingConfig,
 }
 
 /// Search engine settings.
@@ -251,6 +414,11 @@ impl Default for YamlSources {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum EmbeddingProviderType {
     OpenAI,
+    OpenRouter,
+    Gemini,
+    AzureOpenAi,
+    Bedrock,
+    HuggingFace,
     Ollama,
     Custom,
     Mock,
@@ -262,11 +430,16 @@ impl FromStr for EmbeddingProviderType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAI),
+            "openrouter" => Ok(Self::OpenRouter),
+            "gemini" | "google" => Ok(Self::Gemini),
+            "azure" | "azure-openai" | "azure_openai" => Ok(Self::AzureOpenAi),
+            "bedrock" | "aws-bedrock" | "aws_bedrock" => Ok(Self::Bedrock),
+            "huggingface" | "hugging-face" | "hf" => Ok(Self::HuggingFace),
             "ollama" => Ok(Self::Ollama),
             "custom" => Ok(Self::Custom),
             "mock" => Ok(Self::Mock),
             other => Err(Error::Config(format!(
-                "unknown embedding provider '{other}': expected openai, ollama, or custom"
+                "unknown embedding provider '{other}': expected openai, openrouter, gemini, azure, bedrock, huggingface, ollama, or custom"
             ))),
         }
     }
@@ -333,11 +506,14 @@ impl FromStr for ClusteringAlgorithm {
 pub struct Config {
     pub embedding_provider: EmbeddingProviderType,
     pub embedding_model: String,
+    #[serde(serialize_with = "serialize_embedding_dimensions")]
     pub embedding_dimensions: usize,
     pub embedding_batch_size: usize,
+    #[serde(skip_serializing)]
     pub openai_api_key: Option<String>,
     pub ollama_host: String,
     pub embedding_endpoint: Option<String>,
+    pub embedding_options: EmbeddingProviderOptions,
     pub source_dirs: Vec<PathBuf>,
     pub ignore_patterns: Vec<String>,
     pub watch_enabled: bool,
@@ -546,9 +722,81 @@ impl Config {
 
     /// Validate constraint invariants on the loaded config.
     fn validate(&self) -> Result<(), Error> {
-        if self.embedding_dimensions == 0 {
-            return Err(Error::Config("embedding_dimensions must be > 0".into()));
+        if self.embedding_model.trim().is_empty() {
+            return Err(Error::Config("embedding.model cannot be empty".into()));
         }
+        if !matches!(
+            self.embedding_options.purpose.mode.as_str(),
+            "none" | "native" | "prefix"
+        ) {
+            return Err(Error::Config(format!(
+                "embedding.purpose.mode must be none, native, or prefix (got '{}')",
+                self.embedding_options.purpose.mode
+            )));
+        }
+        if !matches!(
+            self.embedding_options.azure.auth.as_str(),
+            "api_key" | "api-key" | "bearer"
+        ) {
+            return Err(Error::Config(format!(
+                "embedding.azure.auth must be api_key or bearer (got '{}')",
+                self.embedding_options.azure.auth
+            )));
+        }
+        if !matches!(
+            self.embedding_options.huggingface.mode.as_str(),
+            "serverless" | "endpoint"
+        ) {
+            return Err(Error::Config(format!(
+                "embedding.huggingface.mode must be serverless or endpoint (got '{}')",
+                self.embedding_options.huggingface.mode
+            )));
+        }
+        if !matches!(
+            self.embedding_options
+                .huggingface
+                .truncation_direction
+                .as_str(),
+            "left" | "right"
+        ) {
+            return Err(Error::Config(format!(
+                "embedding.huggingface.truncation_direction must be left or right (got '{}')",
+                self.embedding_options.huggingface.truncation_direction
+            )));
+        }
+        if !matches!(
+            self.embedding_options.bedrock.format.as_str(),
+            "titan" | "cohere" | "custom"
+        ) {
+            return Err(Error::Config(format!(
+                "embedding.bedrock.format must be titan, cohere, or custom (got '{}')",
+                self.embedding_options.bedrock.format
+            )));
+        }
+        for (field, pointer) in [
+            (
+                "embedding.bedrock.embeddings_pointer",
+                Some(self.embedding_options.bedrock.embeddings_pointer.as_str()),
+            ),
+            (
+                "embedding.bedrock.item_embedding_pointer",
+                self.embedding_options
+                    .bedrock
+                    .item_embedding_pointer
+                    .as_deref(),
+            ),
+        ] {
+            if let Some(pointer) = pointer {
+                if !pointer.is_empty() && !pointer.starts_with('/') {
+                    return Err(Error::Config(format!(
+                        "{field} must be an RFC 6901 JSON pointer (got '{pointer}')"
+                    )));
+                }
+            }
+        }
+        // A zero runtime value represents YAML `dimensions: auto`; it is
+        // resolved from an existing index or a provider probe before HNSW is
+        // created. Numeric values were validated during YAML deserialization.
         if self.embedding_batch_size == 0 {
             return Err(Error::Config("embedding_batch_size must be > 0".into()));
         }
@@ -1568,6 +1816,103 @@ pub fn update_yaml_config_value(
     mutate_yaml_config_value(path, key_path, |_| Ok((value, ())))
 }
 
+/// Remove a dotted key from YAML while preserving unrelated and unknown keys.
+pub fn remove_yaml_config_value(path: &Path, key_path: &str) -> Result<bool, Error> {
+    let _lock = acquire_config_lock(path)?;
+    let mut root = read_yaml_value_unlocked(path)?;
+    let parts: Vec<&str> = key_path
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Err(Error::Config("configuration key cannot be empty".into()));
+    }
+    fn remove_at(value: &mut serde_yaml::Value, parts: &[&str]) -> bool {
+        let serde_yaml::Value::Mapping(mapping) = value else {
+            return false;
+        };
+        let key = serde_yaml::Value::String(parts[0].to_string());
+        if parts.len() == 1 {
+            return mapping.remove(&key).is_some();
+        }
+        mapping
+            .get_mut(&key)
+            .is_some_and(|child| remove_at(child, &parts[1..]))
+    }
+    let removed = remove_at(&mut root, &parts);
+    if removed {
+        write_yaml_value_unlocked(path, &root)?;
+    }
+    Ok(removed)
+}
+
+/// Atomically set or remove a dotenv secret. Values are written as a safely
+/// quoted dotenv scalar and the resulting file is owner-readable/writable on
+/// Unix. The secret itself is never logged or returned.
+pub fn update_dotenv_secret(path: &Path, name: &str, value: Option<&str>) -> Result<(), Error> {
+    use std::io::Write;
+
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(Error::Config(format!("invalid secret name '{name}'")));
+    }
+    let _lock = acquire_config_lock(path)?;
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines = Vec::new();
+    let mut replaced = false;
+    for line in existing.lines() {
+        let is_target = line
+            .trim_start()
+            .split_once('=')
+            .is_some_and(|(key, _)| key.trim() == name);
+        if is_target {
+            if let Some(value) = value {
+                lines.push(format!("{name}={}", quote_dotenv(value)));
+                replaced = true;
+            }
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if value.is_some() && !replaced {
+        lines.push(format!(
+            "{name}={}",
+            quote_dotenv(value.unwrap_or_default())
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::Config(format!("secret path '{}' has no parent", path.display())))?;
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    if !lines.is_empty() {
+        temp.write_all(lines.join("\n").as_bytes())?;
+        temp.write_all(b"\n")?;
+    }
+    temp.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    temp.persist(path).map_err(|error| Error::Io(error.error))?;
+    Ok(())
+}
+
+fn quote_dotenv(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('"', "\\\"")
+    )
+}
+
 impl Config {
     /// Convert a `YamlConfig` into the runtime `Config`.
     ///
@@ -1604,6 +1949,12 @@ impl Config {
             openai_api_key,
             ollama_host,
             embedding_endpoint: yaml.embedding.endpoint,
+            embedding_options: EmbeddingProviderOptions {
+                purpose: yaml.embedding.purpose,
+                azure: yaml.embedding.azure,
+                huggingface: yaml.embedding.huggingface,
+                bedrock: yaml.embedding.bedrock,
+            },
             source_dirs,
             ignore_patterns: yaml.sources.ignore,
             watch_enabled: yaml.watch.enabled,
@@ -1682,6 +2033,66 @@ mod tests {
             "CUSTOM".parse::<EmbeddingProviderType>().unwrap(),
             EmbeddingProviderType::Custom
         );
+        assert_eq!(
+            "openrouter".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::OpenRouter
+        );
+        assert_eq!(
+            "google".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::Gemini
+        );
+        assert_eq!(
+            "azure_openai".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::AzureOpenAi
+        );
+        assert_eq!(
+            "aws-bedrock".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::Bedrock
+        );
+        assert_eq!(
+            "hf".parse::<EmbeddingProviderType>().unwrap(),
+            EmbeddingProviderType::HuggingFace
+        );
+    }
+
+    #[test]
+    fn embedding_dimensions_auto_roundtrip() {
+        let yaml: YamlConfig = serde_yaml::from_str(
+            "embedding:\n  provider: openrouter\n  model: vendor/future-model\n  dimensions: auto\n",
+        )
+        .unwrap();
+        assert_eq!(yaml.embedding.dimensions, 0);
+        assert_eq!(yaml.embedding.model, "vendor/future-model");
+
+        let serialized = serde_yaml::to_string(&yaml).unwrap();
+        assert!(serialized.contains("dimensions: auto"));
+    }
+
+    #[test]
+    fn embedding_dimensions_reject_zero_in_yaml() {
+        let result = serde_yaml::from_str::<YamlConfig>("embedding:\n  dimensions: 0\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dotenv_secret_updates_are_atomic_quoted_and_owner_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".env");
+        update_dotenv_secret(&path, "HF_TOKEN", Some("value with spaces\nand newline")).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "HF_TOKEN=\"value with spaces\\nand newline\"\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        update_dotenv_secret(&path, "HF_TOKEN", None).unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "");
     }
 
     #[test]
@@ -1761,7 +2172,7 @@ mod tests {
 
         assert_eq!(config.embedding_provider, EmbeddingProviderType::OpenAI);
         assert_eq!(config.embedding_model, "text-embedding-3-small");
-        assert_eq!(config.embedding_dimensions, 1536);
+        assert_eq!(config.embedding_dimensions, 0);
         assert_eq!(config.embedding_batch_size, 100);
         assert_eq!(config.openai_api_key, None);
         assert_eq!(config.ollama_host, "http://localhost:11434");
@@ -1796,16 +2207,12 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_zero_dimensions() {
+    fn zero_dimensions_environment_value_selects_auto() {
         let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "0");
         let result = Config::load(Path::new("/nonexistent"));
         std::env::remove_var("MDVDB_EMBEDDING_DIMENSIONS");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("embedding_dimensions"));
+        assert_eq!(result.unwrap().embedding_dimensions, 0);
     }
 
     #[test]
@@ -1896,7 +2303,7 @@ mod tests {
         }
         // Should succeed with default dimensions since "abc" is silently skipped
         let config = result.unwrap();
-        assert_eq!(config.embedding_dimensions, 1536);
+        assert_eq!(config.embedding_dimensions, 0);
     }
 
     #[test]
@@ -2061,7 +2468,7 @@ mod tests {
         // Embedding defaults
         assert_eq!(cfg.embedding.provider, "openai");
         assert_eq!(cfg.embedding.model, "text-embedding-3-small");
-        assert_eq!(cfg.embedding.dimensions, 1536);
+        assert_eq!(cfg.embedding.dimensions, 0);
         assert_eq!(cfg.embedding.batch_size, 100);
         assert!(cfg.embedding.endpoint.is_none());
 
@@ -2124,7 +2531,7 @@ search:
 
         // Everything else should be defaults
         assert_eq!(cfg.embedding.model, "text-embedding-3-small");
-        assert_eq!(cfg.embedding.dimensions, 1536);
+        assert_eq!(cfg.embedding.dimensions, 0);
         assert_eq!(cfg.search.mode, "hybrid");
         assert_eq!(cfg.search.rrf_k, 60.0);
         assert!(!cfg.search.decay.enabled);

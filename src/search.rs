@@ -491,7 +491,10 @@ pub async fn search(
     let query_embedding: Option<Vec<f32>> = if needs_embedding {
         let t0 = Instant::now();
         let embeddings = provider
-            .embed_batch(std::slice::from_ref(&query.query))
+            .embed_batch_for(
+                std::slice::from_ref(&query.query),
+                crate::embedding::provider::EmbeddingPurpose::Query,
+            )
             .await?;
         embed_secs = t0.elapsed().as_secs_f64();
         Some(embeddings.into_iter().next().ok_or_else(|| {

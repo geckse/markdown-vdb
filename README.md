@@ -53,10 +53,10 @@ git clone https://github.com/geckse/markdown-vdb-skills.git skills
 
 - **Three search modes** — hybrid (semantic + BM25 via RRF fusion), semantic, and lexical — switch with `--mode` or `--semantic`/`--lexical` flags
 - **Section-level results** — returns the specific heading/section that matched, not just the file
-- **Pluggable embeddings** — OpenAI, Ollama, or any custom endpoint
+- **Model-agnostic embeddings** — OpenAI, OpenRouter, Gemini, Azure OpenAI, AWS Bedrock, Hugging Face, Ollama, or any OpenAI-compatible endpoint
 - **Single index file** — portable, memory-mapped, sub-100ms queries
 - **Link graph** — wikilinks and standard markdown links tracked in the index; `links`, `backlinks`, `orphans` commands; `--boost-links` re-ranks search results
-- **Frontmatter relations** — `client: "[[clients/acme]]"` acts as a foreign key: auto-typed `relation` in the schema, first-class link-graph edges, and `--populate` on `get`/`collection`/`search` resolves the referenced doc inline (JOIN-like, plus `referenced_by` reverse lookups)
+- **Frontmatter relations** — `client: clients/acme.md` acts as a foreign key: auto-typed `relation` in the schema, first-class link-graph edges, and `--populate` on `get`/`collection`/`search` resolves the referenced doc inline (JOIN-like, plus `referenced_by` reverse lookups). Wiki-link values such as `"[[clients/acme]]"` remain supported.
 - **Time decay** — `--decay` applies exponential recency weighting with configurable half-life
 - **File watching** — automatic re-indexing on changes
 - **Metadata filtering** — combine any search mode with frontmatter filters
@@ -99,7 +99,7 @@ mdvdb clusters --shard research
 # Time-decayed search (favor recent files)
 mdvdb search "auth" --decay --decay-half-life 30
 
-# Resolve frontmatter relations inline (client: "[[clients/acme]]" → title, path, frontmatter)
+# Resolve frontmatter relations inline (client: clients/acme.md → title, path, frontmatter)
 mdvdb get invoices/i1.md --populate --json
 
 # Check index health
@@ -122,31 +122,29 @@ Requires Rust 1.70+.
 
 ## Configuration
 
-Create a `.markdownvdb` file in your project root (or run `mdvdb init`):
+Create `.markdownvdb/config.yaml` in your project root (or run `mdvdb init`):
 
-```env
-# Embedding provider: openai, ollama, custom
-MDVDB_EMBEDDING_PROVIDER=openai
-MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-OPENAI_API_KEY=sk-...
+```yaml
+embedding:
+  provider: openrouter
+  model: vendor/model-id
+  dimensions: auto
 
-# Directories to index (comma-separated)
-MDVDB_SOURCE_DIRS=docs,notes,wiki
+sources:
+  dirs: [docs, notes, wiki]
 
-# Chunking
-MDVDB_CHUNK_MAX_TOKENS=512
+chunking:
+  max_tokens: 512
 
-# Search defaults
-MDVDB_SEARCH_MODE=hybrid
-MDVDB_TIME_DECAY=false
-MDVDB_DECAY_HALF_LIFE_DAYS=30
+search:
+  mode: hybrid
 ```
 
-Shared credentials can go in `~/.mdvdb/config` so your API key works across all projects without repeating it in each `.markdownvdb` file.
+Keep credentials in `.markdownvdb/.env`, or in `~/.mdvdb/.env` to share them across projects. Model IDs are unrestricted strings and dimensions are inferred by default.
 
-Config resolution order: shell env → `.markdownvdb/.config` → `.markdownvdb` → `.env` → `~/.mdvdb/config` → defaults.
+Config resolution order: shell overrides → project YAML → user YAML → defaults. Secret resolution is shell → project `.env` → user `.env`.
 
-See [PROJECT.md](PROJECT.md) for the full configuration reference.
+See [Embedding providers](docs/embedding-providers.md) for connection, authentication, discovery, purpose, and Bedrock codec examples.
 
 ## CLI Commands
 
@@ -166,6 +164,8 @@ See [PROJECT.md](PROJECT.md) for the full configuration reference.
 | `mdvdb doctor` | Run diagnostic checks on config, provider, and index |
 | `mdvdb watch` | Watch for file changes and re-index automatically |
 | `mdvdb config` | Show resolved configuration |
+| `mdvdb embedding models` | Discover the provider's current embedding models when available |
+| `mdvdb embedding probe` | Test inference and resolve dimensions without exposing vectors |
 | `mdvdb init` | Create a default config file |
 
 All commands support `--json` for machine-readable output.
@@ -175,7 +175,7 @@ All commands support `--json` for machine-readable output.
 ```rust
 use mdvdb::{MarkdownVdb, SearchQuery, SearchMode};
 
-let vdb = MarkdownVdb::open(".").await?;
+let vdb = MarkdownVdb::open_async(std::path::Path::new(".")).await?;
 
 // Hybrid search (default)
 let results = vdb.search(
@@ -210,7 +210,7 @@ for result in results {
 1. **Scan** — recursively find `.md` files (respects `.gitignore`)
 2. **Parse** — extract frontmatter, headings, and body content
 3. **Chunk** — split by headings, with token-limit size guard
-4. **Embed** — generate vectors via OpenAI/Ollama (batched, concurrent, with content-hash skip)
+4. **Embed** — generate vectors through the configured transport/codec (batched, retried, adaptively split, with content-hash skip)
 5. **Index** — store in a single memory-mapped file (usearch HNSW + rkyv metadata) plus Tantivy BM25 segments
 6. **Search** — hybrid (embed query → HNSW + BM25 → RRF fusion), semantic (HNSW only), or lexical (BM25 only) → metadata filter → link boost → time decay → ranked results
 

@@ -354,6 +354,7 @@ mod tests {
             openai_api_key: None,
             ollama_host: "http://localhost:11434".into(),
             embedding_endpoint: None,
+            embedding_options: Default::default(),
             source_dirs: vec![PathBuf::from(".")],
             ignore_patterns: vec![],
             watch_enabled: false,

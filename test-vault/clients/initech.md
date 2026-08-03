@@ -2,11 +2,10 @@
 title: Initech
 industry: software
 status: prospect
-domain: initech.example
+domain: initech.vom
 invoice_count: 1
 invoice_total: 3000
 ---
-
 # Initech
 
 Prospect from the March conference. Interested in a small pilot before

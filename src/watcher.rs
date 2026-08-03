@@ -902,6 +902,7 @@ mod tests {
             openai_api_key: None,
             ollama_host: String::new(),
             embedding_endpoint: None,
+            embedding_options: Default::default(),
             source_dirs: vec![PathBuf::from(".")],
             ignore_patterns: vec![],
             watch_enabled: true,

@@ -60,6 +60,10 @@ impl EmbeddingProvider for MockProvider {
         self.dimensions
     }
 
+    fn model(&self) -> &str {
+        "mock-model"
+    }
+
     fn name(&self) -> &str {
         "mock"
     }

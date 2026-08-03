@@ -2022,9 +2022,10 @@ fields:
             infer_field_type(&serde_json::json!("clients/acme.md")),
             FieldType::Relation
         );
-        // All-document-link list → Relation; non-link / empty lists stay List.
+        // All-document-link list → Relation; plain `.md` filenames are the
+        // preferred authoring form, while wiki links remain supported.
         assert_eq!(
-            infer_field_type(&serde_json::json!(["[[a]]", "[[b]]"])),
+            infer_field_type(&serde_json::json!(["a.md", "b.md"])),
             FieldType::Relation
         );
         assert_eq!(

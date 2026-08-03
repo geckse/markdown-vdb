@@ -3,7 +3,11 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::provider::EmbeddingProvider;
+use super::provider::{
+    embedding_http_client, validate_embeddings, EmbeddingModelInfo, EmbeddingProvider,
+    EmbeddingPurpose,
+};
+use crate::config::EmbeddingPurposeConfig;
 use crate::error::Error;
 
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/embeddings";
@@ -70,17 +74,30 @@ fn plan_requests(
 /// OpenAI-compatible embedding provider.
 pub struct OpenAIProvider {
     client: reqwest::Client,
-    api_key: String,
+    auth: CompatibleAuth,
     model: String,
-    dimensions: usize,
+    dimensions: Option<usize>,
     endpoint: String,
+    models_endpoint: Option<String>,
+    provider_name: String,
+    purpose: EmbeddingPurposeConfig,
+}
+
+#[derive(Debug, Clone)]
+pub enum CompatibleAuth {
+    Bearer(String),
+    Header { name: String, value: String },
+    None,
 }
 
 #[derive(Debug, Serialize)]
 struct EmbeddingRequest<'a> {
     input: &'a [String],
     model: &'a str,
-    dimensions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_type: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,11 +120,36 @@ impl OpenAIProvider {
         endpoint: Option<String>,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
-            api_key,
+            client: embedding_http_client(),
+            auth: CompatibleAuth::Bearer(api_key),
+            model,
+            dimensions: (dimensions > 0).then_some(dimensions),
+            endpoint: endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+            models_endpoint: None,
+            provider_name: "openai".to_string(),
+            purpose: EmbeddingPurposeConfig::default(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn compatible(
+        provider_name: impl Into<String>,
+        auth: CompatibleAuth,
+        model: String,
+        dimensions: Option<usize>,
+        endpoint: String,
+        models_endpoint: Option<String>,
+        purpose: EmbeddingPurposeConfig,
+    ) -> Self {
+        Self {
+            client: embedding_http_client(),
+            auth,
             model,
             dimensions,
-            endpoint: endpoint.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+            endpoint,
+            models_endpoint,
+            provider_name: provider_name.into(),
+            purpose,
         }
     }
 }
@@ -115,11 +157,24 @@ impl OpenAIProvider {
 impl OpenAIProvider {
     /// Send a single embeddings request (with retries) for a pre-planned group
     /// of inputs that is known to fit OpenAI's per-request limits.
-    async fn send_request(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+    async fn send_request(
+        &self,
+        texts: &[String],
+        purpose: EmbeddingPurpose,
+    ) -> crate::Result<Vec<Vec<f32>>> {
+        let native_purpose = if self.purpose.mode == "native" {
+            match purpose {
+                EmbeddingPurpose::Document => self.purpose.document.as_deref(),
+                EmbeddingPurpose::Query => self.purpose.query.as_deref(),
+            }
+        } else {
+            None
+        };
         let request_body = EmbeddingRequest {
             input: texts,
             model: &self.model,
             dimensions: self.dimensions,
+            input_type: native_purpose,
         };
 
         let mut last_error = None;
@@ -135,14 +190,26 @@ impl OpenAIProvider {
                 tokio::time::sleep(delay).await;
             }
 
-            let response = self
-                .client
-                .post(&self.endpoint)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .json(&request_body)
-                .send()
-                .await
-                .map_err(|e| Error::EmbeddingProvider(format!("request failed: {e}")))?;
+            let mut request = self.client.post(&self.endpoint).json(&request_body);
+            request = match &self.auth {
+                CompatibleAuth::Bearer(token) => {
+                    request.header("Authorization", format!("Bearer {token}"))
+                }
+                CompatibleAuth::Header { name, value } => request.header(name, value),
+                CompatibleAuth::None => request,
+            };
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(error) if error.is_timeout() || error.is_connect() => {
+                    last_error = Some(Error::EmbeddingProvider(format!(
+                        "transient request failure: {error}"
+                    )));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Error::EmbeddingProvider(format!("request failed: {error}")))
+                }
+            };
 
             let status = response.status();
 
@@ -194,18 +261,8 @@ impl OpenAIProvider {
             let mut sorted = body.data;
             sorted.sort_by_key(|d| d.index);
 
-            let mut embeddings = Vec::with_capacity(sorted.len());
-            for item in &sorted {
-                if item.embedding.len() != self.dimensions {
-                    return Err(Error::EmbeddingProvider(format!(
-                        "expected dimension {}, got {} at index {}",
-                        self.dimensions,
-                        item.embedding.len(),
-                        item.index
-                    )));
-                }
-                embeddings.push(item.embedding.clone());
-            }
+            let embeddings: Vec<Vec<f32>> = sorted.into_iter().map(|item| item.embedding).collect();
+            validate_embeddings(&embeddings, texts.len(), self.dimensions)?;
 
             return Ok(embeddings);
         }
@@ -217,12 +274,32 @@ impl OpenAIProvider {
 #[async_trait]
 impl EmbeddingProvider for OpenAIProvider {
     async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+        self.embed_batch_for(texts, EmbeddingPurpose::Document)
+            .await
+    }
+
+    async fn embed_batch_for(
+        &self,
+        texts: &[String],
+        purpose: EmbeddingPurpose,
+    ) -> crate::Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(vec![]);
         }
 
+        let prefixed: Vec<String> = if self.purpose.mode == "prefix" {
+            let prefix = match purpose {
+                EmbeddingPurpose::Document => self.purpose.document.as_deref(),
+                EmbeddingPurpose::Query => self.purpose.query.as_deref(),
+            }
+            .unwrap_or_default();
+            texts.iter().map(|text| format!("{prefix}{text}")).collect()
+        } else {
+            texts.to_vec()
+        };
+
         let groups = plan_requests(
-            texts,
+            &prefixed,
             MAX_TOKENS_PER_REQUEST,
             MAX_INPUTS_PER_REQUEST,
             MAX_TOKENS_PER_INPUT,
@@ -237,18 +314,72 @@ impl EmbeddingProvider for OpenAIProvider {
 
         let mut embeddings = Vec::with_capacity(texts.len());
         for group in &groups {
-            embeddings.extend(self.send_request(group).await?);
+            embeddings.extend(self.send_request(group, purpose).await?);
         }
         Ok(embeddings)
     }
 
+    async fn list_models(&self) -> crate::Result<Option<Vec<EmbeddingModelInfo>>> {
+        let Some(endpoint) = &self.models_endpoint else {
+            return Ok(None);
+        };
+        let mut request = self.client.get(endpoint);
+        request = match &self.auth {
+            CompatibleAuth::Bearer(token) => {
+                request.header("Authorization", format!("Bearer {token}"))
+            }
+            CompatibleAuth::Header { name, value } => request.header(name, value),
+            CompatibleAuth::None => request,
+        };
+        let response = request
+            .send()
+            .await
+            .map_err(|e| Error::EmbeddingProvider(format!("model discovery failed: {e}")))?;
+        if !response.status().is_success() {
+            return Err(Error::EmbeddingProvider(format!(
+                "model discovery returned {}",
+                response.status()
+            )));
+        }
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| Error::EmbeddingProvider(format!("failed to parse model catalog: {e}")))?;
+        Ok(Some(parse_compatible_model_catalog(&value)))
+    }
+
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.dimensions.unwrap_or(0)
+    }
+
+    fn model(&self) -> &str {
+        &self.model
     }
 
     fn name(&self) -> &str {
-        "openai"
+        &self.provider_name
     }
+}
+
+fn parse_compatible_model_catalog(value: &serde_json::Value) -> Vec<EmbeddingModelInfo> {
+    value["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some(EmbeddingModelInfo {
+                id: item.get("id")?.as_str()?.to_string(),
+                name: item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                input_token_limit: item
+                    .get("context_length")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -261,7 +392,8 @@ mod tests {
         let req = EmbeddingRequest {
             input: &texts,
             model: "text-embedding-3-small",
-            dimensions: 1536,
+            dimensions: Some(1536),
+            input_type: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["input"], serde_json::json!(["hello", "world"]));
@@ -281,6 +413,19 @@ mod tests {
         assert_eq!(resp.data.len(), 2);
         assert_eq!(resp.data[0].index, 1);
         assert_eq!(resp.data[1].index, 0);
+    }
+
+    #[test]
+    fn catalog_passes_through_unknown_future_models() {
+        let models = parse_compatible_model_catalog(&serde_json::json!({
+            "data": [{
+                "id": "vendor/future-embed@2099",
+                "name": "Future Embed",
+                "context_length": 12345
+            }]
+        }));
+        assert_eq!(models[0].id, "vendor/future-embed@2099");
+        assert_eq!(models[0].input_token_limit, Some(12345));
     }
 
     #[test]

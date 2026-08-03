@@ -48,7 +48,8 @@ pub use clustering::{
 pub use config::{
     encode_custom_clusters as config_encode_custom_clusters,
     parse_custom_clusters_value as config_parse_custom_clusters,
-    update_config_value as config_update_value,
+    remove_yaml_config_value as config_remove_yaml_value,
+    update_config_value as config_update_value, update_dotenv_secret as config_update_secret,
     update_yaml_config_value as config_update_yaml_value, write_yaml_config as config_write_yaml,
 };
 pub use links::{
@@ -71,7 +72,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -80,6 +81,133 @@ use crate::fts::FtsIndex;
 use crate::index::state::Index;
 use crate::index::storage::WriteOptions;
 use crate::index::types::EmbeddingConfig;
+
+fn resolve_dimensions_from_existing_index(root: &Path, config: &mut Config) -> Result<bool> {
+    if config.embedding_dimensions != 0 {
+        return Ok(true);
+    }
+    let index_path = root.join(".markdownvdb").join("index");
+    if !index_path.is_file() {
+        return Ok(false);
+    }
+    let write_options = WriteOptions {
+        quantization: config.vector_quantization.clone(),
+        compress_metadata: config.index_compression,
+    };
+    let index = match Index::open_with_options(&index_path, write_options) {
+        Ok(index) => index,
+        Err(Error::IndexNotFound { .. }) | Err(Error::IndexVersionMismatch { .. }) => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error),
+    };
+    let stored = index.status().embedding_config;
+    // The stored geometry is also sufficient to open an incompatible index
+    // for lexical and metadata-only operations. `finish_open` compares the
+    // full embedding-space descriptor and keeps every vector operation
+    // blocked until a probed full reindex succeeds.
+    if stored.dimensions > 0 {
+        config.embedding_dimensions = stored.dimensions;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EmbeddingSpaceDescriptor {
+    provider: String,
+    model: String,
+    dimensions: usize,
+    endpoint: Option<String>,
+    options: config::EmbeddingProviderOptions,
+}
+
+impl EmbeddingSpaceDescriptor {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            provider: format!("{:?}", config.embedding_provider),
+            model: config.embedding_model.clone(),
+            dimensions: config.embedding_dimensions,
+            endpoint: semantic_endpoint_identity(config),
+            options: config.embedding_options.clone(),
+        }
+    }
+}
+
+fn semantic_endpoint_identity(config: &Config) -> Option<String> {
+    match &config.embedding_provider {
+        config::EmbeddingProviderType::Ollama => Some(config.ollama_host.clone()),
+        config::EmbeddingProviderType::AzureOpenAi => config
+            .embedding_endpoint
+            .clone()
+            .or_else(|| std::env::var("AZURE_OPENAI_ENDPOINT").ok()),
+        config::EmbeddingProviderType::HuggingFace => {
+            if config.embedding_options.huggingface.mode == "endpoint" {
+                config
+                    .embedding_options
+                    .huggingface
+                    .endpoint
+                    .clone()
+                    .or_else(|| config.embedding_endpoint.clone())
+            } else {
+                Some("https://router.huggingface.co/hf-inference".to_string())
+            }
+        }
+        config::EmbeddingProviderType::Bedrock => config
+            .embedding_options
+            .bedrock
+            .endpoint
+            .clone()
+            .or_else(|| {
+                config
+                    .embedding_options
+                    .bedrock
+                    .region
+                    .clone()
+                    .or_else(|| std::env::var("AWS_REGION").ok())
+                    .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+                    .map(|region| format!("https://bedrock-runtime.{region}.amazonaws.com"))
+            }),
+        _ => config.embedding_endpoint.clone(),
+    }
+}
+
+fn embedding_space_path(root: &Path) -> PathBuf {
+    root.join(".markdownvdb").join("embedding-space.json")
+}
+
+fn read_embedding_space(root: &Path) -> Result<Option<EmbeddingSpaceDescriptor>> {
+    let path = embedding_space_path(root);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path)?;
+    serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+        Error::Serialization(format!(
+            "failed to parse embedding-space descriptor '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn write_embedding_space(root: &Path, config: &Config) -> Result<()> {
+    use std::io::Write;
+
+    let path = embedding_space_path(root);
+    let parent = path.parent().ok_or_else(|| {
+        Error::Config("embedding-space descriptor has no parent directory".into())
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    serde_json::to_writer_pretty(&mut temp, &EmbeddingSpaceDescriptor::from_config(config))
+        .map_err(|error| Error::Serialization(error.to_string()))?;
+    temp.write_all(b"\n")?;
+    temp.as_file().sync_all()?;
+    temp.persist(&path)
+        .map_err(|error| Error::Io(error.error))?;
+    Ok(())
+}
 
 fn without_computed_overlay_fields(
     mut fields: HashMap<String, schema::OverlayField>,
@@ -994,6 +1122,10 @@ pub struct MarkdownVdb {
     /// True when an incompatible archived layout was safely recreated and a
     /// collection-wide ingest is still required before scoped mutations.
     index_rebuilt: AtomicBool,
+    /// False when provider/model/dimensions differ from the stored vector
+    /// space. Lexical operations remain available; vector operations require
+    /// a full reindex.
+    embedding_compatible: AtomicBool,
 }
 
 impl MarkdownVdb {
@@ -1013,10 +1145,50 @@ impl MarkdownVdb {
         Self::open_with_config(root, config)
     }
 
+    /// Async constructor that resolves `dimensions: auto` with one provider
+    /// probe when no compatible index can supply the dimension.
+    pub async fn open_async(root: &Path) -> Result<Self> {
+        let root = root.canonicalize().map_err(|e| {
+            Error::Config(format!(
+                "cannot canonicalize root '{}': {e}",
+                root.display()
+            ))
+        })?;
+        let config = Config::load(&root)?;
+        Self::open_async_with_config(root, config).await
+    }
+
+    pub async fn open_async_with_config(root: PathBuf, mut config: Config) -> Result<Self> {
+        if config.embedding_dimensions == 0
+            && !resolve_dimensions_from_existing_index(&root, &mut config)?
+        {
+            let provider = create_provider(&config)?;
+            let probe = embedding::provider::probe_provider(provider.as_ref()).await?;
+            config.embedding_dimensions = probe.dimensions;
+        }
+        Self::open_with_config(root, config)
+    }
+
+    /// Open for an explicit full reindex. Unlike the ordinary async open,
+    /// `dimensions: auto` is always probed so a mutable provider alias can
+    /// resolve to a different embedding size before any index generation is
+    /// changed.
+    pub async fn open_async_for_reindex_with_config(
+        root: PathBuf,
+        mut config: Config,
+    ) -> Result<Self> {
+        if config.embedding_dimensions == 0 {
+            let provider = create_provider(&config)?;
+            let probe = embedding::provider::probe_provider(provider.as_ref()).await?;
+            config.embedding_dimensions = probe.dimensions;
+        }
+        Self::open_with_config(root, config)
+    }
+
     /// Open a markdown-vdb instance with an explicit configuration.
     ///
     /// Useful for testing or when configuration is constructed programmatically.
-    pub fn open_with_config(root: PathBuf, config: Config) -> Result<Self> {
+    pub fn open_with_config(root: PathBuf, mut config: Config) -> Result<Self> {
         let root = if root.is_relative() {
             root.canonicalize().map_err(|e| {
                 Error::Config(format!(
@@ -1027,6 +1199,15 @@ impl MarkdownVdb {
         } else {
             root
         };
+
+        if config.embedding_dimensions == 0
+            && !resolve_dimensions_from_existing_index(&root, &mut config)?
+        {
+            return Err(Error::Config(
+                "embedding dimensions are set to auto and no compatible index exists; use MarkdownVdb::open_async or `mdvdb embedding probe`"
+                    .into(),
+            ));
+        }
 
         let embedding_config = EmbeddingConfig {
             provider: format!("{:?}", config.embedding_provider),
@@ -1119,7 +1300,7 @@ impl MarkdownVdb {
     }
 
     /// Open a markdown-vdb instance in read-only mode with an explicit config.
-    pub fn open_readonly_with_config(root: PathBuf, config: Config) -> Result<Self> {
+    pub fn open_readonly_with_config(root: PathBuf, mut config: Config) -> Result<Self> {
         let root = if root.is_relative() {
             root.canonicalize().map_err(|e| {
                 Error::Config(format!(
@@ -1130,6 +1311,14 @@ impl MarkdownVdb {
         } else {
             root
         };
+
+        if config.embedding_dimensions == 0
+            && !resolve_dimensions_from_existing_index(&root, &mut config)?
+        {
+            return Err(Error::Config(
+                "embedding dimensions are unresolved and no index exists".into(),
+            ));
+        }
 
         let embedding_config = EmbeddingConfig {
             provider: format!("{:?}", config.embedding_provider),
@@ -1168,15 +1357,33 @@ impl MarkdownVdb {
         fts_index: Arc<FtsIndex>,
         index_rebuilt: bool,
     ) -> Result<Self> {
-        // Check config compatibility: dimensions must match.
         let status = index.status();
-        if status.embedding_config.dimensions != config.embedding_dimensions
-            && status.embedding_config.dimensions != 0
-        {
-            return Err(Error::Config(format!(
-                "index was created with {} dimensions but config specifies {}",
-                status.embedding_config.dimensions, config.embedding_dimensions
-            )));
+        let provider_name = format!("{:?}", config.embedding_provider);
+        let triple_compatible = status.embedding_config.dimensions == config.embedding_dimensions
+            && status.embedding_config.model == config.embedding_model
+            && status.embedding_config.provider == provider_name;
+        let compatible = if triple_compatible {
+            match read_embedding_space(&root) {
+                Ok(Some(stored)) => stored == EmbeddingSpaceDescriptor::from_config(&config),
+                Ok(None) => true,
+                Err(error) => {
+                    warn!(error = %error, "embedding-space descriptor is unreadable");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !compatible {
+            warn!(
+                stored_provider = %status.embedding_config.provider,
+                stored_model = %status.embedding_config.model,
+                stored_dimensions = status.embedding_config.dimensions,
+                configured_provider = %provider_name,
+                configured_model = %config.embedding_model,
+                configured_dimensions = config.embedding_dimensions,
+                "embedding space changed; vector operations require a full reindex"
+            );
         }
 
         let _ = embedding_config; // used by callers for Index::open_or_create_with_options
@@ -1195,6 +1402,7 @@ impl MarkdownVdb {
             index,
             fts_index,
             index_rebuilt: AtomicBool::new(index_rebuilt),
+            embedding_compatible: AtomicBool::new(compatible),
         })
     }
 
@@ -1355,6 +1563,16 @@ impl MarkdownVdb {
     /// Lazily initialize and return the embedding provider.
     /// Fails if the provider cannot be created (e.g., missing API key).
     fn ensure_provider(&self) -> Result<Arc<dyn EmbeddingProvider>> {
+        if !self.embedding_compatible.load(Ordering::Acquire) {
+            return Err(Error::Config(
+                "embedding provider, model, or dimensions changed; run `mdvdb ingest --reindex` before using vector operations"
+                    .into(),
+            ));
+        }
+        self.ensure_provider_unchecked()
+    }
+
+    fn ensure_provider_unchecked(&self) -> Result<Arc<dyn EmbeddingProvider>> {
         let mut guard = self.provider.lock();
         if let Some(ref p) = *guard {
             return Ok(Arc::clone(p));
@@ -1390,6 +1608,13 @@ impl MarkdownVdb {
     ///
     /// Pipeline: discover → parse → hash-compare → chunk → embed → upsert → remove deleted → save.
     pub async fn ingest(&self, options: IngestOptions) -> Result<IngestResult> {
+        let embedding_space_changed = !self.embedding_compatible.load(Ordering::Acquire);
+        if embedding_space_changed && !options.full {
+            return Err(Error::Config(
+                "embedding provider, model, or dimensions changed; incremental ingest is unsafe, run `mdvdb ingest --reindex`"
+                    .into(),
+            ));
+        }
         if self.index_rebuilt.load(Ordering::Acquire) && options.file.is_some() {
             return Err(Error::Config(
                 "the archived index was incompatible and has been recreated; the first recovery ingest must be unscoped"
@@ -1659,7 +1884,12 @@ impl MarkdownVdb {
             embedding::batch::EmbeddingResult::default()
         } else {
             embedding::batch::embed_chunks(
-                self.ensure_provider()?.as_ref(),
+                if embedding_space_changed {
+                    self.ensure_provider_unchecked()?
+                } else {
+                    self.ensure_provider()?
+                }
+                .as_ref(),
                 &all_batch_chunks,
                 &embed_existing,
                 &embed_current,
@@ -1678,6 +1908,20 @@ impl MarkdownVdb {
             result.duration_secs = start_time.elapsed().as_secs_f64();
             self.index.save()?;
             return Ok(result);
+        }
+
+        // Only replace the in-memory vector generation after every embedding
+        // request succeeded and the final pre-mutation cancellation barrier
+        // passed. The previous on-disk generation remains recoverable until
+        // the final atomic save.
+        if embedding_space_changed {
+            let embedding_config = EmbeddingConfig {
+                provider: format!("{:?}", self.config.embedding_provider),
+                model: self.config.embedding_model.clone(),
+                dimensions: self.config.embedding_dimensions,
+            };
+            self.index.reset_embedding_space(&embedding_config)?;
+            self.embedding_compatible.store(true, Ordering::Release);
         }
 
         // From this point onward the operation may mutate either companion
@@ -2299,6 +2543,7 @@ impl MarkdownVdb {
         // cross-process guard still covers raw/schema/module state.
         self.fts_index.commit()?;
         fts::finish_reconciliation(&self.root)?;
+        write_embedding_space(&self.root, &self.config)?;
 
         let save_secs = save_start.elapsed().as_secs_f64();
 
@@ -2351,12 +2596,28 @@ impl MarkdownVdb {
         }
     }
 
-    /// Execute a semantic search query against the index.
+    /// Execute a search query against the index.
     pub async fn search(&self, query: search::SearchQuery) -> Result<search::SearchResponse> {
+        // Pure lexical retrieval does not use vectors. Avoid constructing a
+        // cloud provider (and allow lexical access to an index whose embedding
+        // descriptor changed) unless graph expansion explicitly needs a query
+        // embedding.
+        let pure_lexical = query.mode == SearchMode::Lexical
+            && query
+                .expand_graph
+                .unwrap_or(self.config.search_expand_graph)
+                == 0;
+        let provider: Arc<dyn EmbeddingProvider> = if pure_lexical {
+            Arc::new(embedding::mock::MockProvider::new(
+                self.config.embedding_dimensions,
+            ))
+        } else {
+            self.ensure_provider()?
+        };
         let mut response = search::search(
             &query,
             &self.index,
-            self.ensure_provider()?.as_ref(),
+            provider.as_ref(),
             Some(&self.fts_index),
             self.config.search_rrf_k,
             self.config.bm25_norm_k,
@@ -2713,7 +2974,7 @@ impl MarkdownVdb {
 embedding:
   provider: openai
   model: text-embedding-3-small
-  dimensions: 1536
+  dimensions: auto
   batch_size: 100
 
 # Search defaults
@@ -4367,13 +4628,14 @@ sources:
         let template = "\
 # mdvdb user-level configuration
 # Values here apply to all projects unless overridden by project config.yaml
-# API credentials (OPENAI_API_KEY, OLLAMA_HOST) belong in .env, not here.
+# API credentials (OPENAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY,
+# AZURE_OPENAI_API_KEY, HF_TOKEN, AWS credentials) belong in .env, not here.
 
 # Default embedding provider
 # embedding:
 #   provider: openai
 #   model: text-embedding-3-small
-#   dimensions: 1536
+#   dimensions: auto
 ";
 
         std::fs::write(config_path, template)?;

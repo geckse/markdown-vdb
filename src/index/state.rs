@@ -114,6 +114,43 @@ pub struct Index {
 }
 
 impl Index {
+    /// Replace the current in-memory vector generation with an empty one using
+    /// a newly resolved embedding space. Nothing is persisted until `save`, so
+    /// callers can finish all remote inference before invalidating the last
+    /// good on-disk generation.
+    pub fn reset_embedding_space(&self, config: &EmbeddingConfig) -> Result<()> {
+        if config.dimensions == 0 {
+            return Err(Error::Config(
+                "cannot initialize an index with unresolved dimensions".into(),
+            ));
+        }
+        let hnsw = storage::create_hnsw(
+            config.dimensions,
+            storage::scalar_kind_for(&self.write_options.quantization),
+        )?;
+        let mut state = self.state.write();
+        state.metadata = IndexMetadata {
+            chunks: HashMap::new(),
+            files: HashMap::new(),
+            embedding_config: config.clone(),
+            last_updated: SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0),
+            schema: None,
+            cluster_state: None,
+            link_graph: None,
+            file_mtimes: Some(HashMap::new()),
+            scoped_schemas: None,
+            custom_cluster_state: None,
+        };
+        state.hnsw = hnsw;
+        state.id_to_key.clear();
+        state.next_key = 0;
+        state.dirty = true;
+        Ok(())
+    }
+
     /// Open an existing index file at the given path with default write options.
     pub fn open(path: &Path) -> Result<Self> {
         Self::open_with_options(path, WriteOptions::default())

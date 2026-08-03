@@ -106,6 +106,37 @@ fn parse_frontmatter_types() {
 }
 
 #[test]
+fn parse_plain_markdown_filenames_as_relation_list() {
+    let content = concat!(
+        "---\n",
+        "title: My Knowledge Bundle\n",
+        "entries:\n",
+        "  - what-is-okf.md\n",
+        "  - validation-rules.md\n",
+        "  - another-markdown.md\n",
+        "---\n",
+        "# Bundle\n"
+    );
+    let result = parse_temp_file(content).unwrap();
+
+    let links = result.frontmatter_links;
+    assert_eq!(links.len(), 3);
+    assert!(links.iter().all(|link| link.field == "entries"));
+    assert!(links.iter().all(|link| !link.is_wikilink));
+    assert_eq!(
+        links
+            .iter()
+            .map(|link| link.target.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "what-is-okf.md",
+            "validation-rules.md",
+            "another-markdown.md"
+        ]
+    );
+}
+
+#[test]
 fn content_hash_deterministic() {
     let content = "# Hello World\n\nSome content here.\n";
     let hash1 = compute_content_hash(content);

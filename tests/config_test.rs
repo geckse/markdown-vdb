@@ -80,7 +80,7 @@ fn defaults_applied_when_no_config() {
 
     assert_eq!(config.embedding_provider, EmbeddingProviderType::OpenAI);
     assert_eq!(config.embedding_model, "text-embedding-3-small");
-    assert_eq!(config.embedding_dimensions, 1536);
+    assert_eq!(config.embedding_dimensions, 0);
     assert_eq!(config.embedding_batch_size, 100);
     assert_eq!(config.openai_api_key, None);
     assert_eq!(config.ollama_host, "http://localhost:11434");
@@ -231,17 +231,13 @@ fn case_insensitive_provider() {
 
 #[test]
 #[serial]
-fn invalid_dimensions_rejected() {
+fn zero_dimensions_environment_value_selects_auto() {
     clear_env();
     let tmp = TempDir::new().unwrap();
     std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "0");
 
-    let result = Config::load(tmp.path());
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::Config(msg) => assert!(msg.contains("embedding_dimensions")),
-        other => panic!("expected Error::Config, got: {other}"),
-    }
+    let config = Config::load(tmp.path()).unwrap();
+    assert_eq!(config.embedding_dimensions, 0);
 
     clear_env();
 }
@@ -254,9 +250,10 @@ fn invalid_dimensions_non_numeric() {
     clear_env();
     let tmp = TempDir::new().unwrap();
     std::env::set_var("MDVDB_EMBEDDING_DIMENSIONS", "abc");
+    std::env::set_var("MDVDB_NO_USER_CONFIG", "1");
 
     let config = Config::load(tmp.path()).unwrap();
-    assert_eq!(config.embedding_dimensions, 1536);
+    assert_eq!(config.embedding_dimensions, 0);
 
     clear_env();
 }
@@ -1454,7 +1451,7 @@ fn yaml_partial_config_valid() {
     assert_eq!(config.embedding_provider, EmbeddingProviderType::Mock);
     // All other fields should have defaults
     assert_eq!(config.embedding_model, "text-embedding-3-small");
-    assert_eq!(config.embedding_dimensions, 1536);
+    assert_eq!(config.embedding_dimensions, 0);
     assert_eq!(config.search_default_limit, 10);
 
     clear_env();
@@ -1472,7 +1469,7 @@ fn yaml_empty_file_valid() {
     let config = Config::load(tmp.path()).unwrap();
     assert_eq!(config.embedding_provider, EmbeddingProviderType::OpenAI);
     assert_eq!(config.embedding_model, "text-embedding-3-small");
-    assert_eq!(config.embedding_dimensions, 1536);
+    assert_eq!(config.embedding_dimensions, 0);
 
     clear_env();
 }
@@ -1488,7 +1485,7 @@ fn yaml_comment_only_file_valid() {
 
     let config = Config::load(tmp.path()).unwrap();
     assert_eq!(config.embedding_provider, EmbeddingProviderType::OpenAI);
-    assert_eq!(config.embedding_dimensions, 1536);
+    assert_eq!(config.embedding_dimensions, 0);
 
     clear_env();
 }

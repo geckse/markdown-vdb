@@ -1,7 +1,7 @@
 mod format;
 mod update;
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
@@ -161,6 +161,9 @@ enum Commands {
     /// Show resolved configuration
     Config(ConfigArgs),
 
+    /// Discover and probe embedding provider models
+    Embedding(EmbeddingArgs),
+
     /// Run diagnostic checks on config, provider, and index
     Doctor(DoctorArgs),
 
@@ -265,7 +268,7 @@ struct SearchArgs {
     #[arg(long, value_name = "N", value_parser = clap::value_parser!(u8).range(0..=3))]
     expand: Option<u8>,
 
-    /// Resolve frontmatter relations ([[wiki-link]] values) inline: path, existence, title, target frontmatter
+    /// Resolve frontmatter relations (.md paths, wiki links, or Markdown links) inline: path, existence, title, target frontmatter
     #[arg(long)]
     populate: bool,
 }
@@ -448,7 +451,7 @@ struct GetArgs {
     /// Path to the markdown file
     file_path: PathBuf,
 
-    /// Resolve frontmatter relations ([[wiki-link]] values) inline: path, existence, title, target frontmatter
+    /// Resolve frontmatter relations (.md paths, wiki links, or Markdown links) inline: path, existence, title, target frontmatter
     #[arg(long)]
     populate: bool,
 }
@@ -487,7 +490,7 @@ struct CollectionArgs {
     #[arg(long, default_value = "0")]
     offset: usize,
 
-    /// Resolve frontmatter relations ([[wiki-link]] values) inline: path, existence, title, target frontmatter
+    /// Resolve frontmatter relations (.md paths, wiki links, or Markdown links) inline: path, existence, title, target frontmatter
     #[arg(long)]
     populate: bool,
 }
@@ -615,9 +618,31 @@ struct InitArgs {
 
 #[derive(Parser)]
 struct ConfigArgs {
+    /// Modify the user-level configuration instead of this collection
+    #[arg(long, global = true)]
+    global: bool,
+
     /// Modify configuration
     #[command(subcommand)]
     action: Option<ConfigAction>,
+}
+
+#[derive(Parser)]
+struct EmbeddingArgs {
+    #[command(subcommand)]
+    action: EmbeddingAction,
+}
+
+#[derive(Subcommand)]
+enum EmbeddingAction {
+    /// List models reported by the provider's live catalog
+    Models {
+        /// Provider override; the configured provider is used when omitted
+        #[arg(long)]
+        provider: Option<String>,
+    },
+    /// Run a minimal inference and report the resolved vector dimensions
+    Probe,
 }
 
 #[derive(Subcommand)]
@@ -630,6 +655,30 @@ enum ConfigAction {
         /// New value (parsed as bool/number when possible, else string)
         value: String,
     },
+    /// Remove a config override so the inherited/default value applies
+    Unset {
+        /// Dotted key path
+        key: String,
+    },
+    /// Manage credentials in the project/global .env file
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretAction {
+    /// Read a secret from stdin and store it without exposing it in argv
+    Set {
+        /// Environment variable name, for example OPENROUTER_API_KEY
+        name: String,
+        /// Required safety switch documenting that the value comes from stdin
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Remove a stored secret
+    Unset { name: String },
 }
 
 #[derive(Parser)]
@@ -683,6 +732,30 @@ fn parse_filter(s: &str) -> anyhow::Result<MetadataFilter> {
     };
 
     Ok(MetadataFilter::Equals { field: key, value })
+}
+
+fn ensure_supported_secret_name(name: &str) -> anyhow::Result<()> {
+    const SUPPORTED: &[&str] = &[
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ACCESS_TOKEN",
+        "HF_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "OLLAMA_HOST",
+    ];
+    if SUPPORTED.contains(&name) {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "unsupported embedding secret '{name}'; expected one of {}",
+            SUPPORTED.join(", ")
+        )
+    }
 }
 
 /// Resolve a configured Shard to the same path string accepted by existing
@@ -910,6 +983,81 @@ async fn run() -> anyhow::Result<()> {
     let config = mdvdb::config::Config::load(&cwd)?;
 
     match cli.command {
+        Some(Commands::Embedding(args)) => {
+            let mut provider_config = config.clone();
+            match args.action {
+                EmbeddingAction::Models { provider } => {
+                    if let Some(provider) = provider {
+                        provider_config.embedding_provider = provider.parse()?;
+                    }
+                    let catalogless_name = match &provider_config.embedding_provider {
+                        mdvdb::config::EmbeddingProviderType::OpenAI => Some("openai"),
+                        mdvdb::config::EmbeddingProviderType::AzureOpenAi => Some("azure-openai"),
+                        mdvdb::config::EmbeddingProviderType::Ollama => Some("ollama"),
+                        mdvdb::config::EmbeddingProviderType::Custom => Some("custom"),
+                        mdvdb::config::EmbeddingProviderType::Mock => Some("mock"),
+                        _ => None,
+                    };
+                    if let Some(provider_name) = catalogless_name {
+                        if json {
+                            serde_json::to_writer_pretty(
+                                std::io::stdout(),
+                                &serde_json::json!({
+                                    "provider": provider_name,
+                                    "discovery_available": false,
+                                    "models": [],
+                                }),
+                            )?;
+                            writeln!(std::io::stdout())?;
+                        } else {
+                            println!(
+                                "{provider_name} does not expose model discovery; enter the provider model ID directly"
+                            );
+                        }
+                        return Ok(());
+                    }
+                    let provider = mdvdb::embedding::provider::create_provider(&provider_config)?;
+                    let discovered = provider.list_models().await?;
+                    if json {
+                        serde_json::to_writer_pretty(
+                            std::io::stdout(),
+                            &serde_json::json!({
+                                "provider": provider.name(),
+                                "discovery_available": discovered.is_some(),
+                                "models": discovered.unwrap_or_default(),
+                            }),
+                        )?;
+                        writeln!(std::io::stdout())?;
+                    } else if let Some(models) = discovered {
+                        for model in models {
+                            match model.name {
+                                Some(name) => println!("{}\t{}", model.id, name),
+                                None => println!("{}", model.id),
+                            }
+                        }
+                    } else {
+                        println!(
+                            "{} does not expose model discovery; enter the provider model ID directly",
+                            provider.name()
+                        );
+                    }
+                }
+                EmbeddingAction::Probe => {
+                    let provider = mdvdb::embedding::provider::create_provider(&provider_config)?;
+                    let probe =
+                        mdvdb::embedding::provider::probe_provider(provider.as_ref()).await?;
+                    if json {
+                        serde_json::to_writer_pretty(std::io::stdout(), &probe)?;
+                        writeln!(std::io::stdout())?;
+                    } else {
+                        println!(
+                            "{} · {} · {} dimensions · {} ms",
+                            probe.provider, probe.model, probe.dimensions, probe.latency_ms
+                        );
+                    }
+                }
+            }
+        }
         Some(Commands::Search(args)) => {
             // Determine search mode: explicit --mode takes priority, then shorthand flags, then config default.
             let mode = if let Some(m) = args.mode {
@@ -1011,10 +1159,15 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Ingest(args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let full_reindex = args.reindex || args.full;
+            let vdb = if full_reindex && !args.preview {
+                MarkdownVdb::open_async_for_reindex_with_config(cwd, config).await?
+            } else {
+                MarkdownVdb::open_async_with_config(cwd, config).await?
+            };
 
             if args.preview {
-                let preview = vdb.preview(args.reindex || args.full, args.file)?;
+                let preview = vdb.preview(full_reindex, args.file)?;
                 if json {
                     serde_json::to_writer_pretty(std::io::stdout(), &preview)?;
                     writeln!(std::io::stdout())?;
@@ -1116,7 +1269,7 @@ async fn run() -> anyhow::Result<()> {
             };
 
             let options = mdvdb::IngestOptions {
-                full: args.reindex || args.full,
+                full: full_reindex,
                 file: args.file,
                 progress: progress_callback,
                 cancel: Some(cancel),
@@ -1778,7 +1931,7 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Watch(_args)) => {
-            let vdb = MarkdownVdb::open_with_config(cwd, config)?;
+            let vdb = MarkdownVdb::open_async_with_config(cwd, config).await?;
 
             let cancel = tokio_util::sync::CancellationToken::new();
             let cancel_clone = cancel.clone();
@@ -1973,7 +2126,12 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Config(args)) => match args.action {
             Some(ConfigAction::Set { key, value }) => {
-                let yaml_config_path = cwd.join(".markdownvdb").join("config.yaml");
+                let yaml_config_path = if args.global {
+                    mdvdb::config::Config::user_config_path()
+                        .ok_or_else(|| anyhow::anyhow!("could not resolve user config path"))?
+                } else {
+                    cwd.join(".markdownvdb").join("config.yaml")
+                };
                 mdvdb::config_update_yaml_value(
                     &yaml_config_path,
                     &key,
@@ -1986,6 +2144,61 @@ async fn run() -> anyhow::Result<()> {
                 }
                 if !json {
                     eprintln!("Set {key} = {value}");
+                }
+            }
+            Some(ConfigAction::Unset { key }) => {
+                let yaml_config_path = if args.global {
+                    mdvdb::config::Config::user_config_path()
+                        .ok_or_else(|| anyhow::anyhow!("could not resolve user config path"))?
+                } else {
+                    cwd.join(".markdownvdb").join("config.yaml")
+                };
+                let removed = mdvdb::config_remove_yaml_value(&yaml_config_path, &key)?;
+                if !json {
+                    eprintln!(
+                        "{} {key}",
+                        if removed {
+                            "Unset"
+                        } else {
+                            "No override found for"
+                        }
+                    );
+                }
+            }
+            Some(ConfigAction::Secret { action }) => {
+                let env_path = if args.global {
+                    mdvdb::config::Config::user_config_dir()
+                        .ok_or_else(|| anyhow::anyhow!("could not resolve user config directory"))?
+                        .join(".env")
+                } else {
+                    cwd.join(".markdownvdb").join(".env")
+                };
+                match action {
+                    SecretAction::Set { name, stdin } => {
+                        if !stdin {
+                            anyhow::bail!("secret values must be supplied with --stdin");
+                        }
+                        ensure_supported_secret_name(&name)?;
+                        let mut value = String::new();
+                        std::io::stdin().read_to_string(&mut value)?;
+                        while value.ends_with(['\n', '\r']) {
+                            value.pop();
+                        }
+                        if value.is_empty() {
+                            anyhow::bail!("refusing to store an empty secret");
+                        }
+                        mdvdb::config_update_secret(&env_path, &name, Some(&value))?;
+                        if !json {
+                            eprintln!("Stored {name}");
+                        }
+                    }
+                    SecretAction::Unset { name } => {
+                        ensure_supported_secret_name(&name)?;
+                        mdvdb::config_update_secret(&env_path, &name, None)?;
+                        if !json {
+                            eprintln!("Removed {name}");
+                        }
+                    }
                 }
             }
             None => {
@@ -2060,7 +2273,7 @@ _mdvdb() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="search ingest status info schema clusters shards tree get collection watch modules init config doctor links backlinks orphans edges graph completions"
+    commands="search ingest embedding status info schema clusters shards tree get collection watch modules init config doctor links backlinks orphans edges graph completions"
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=($(compgen -W "$commands --help --version --verbose --root --json --no-color" -- "$cur"))
@@ -2072,6 +2285,14 @@ _mdvdb() {
             ;;
         search)
             COMPREPLY=($(compgen -W "--limit --min-score --filter --boost-links --no-boost-links --mode --semantic --lexical --path --shard --decay --no-decay --decay-half-life --decay-exclude --decay-include --hops --expand --help" -- "$cur"))
+            ;;
+        embedding)
+            COMPREPLY=($(compgen -W "models probe --help" -- "$cur"))
+            ;;
+        models)
+            if [ "${COMP_WORDS[1]}" = "embedding" ]; then
+                COMPREPLY=($(compgen -W "--provider --help" -- "$cur"))
+            fi
             ;;
         tree)
             COMPREPLY=($(compgen -W "--path --shard --help" -- "$cur"))
@@ -2119,6 +2340,7 @@ _mdvdb() {
     commands=(
         'search:Semantic search across indexed markdown files'
         'ingest:Ingest markdown files into the index'
+        'embedding:Discover and probe embedding providers'
         'status:Show index status and configuration'
         'info:Show vault or folder stats'
         'schema:Show inferred metadata schema'
@@ -2182,6 +2404,11 @@ _mdvdb() {
                         '--hops[Number of link hops for graph boosting (1-3)]:hops:' \
                         '--expand[Graph expansion depth for context (0-3)]:depth:'
                     ;;
+                embedding)
+                    _arguments \
+                        '1:action:(models probe)' \
+                        '--provider[Provider used for model discovery]:provider:(openai openrouter gemini azure bedrock huggingface ollama custom mock)'
+                    ;;
                 info)
                     _arguments \
                         '1:path:_directories' \
@@ -2228,6 +2455,7 @@ _mdvdb"#
                     r#"# mdvdb fish completions
 complete -c mdvdb -n '__fish_use_subcommand' -a search -d 'Semantic search across indexed markdown files'
 complete -c mdvdb -n '__fish_use_subcommand' -a ingest -d 'Ingest markdown files into the index'
+complete -c mdvdb -n '__fish_use_subcommand' -a embedding -d 'Discover and probe embedding providers'
 complete -c mdvdb -n '__fish_use_subcommand' -a status -d 'Show index status and configuration'
 complete -c mdvdb -n '__fish_use_subcommand' -a info -d 'Show vault or folder stats'
 complete -c mdvdb -n '__fish_use_subcommand' -a schema -d 'Show inferred metadata schema'
@@ -2279,6 +2507,10 @@ complete -c mdvdb -n '__fish_seen_subcommand_from search' -l decay-include -d 'P
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l hops -d 'Number of link hops for graph boosting (1-3)' -r
 complete -c mdvdb -n '__fish_seen_subcommand_from search' -l expand -d 'Graph expansion depth for context (0-3)' -r
 
+# Embedding subcommand actions
+complete -c mdvdb -n '__fish_seen_subcommand_from embedding' -a 'models probe'
+complete -c mdvdb -n '__fish_seen_subcommand_from embedding; and __fish_seen_subcommand_from models' -l provider -d 'Provider used for model discovery' -r -a 'openai openrouter gemini azure bedrock huggingface ollama custom mock'
+
 # Collection subcommand flags
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l recursive -s r -d 'Include nested subfolders'
 complete -c mdvdb -n '__fish_seen_subcommand_from collection' -l shard -d 'Restrict to a configured Shard' -r
@@ -2311,6 +2543,7 @@ Register-ArgumentCompleter -CommandName mdvdb -ScriptBlock {
     $commands = @(
         @{ Name = 'search'; Tooltip = 'Semantic search across indexed markdown files' },
         @{ Name = 'ingest'; Tooltip = 'Ingest markdown files into the index' },
+        @{ Name = 'embedding'; Tooltip = 'Discover and probe embedding providers' },
         @{ Name = 'status'; Tooltip = 'Show index status and configuration' },
         @{ Name = 'info'; Tooltip = 'Show vault or folder stats' },
         @{ Name = 'schema'; Tooltip = 'Show inferred metadata schema' },
@@ -2401,8 +2634,8 @@ fn validate_topic_fields(
     Ok(())
 }
 
-/// Parse a CLI string into a YAML scalar: bool and numbers when possible,
-/// otherwise a string.
+/// Parse a CLI string into a YAML value. Structured JSON/YAML objects and
+/// arrays stay typed so provider templates never rely on string interpolation.
 fn parse_yaml_scalar(value: &str) -> serde_yaml::Value {
     if let Ok(b) = value.parse::<bool>() {
         return serde_yaml::Value::Bool(b);
@@ -2412,6 +2645,14 @@ fn parse_yaml_scalar(value: &str) -> serde_yaml::Value {
     }
     if let Ok(f) = value.parse::<f64>() {
         return serde_yaml::Value::Number(serde_yaml::Number::from(f));
+    }
+    if let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(value) {
+        if matches!(
+            parsed,
+            serde_yaml::Value::Mapping(_) | serde_yaml::Value::Sequence(_)
+        ) {
+            return parsed;
+        }
     }
     serde_yaml::Value::String(value.to_string())
 }
@@ -2509,5 +2750,35 @@ async fn main() {
     if let Err(e) = run().await {
         eprintln!("error: {:#}", e);
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod embedding_config_cli_tests {
+    use super::parse_yaml_scalar;
+
+    #[test]
+    fn config_values_preserve_structured_bedrock_templates() {
+        let parsed = parse_yaml_scalar(
+            r#"{"inputText":"$input","dimensions":"$dimensions","nested":["$purpose"]}"#,
+        );
+        let mapping = parsed.as_mapping().expect("JSON object should stay typed");
+        assert_eq!(
+            mapping
+                .get(serde_yaml::Value::String("inputText".into()))
+                .and_then(serde_yaml::Value::as_str),
+            Some("$input")
+        );
+        assert!(mapping
+            .get(serde_yaml::Value::String("nested".into()))
+            .is_some_and(serde_yaml::Value::is_sequence));
+    }
+
+    #[test]
+    fn ordinary_model_ids_remain_strings() {
+        assert_eq!(
+            parse_yaml_scalar("vendor/future-embedding-v9"),
+            serde_yaml::Value::String("vendor/future-embedding-v9".into())
+        );
     }
 }

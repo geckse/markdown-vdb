@@ -6,7 +6,7 @@ client:
   - "[[clients/acme-corp]]"
   - "[[clients/globex]]"
   - "[[clients/initech]]"
-client_domain: ["acme.example","globex.example","initech.example"]
+client_domain: ["acme.example","globex.example","initech.vom"]
 ---
 
 # Alex Morgan

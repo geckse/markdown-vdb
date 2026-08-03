@@ -22,6 +22,7 @@ fn mock_config() -> Config {
         openai_api_key: None,
         ollama_host: "http://localhost:11434".into(),
         embedding_endpoint: None,
+        embedding_options: Default::default(),
         source_dirs: vec![PathBuf::from(".")],
         ignore_patterns: vec![],
         watch_enabled: false,
@@ -104,6 +105,100 @@ fn test_open_with_mock_config() {
 
     let vdb = MarkdownVdb::open_with_config(dir.path().to_path_buf(), mock_config());
     assert!(vdb.is_ok(), "should open with mock config: {:?}", vdb.err());
+}
+
+#[tokio::test]
+async fn auto_dimensions_reuse_a_compatible_existing_index() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join("doc.md"), "# Existing\n\nReusable vectors.").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.clone(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    drop(vdb);
+
+    let mut auto = mock_config();
+    auto.embedding_dimensions = 0;
+    let reopened = MarkdownVdb::open_with_config(root, auto).unwrap();
+    assert_eq!(reopened.config().embedding_dimensions, DIMS);
+}
+
+#[test]
+fn sync_open_rejects_unresolved_auto_dimensions_without_an_index() {
+    let dir = TempDir::new().unwrap();
+    let mut auto = mock_config();
+    auto.embedding_dimensions = 0;
+    let error = match MarkdownVdb::open_with_config(dir.path().to_path_buf(), auto) {
+        Ok(_) => panic!("sync open unexpectedly resolved auto dimensions"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("open_async"));
+    assert!(!dir.path().join(".markdownvdb/index").exists());
+}
+
+#[tokio::test]
+async fn embedding_descriptor_change_blocks_vectors_but_keeps_lexical_access() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(
+        root.join("doc.md"),
+        "# Lexical Marker\n\nexact searchable phrase",
+    )
+    .unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.clone(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    drop(vdb);
+
+    let mut changed = mock_config();
+    changed.embedding_options.purpose.mode = "prefix".into();
+    changed.embedding_options.purpose.query = Some("query: ".into());
+    changed.embedding_options.purpose.document = Some("document: ".into());
+    let reopened = MarkdownVdb::open_with_config(root, changed).unwrap();
+
+    let lexical = reopened
+        .search(SearchQuery::new("exact searchable phrase").with_mode(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert!(!lexical.results.is_empty());
+
+    let semantic_error = reopened
+        .search(SearchQuery::new("phrase").with_mode(SearchMode::Semantic))
+        .await
+        .unwrap_err();
+    assert!(semantic_error.to_string().contains("reindex"));
+
+    let ingest_error = reopened.ingest(IngestOptions::default()).await.unwrap_err();
+    assert!(ingest_error.to_string().contains("reindex"));
+}
+
+#[tokio::test]
+async fn changed_opaque_model_with_auto_dimensions_keeps_lexical_access() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().to_path_buf();
+    fs::write(root.join("doc.md"), "# Marker\n\nold index stays readable").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.clone(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    drop(vdb);
+
+    let mut changed = mock_config();
+    changed.embedding_model = "provider/future-embedding-model".into();
+    changed.embedding_dimensions = 0;
+    let reopened = MarkdownVdb::open_with_config(root, changed).unwrap();
+    assert_eq!(reopened.config().embedding_dimensions, DIMS);
+
+    let lexical = reopened
+        .search(SearchQuery::new("old index stays readable").with_mode(SearchMode::Lexical))
+        .await
+        .unwrap();
+    assert!(!lexical.results.is_empty());
+
+    let semantic_error = reopened
+        .search(SearchQuery::new("readable").with_mode(SearchMode::Semantic))
+        .await
+        .unwrap_err();
+    assert!(semantic_error.to_string().contains("reindex"));
 }
 
 #[test]

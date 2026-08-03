@@ -2,7 +2,7 @@
 
 ## Overview
 
-Folders already act as tables (phase 29 `collection`; app phase 39 table view). This phase adds the missing relationship part: frontmatter values like `client: "[[clients/acme]]"` become **foreign keys**. The schema auto-infers a new `Relation` field type (refinable via the `.markdownvdb.schema.yml` overlay with an optional `target:` folder — the FK's "table"), all read paths (`get`, `collection`, `search`) gain a `--populate` flag that resolves relation values inline to `{raw, path, exists, title, frontmatter}` (depth 1, JOIN-like), `get --populate` additionally exposes `referenced_by` (reverse lookup — which documents reference this one, via which field), and frontmatter links join the existing link graph as first-class `LinkEntry` edges tagged with their originating `field` — so backlinks, orphan detection, multi-hop `--expand`, and link-boost see them with zero changes to those consumers. mdvdb stays strictly read-only: creating, editing, or repairing relations in markdown files is the app's job.
+Folders already act as tables (phase 29 `collection`; app phase 39 table view). This phase adds the missing relationship part: frontmatter values like `client: clients/acme.md` become **foreign keys**. Plain `.md` paths are the preferred authoring form; wiki-link values such as `client: "[[clients/acme]]"` and Markdown links remain supported. The schema auto-infers a new `Relation` field type (refinable via the `.markdownvdb.schema.yml` overlay with an optional `target:` folder — the FK's "table"), all read paths (`get`, `collection`, `search`) gain a `--populate` flag that resolves relation values inline to `{raw, path, exists, title, frontmatter}` (depth 1, JOIN-like), `get --populate` additionally exposes `referenced_by` (reverse lookup — which documents reference this one, via which field), and frontmatter links join the existing link graph as first-class `LinkEntry` edges tagged with their originating `field` — so backlinks, orphan detection, multi-hop `--expand`, and link-boost see them with zero changes to those consumers. mdvdb stays strictly read-only: creating, editing, or repairing relations in markdown files is the app's job.
 
 This PRD and the app PRD (`app/docs/prds/phase-42-frontmatter-relations.md`) share **one canonical JSON contract** (below). This PRD is authoritative; the app mirrors the exact field names and types in `types/cli.ts`. Any divergence breaks the integration.
 
@@ -253,7 +253,7 @@ No new subcommands — one new flag on three existing ones (`src/main.rs`):
 - `CollectionArgs` (`:342-371`): `#[arg(long)] populate: bool`; handler (`:1078-1103`) passes it into `CollectionQuery`.
 - `SearchArgs` (`:172-243`): `#[arg(long)] populate: bool`; the search handler sets `query.populate`.
 
-Help text: "Resolve frontmatter relations ([[wiki-link]] values) inline: path, existence, title, target frontmatter". Shell completions regenerate via clap automatically.
+Help text: "Resolve frontmatter relations (.md paths, wiki links, or Markdown links) inline: path, existence, title, target frontmatter". Shell completions regenerate via clap automatically.
 
 ### Relation-Aware Filter Matching
 

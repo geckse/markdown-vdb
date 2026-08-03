@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::provider::EmbeddingProvider;
+use super::provider::{embedding_http_client, validate_embeddings, EmbeddingProvider};
 use crate::error::Error;
 
 const MAX_RETRIES: u32 = 3;
@@ -12,7 +12,7 @@ pub struct OllamaProvider {
     client: reqwest::Client,
     host: String,
     model: String,
-    dimensions: usize,
+    dimensions: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,10 +30,10 @@ impl OllamaProvider {
     /// Create a new Ollama embedding provider.
     pub fn new(host: String, model: String, dimensions: usize) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: embedding_http_client(),
             host,
             model,
-            dimensions,
+            dimensions: (dimensions > 0).then_some(dimensions),
         }
     }
 }
@@ -121,16 +121,7 @@ impl EmbeddingProvider for OllamaProvider {
                 )));
             }
 
-            for (i, embedding) in body.embeddings.iter().enumerate() {
-                if embedding.len() != self.dimensions {
-                    return Err(Error::EmbeddingProvider(format!(
-                        "expected dimension {}, got {} at index {}",
-                        self.dimensions,
-                        embedding.len(),
-                        i
-                    )));
-                }
-            }
+            validate_embeddings(&body.embeddings, texts.len(), self.dimensions)?;
 
             return Ok(body.embeddings);
         }
@@ -139,7 +130,11 @@ impl EmbeddingProvider for OllamaProvider {
     }
 
     fn dimensions(&self) -> usize {
-        self.dimensions
+        self.dimensions.unwrap_or(0)
+    }
+
+    fn model(&self) -> &str {
+        &self.model
     }
 
     fn name(&self) -> &str {

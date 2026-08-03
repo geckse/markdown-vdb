@@ -124,6 +124,11 @@ scopes:
         relation_field: client
         target_field: domain
         description: "Live industry retrieved from the related Client"
+      currency:
+        field_type: string
+        allowed_values:
+          - EUR
+          - US
 
   projects:
     fields:

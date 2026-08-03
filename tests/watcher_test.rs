@@ -25,6 +25,7 @@ fn test_config(source_dir: &str) -> Config {
         openai_api_key: None,
         ollama_host: String::new(),
         embedding_endpoint: None,
+        embedding_options: Default::default(),
         source_dirs: vec![PathBuf::from(source_dir)],
         ignore_patterns: vec![],
         watch_enabled: true,

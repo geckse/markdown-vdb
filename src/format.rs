@@ -1334,7 +1334,11 @@ pub fn print_config(config: &Config, user_config_path: Option<&std::path::Path>)
     println!(
         "  {}   {}",
         "Dimensions:".cyan(),
-        config.embedding_dimensions.to_string().yellow()
+        if config.embedding_dimensions == 0 {
+            "auto".yellow()
+        } else {
+            config.embedding_dimensions.to_string().yellow()
+        }
     );
     println!(
         "  {}   {}",
