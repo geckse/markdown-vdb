@@ -13,3 +13,6 @@
 [submodule "tesseract-skills"]
 	path = tesseract-skills
 	url = https://github.com/geckse/tesseract-md-skills.git
+[submodule "examples"]
+	path = examples
+	url = https://github.com/geckse/tesseract-md-examples.git
