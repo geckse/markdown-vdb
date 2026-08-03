@@ -155,6 +155,13 @@ async fn embedding_descriptor_change_blocks_vectors_but_keeps_lexical_access() {
     changed.embedding_options.purpose.query = Some("query: ".into());
     changed.embedding_options.purpose.document = Some("document: ".into());
     let reopened = MarkdownVdb::open_with_config(root, changed).unwrap();
+    let status = reopened.status();
+    assert!(!status.embedding_compatible);
+    assert!(status.reindex_required);
+    assert!(status
+        .embedding_compatibility_error
+        .as_deref()
+        .is_some_and(|message| message.contains("reindex")));
 
     let lexical = reopened
         .search(SearchQuery::new("exact searchable phrase").with_mode(SearchMode::Lexical))
@@ -187,6 +194,7 @@ async fn changed_opaque_model_with_auto_dimensions_keeps_lexical_access() {
     changed.embedding_dimensions = 0;
     let reopened = MarkdownVdb::open_with_config(root, changed).unwrap();
     assert_eq!(reopened.config().embedding_dimensions, DIMS);
+    assert!(reopened.status().reindex_required);
 
     let lexical = reopened
         .search(SearchQuery::new("old index stays readable").with_mode(SearchMode::Lexical))
@@ -1058,13 +1066,17 @@ async fn test_ingest_with_progress_callback() {
     let opts = IngestOptions {
         progress: Some(Box::new(move |phase: &mdvdb::IngestPhase| {
             let label = match phase {
+                mdvdb::IngestPhase::Preparing { .. } => "Preparing".to_string(),
+                mdvdb::IngestPhase::Probing => "Probing".to_string(),
                 mdvdb::IngestPhase::Discovering => "Discovering".to_string(),
                 mdvdb::IngestPhase::Parsing { .. } => "Parsing".to_string(),
                 mdvdb::IngestPhase::Skipped { .. } => "Skipped".to_string(),
+                mdvdb::IngestPhase::FileError { .. } => "FileError".to_string(),
                 mdvdb::IngestPhase::Embedding { .. } => "Embedding".to_string(),
                 mdvdb::IngestPhase::Saving => "Saving".to_string(),
                 mdvdb::IngestPhase::Clustering => "Clustering".to_string(),
                 mdvdb::IngestPhase::Cleaning => "Cleaning".to_string(),
+                mdvdb::IngestPhase::Cancelled => "Cancelled".to_string(),
                 mdvdb::IngestPhase::Done => "Done".to_string(),
             };
             phases_clone.lock().unwrap().push(label);

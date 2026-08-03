@@ -45,9 +45,24 @@ pub struct FileTree {
 /// Classifies each file as Indexed (hash match), Modified (hash mismatch),
 /// New (on disk but not in index), or Deleted (in index but not on disk).
 pub fn build_file_tree(root: &Path, config: &Config, index: &Index) -> Result<FileTree, Error> {
+    build_file_tree_from_hashes(root, config, index.get_file_hashes())
+}
+
+/// Build a file tree before an index exists.
+///
+/// This keeps discovery-only commands usable when embedding dimensions are
+/// configured as `auto`; every discovered document is reported as new.
+pub fn build_unindexed_file_tree(root: &Path, config: &Config) -> Result<FileTree, Error> {
+    build_file_tree_from_hashes(root, config, HashMap::new())
+}
+
+fn build_file_tree_from_hashes(
+    root: &Path,
+    config: &Config,
+    indexed_hashes: HashMap<String, String>,
+) -> Result<FileTree, Error> {
     let discovery = FileDiscovery::new(root, config);
     let disk_files = discovery.discover()?;
-    let indexed_hashes: HashMap<String, String> = index.get_file_hashes();
 
     let disk_paths: HashSet<String> = disk_files
         .iter()
@@ -444,6 +459,22 @@ mod tests {
         assert_eq!(tree.total_files, 1);
         assert_eq!(tree.modified_count, 1);
         assert_eq!(tree.indexed_count, 0);
+    }
+
+    #[test]
+    fn test_build_unindexed_file_tree_marks_discovered_files_new() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("first.md"), "# First").unwrap();
+        std::fs::write(root.join("second.md"), "# Second").unwrap();
+
+        let tree = build_unindexed_file_tree(root, &mock_config()).unwrap();
+
+        assert_eq!(tree.total_files, 2);
+        assert_eq!(tree.new_count, 2);
+        assert_eq!(tree.indexed_count, 0);
+        assert_eq!(tree.modified_count, 0);
+        assert_eq!(tree.deleted_count, 0);
     }
 
     #[test]

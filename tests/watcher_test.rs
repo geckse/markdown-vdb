@@ -358,8 +358,13 @@ async fn unchanged_source_event_is_a_true_no_op() {
         "an exact watcher echo must not call the embedding provider"
     );
     let reports = reports.lock().unwrap();
+    let created = reports.first().expect("created callback report");
+    assert!(created.estimated_input_tokens > 0);
+    assert_eq!(created.api_calls, 1);
     let echo = reports.last().expect("echo callback report");
     assert_eq!(echo.chunks_processed, 0);
+    assert_eq!(echo.estimated_input_tokens, 0);
+    assert_eq!(echo.api_calls, 0);
     assert!(
         echo.module_reports.is_empty(),
         "an exact watcher echo must not rerun modules"
@@ -715,6 +720,8 @@ async fn schema_change_recomputes_formulas_without_embedding() {
         .find(|report| report.path == ".markdownvdb.schema.yml")
         .expect("schema callback report");
     assert_eq!(schema_report.chunks_processed, 0);
+    assert_eq!(schema_report.estimated_input_tokens, 0);
+    assert_eq!(schema_report.api_calls, 0);
     assert_eq!(schema_report.path, ".markdownvdb.schema.yml");
     assert_eq!(schema_report.module_reports.len(), 2);
     assert_eq!(schema_report.module_reports[0].module, "formula");
@@ -825,13 +832,17 @@ async fn malformed_and_deleted_schema_clear_formula_cache_without_embedding() {
 async fn rename_drops_old_computed_state_and_calculates_new_path() {
     let (_dir, project_root, index, fts_index, provider) = setup();
     let config = test_config("docs");
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
     let watcher = Watcher::new(
         config,
         &project_root,
         Arc::clone(&index),
         fts_index,
         provider,
-        None,
+        Some(Box::new(move |report: &mdvdb::WatchEventReport| {
+            callback_reports.lock().unwrap().push(report.clone());
+        })),
     );
 
     fs::write(
@@ -868,6 +879,10 @@ async fn rename_drops_old_computed_state_and_calculates_new_path() {
         Some("20"),
         "the renamed row must receive fresh computed state"
     );
+    let reports = reports.lock().unwrap();
+    let rename = reports.last().expect("rename callback report");
+    assert_eq!(rename.previous_path.as_deref(), Some("docs/old.md"));
+    assert_eq!(rename.path, "docs/new.md");
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,8 @@ use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::process;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
@@ -16,6 +18,20 @@ use mdvdb::search::{
     SearchTimings, SortOrder,
 };
 use mdvdb::{CollectionQuery, GraphLevel, IngestTimings, MarkdownVdb};
+
+const SUPPORTED_SECRET_NAMES: &[&str] = &[
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ACCESS_TOKEN",
+    "HF_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "OLLAMA_HOST",
+];
 
 /// Wrapped search output for JSON mode.
 #[derive(serde::Serialize)]
@@ -40,6 +56,7 @@ struct IngestOutput {
     files_removed: usize,
     chunks_created: usize,
     api_calls: usize,
+    estimated_input_tokens: usize,
     files_failed: usize,
     errors: Vec<mdvdb::IngestError>,
     module_reports: Vec<mdvdb::modules::ModuleReport>,
@@ -47,6 +64,36 @@ struct IngestOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     timings: Option<IngestTimings>,
     cancelled: bool,
+}
+
+#[derive(serde::Serialize)]
+struct TimedIngestProgress<'a> {
+    #[serde(flatten)]
+    progress: &'a mdvdb::IngestPhase,
+    elapsed_ms: u64,
+    accumulated_errors: usize,
+}
+
+#[derive(serde::Serialize)]
+struct IngestStreamLine<'a, T: serde::Serialize> {
+    r#type: &'static str,
+    data: T,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation: Option<&'a str>,
+}
+
+fn write_ingest_stream_line<T: serde::Serialize>(kind: &'static str, data: T) {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let line = IngestStreamLine {
+        r#type: kind,
+        data,
+        operation: Some("ingest"),
+    };
+    if serde_json::to_writer(&mut lock, &line).is_ok() {
+        let _ = writeln!(&mut lock);
+        let _ = lock.flush();
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -290,6 +337,10 @@ struct IngestArgs {
     /// Preview what ingestion would do without actually ingesting
     #[arg(long)]
     preview: bool,
+
+    /// Stream progress and the final result as newline-delimited JSON.
+    #[arg(long)]
+    json_lines: bool,
 }
 
 #[derive(Parser)]
@@ -735,27 +786,38 @@ fn parse_filter(s: &str) -> anyhow::Result<MetadataFilter> {
 }
 
 fn ensure_supported_secret_name(name: &str) -> anyhow::Result<()> {
-    const SUPPORTED: &[&str] = &[
-        "OPENAI_API_KEY",
-        "OPENROUTER_API_KEY",
-        "GEMINI_API_KEY",
-        "AZURE_OPENAI_API_KEY",
-        "AZURE_OPENAI_ACCESS_TOKEN",
-        "HF_TOKEN",
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_SESSION_TOKEN",
-        "OLLAMA_HOST",
-    ];
-    if SUPPORTED.contains(&name) {
+    if SUPPORTED_SECRET_NAMES.contains(&name) {
         Ok(())
     } else {
         anyhow::bail!(
             "unsupported embedding secret '{name}'; expected one of {}",
-            SUPPORTED.join(", ")
+            SUPPORTED_SECRET_NAMES.join(", ")
         )
     }
+}
+
+fn sanitize_fatal_error(message: &str) -> String {
+    let mut sanitized = message.to_string();
+    for name in SUPPORTED_SECRET_NAMES {
+        if let Ok(secret) = std::env::var(name) {
+            if secret.len() >= 8 {
+                sanitized = sanitized.replace(&secret, "<redacted>");
+            }
+        }
+    }
+    let authorization =
+        regex::Regex::new(r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s,;]+")
+            .expect("static authorization redaction regex");
+    sanitized = authorization
+        .replace_all(&sanitized, "${1}<redacted>")
+        .into_owned();
+    let sensitive_query = regex::Regex::new(
+        r"(?i)([?&](?:key|api_key|token|access_token|x-amz-credential|x-amz-signature|x-amz-security-token)=)[^&\s]+",
+    )
+    .expect("static query redaction regex");
+    sensitive_query
+        .replace_all(&sanitized, "${1}<redacted>")
+        .into_owned()
 }
 
 /// Resolve a configured Shard to the same path string accepted by existing
@@ -1160,14 +1222,13 @@ async fn run() -> anyhow::Result<()> {
         }
         Some(Commands::Ingest(args)) => {
             let full_reindex = args.reindex || args.full;
-            let vdb = if full_reindex && !args.preview {
-                MarkdownVdb::open_async_for_reindex_with_config(cwd, config).await?
-            } else {
-                MarkdownVdb::open_async_with_config(cwd, config).await?
-            };
-
             if args.preview {
-                let preview = vdb.preview(full_reindex, args.file)?;
+                let preview = if cwd.join(".markdownvdb/index").is_file() {
+                    MarkdownVdb::open_readonly_with_config(cwd, config)?
+                        .preview(full_reindex, args.file)?
+                } else {
+                    MarkdownVdb::preview_without_index(&cwd, &config, full_reindex, args.file)?
+                };
                 if json {
                     serde_json::to_writer_pretty(std::io::stdout(), &preview)?;
                     writeln!(std::io::stdout())?;
@@ -1176,8 +1237,41 @@ async fn run() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
+            let requires_probe = config.embedding_dimensions == 0
+                && (full_reindex || !cwd.join(".markdownvdb/index").is_file());
+            let progress_start = std::time::Instant::now();
+            if args.json_lines {
+                let preparing = mdvdb::IngestPhase::Preparing {
+                    reindex: full_reindex,
+                };
+                write_ingest_stream_line(
+                    "progress",
+                    TimedIngestProgress {
+                        progress: &preparing,
+                        elapsed_ms: 0,
+                        accumulated_errors: 0,
+                    },
+                );
+                if requires_probe {
+                    let probing = mdvdb::IngestPhase::Probing;
+                    write_ingest_stream_line(
+                        "progress",
+                        TimedIngestProgress {
+                            progress: &probing,
+                            elapsed_ms: progress_start.elapsed().as_millis() as u64,
+                            accumulated_errors: 0,
+                        },
+                    );
+                }
+            }
+            let vdb = if full_reindex {
+                MarkdownVdb::open_async_for_reindex_with_config(cwd, config).await?
+            } else {
+                MarkdownVdb::open_async_with_config(cwd, config).await?
+            };
 
-            let interactive = !json && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let interactive =
+                !json && !args.json_lines && std::io::IsTerminal::is_terminal(&std::io::stdout());
 
             // Set up Ctrl+C cancellation (same pattern as watch command).
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -1188,7 +1282,22 @@ async fn run() -> anyhow::Result<()> {
             });
 
             // Set up progress bars if interactive.
-            let progress_callback: Option<mdvdb::ProgressCallback> = if interactive {
+            let progress_callback: Option<mdvdb::ProgressCallback> = if args.json_lines {
+                let accumulated_errors = Arc::new(AtomicUsize::new(0));
+                Some(Box::new(move |phase: &mdvdb::IngestPhase| {
+                    if let mdvdb::IngestPhase::FileError { error_count, .. } = phase {
+                        accumulated_errors.store(*error_count, Ordering::Release);
+                    }
+                    write_ingest_stream_line(
+                        "progress",
+                        TimedIngestProgress {
+                            progress: phase,
+                            elapsed_ms: progress_start.elapsed().as_millis() as u64,
+                            accumulated_errors: accumulated_errors.load(Ordering::Acquire),
+                        },
+                    );
+                }))
+            } else if interactive {
                 let mp = indicatif::MultiProgress::new();
                 let main_bar = mp.add(indicatif::ProgressBar::new(0));
                 main_bar.set_style(
@@ -1212,6 +1321,14 @@ async fn run() -> anyhow::Result<()> {
                     let elapsed = start.elapsed().as_secs();
                     let elapsed_str = format!("{}:{:02}", elapsed / 60, elapsed % 60);
                     match phase {
+                        mdvdb::IngestPhase::Preparing { .. } => {
+                            main_bar.set_message("Preparing index...");
+                            status_bar.set_message(format!("[{elapsed_str}] preparing"));
+                        }
+                        mdvdb::IngestPhase::Probing => {
+                            main_bar.set_message("Probing embedding model...");
+                            status_bar.set_message(format!("[{elapsed_str}] probing"));
+                        }
                         mdvdb::IngestPhase::Discovering => {
                             main_bar.set_message("Discovering files...");
                             status_bar.set_message(format!("[{elapsed_str}] discovering"));
@@ -1238,13 +1355,35 @@ async fn run() -> anyhow::Result<()> {
                             status_bar
                                 .set_message(format!("[{elapsed_str}] skipped {current}/{total}"));
                         }
-                        mdvdb::IngestPhase::Embedding {
-                            batch,
-                            total_batches,
+                        mdvdb::IngestPhase::FileError {
+                            current,
+                            total,
+                            path,
+                            error_count,
+                            ..
                         } => {
-                            main_bar
-                                .set_message(format!("Embedding batch {batch}/{total_batches}"));
-                            status_bar.set_message(format!("[{elapsed_str}] embedding"));
+                            main_bar.set_length(*total as u64);
+                            main_bar.set_position(*current as u64);
+                            main_bar.set_message(format!("{path} (failed)"));
+                            status_bar.set_message(format!(
+                                "[{elapsed_str}] {error_count} file error(s)"
+                            ));
+                        }
+                        mdvdb::IngestPhase::Embedding {
+                            completed_batches,
+                            total_batches,
+                            estimated_input_tokens,
+                            total_estimated_input_tokens,
+                            ..
+                        } => {
+                            main_bar.set_length(*total_batches as u64);
+                            main_bar.set_position(*completed_batches as u64);
+                            main_bar.set_message(format!(
+                                "Embedding batch {completed_batches}/{total_batches}"
+                            ));
+                            status_bar.set_message(format!(
+                                "[{elapsed_str}] embedding {estimated_input_tokens}/{total_estimated_input_tokens} estimated input tokens"
+                            ));
                         }
                         mdvdb::IngestPhase::Saving => {
                             main_bar.set_message("Saving index...");
@@ -1257,6 +1396,10 @@ async fn run() -> anyhow::Result<()> {
                         mdvdb::IngestPhase::Cleaning => {
                             main_bar.set_message("Cleaning removed files...");
                             status_bar.set_message(format!("[{elapsed_str}] cleaning"));
+                        }
+                        mdvdb::IngestPhase::Cancelled => {
+                            main_bar.finish_and_clear();
+                            status_bar.finish_with_message("cancelled");
                         }
                         mdvdb::IngestPhase::Done => {
                             main_bar.finish_and_clear();
@@ -1277,24 +1420,27 @@ async fn run() -> anyhow::Result<()> {
 
             let result = vdb.ingest(options).await?;
 
-            if json {
-                let output = IngestOutput {
-                    files_indexed: result.files_indexed,
-                    files_skipped: result.files_skipped,
-                    files_removed: result.files_removed,
-                    chunks_created: result.chunks_created,
-                    api_calls: result.api_calls,
-                    files_failed: result.files_failed,
-                    errors: result.errors.clone(),
-                    module_reports: result.module_reports.clone(),
-                    duration_secs: result.duration_secs,
-                    timings: if cli.verbose > 0 {
-                        result.timings.clone()
-                    } else {
-                        None
-                    },
-                    cancelled: result.cancelled,
-                };
+            let output = IngestOutput {
+                files_indexed: result.files_indexed,
+                files_skipped: result.files_skipped,
+                files_removed: result.files_removed,
+                chunks_created: result.chunks_created,
+                api_calls: result.api_calls,
+                estimated_input_tokens: result.estimated_input_tokens,
+                files_failed: result.files_failed,
+                errors: result.errors.clone(),
+                module_reports: result.module_reports.clone(),
+                duration_secs: result.duration_secs,
+                timings: if cli.verbose > 0 {
+                    result.timings.clone()
+                } else {
+                    None
+                },
+                cancelled: result.cancelled,
+            };
+            if args.json_lines {
+                write_ingest_stream_line("result", &output);
+            } else if json {
                 serde_json::to_writer_pretty(std::io::stdout(), &output)?;
                 writeln!(std::io::stdout())?;
             } else {
@@ -1315,23 +1461,36 @@ async fn run() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Status(_args)) => {
+            let index_exists = cwd.join(".markdownvdb/index").is_file();
+            let unresolved_embedding = config.embedding_dimensions == 0 && !index_exists;
             let empty_embedding = mdvdb::index::types::EmbeddingConfig {
                 provider: format!("{:?}", config.embedding_provider),
                 model: config.embedding_model.clone(),
                 dimensions: config.embedding_dimensions,
             };
-            let status = match MarkdownVdb::open_readonly_with_config(cwd, config) {
+            let empty_status = || mdvdb::IndexStatus {
+                document_count: 0,
+                chunk_count: 0,
+                vector_count: 0,
+                edge_count: 0,
+                last_updated: 0,
+                file_size: 0,
+                embedding_config: empty_embedding,
+                embedding_compatible: !unresolved_embedding,
+                reindex_required: unresolved_embedding,
+                embedding_compatibility_error: unresolved_embedding.then(|| {
+                    "embedding dimensions are unresolved; run `mdvdb ingest --reindex` before starting the watcher"
+                        .to_string()
+                }),
+            };
+            let status = if !index_exists {
+                empty_status()
+            } else {
+                match MarkdownVdb::open_readonly_with_config(cwd, config) {
                 Ok(vdb) => vdb.status(),
-                Err(mdvdb::Error::IndexNotFound { .. }) => mdvdb::IndexStatus {
-                    document_count: 0,
-                    chunk_count: 0,
-                    vector_count: 0,
-                    edge_count: 0,
-                    last_updated: 0,
-                    file_size: 0,
-                    embedding_config: empty_embedding,
-                },
+                    Err(mdvdb::Error::IndexNotFound { .. }) => empty_status(),
                 Err(error) => return Err(error.into()),
+                }
             };
 
             if json {
@@ -1707,8 +1866,12 @@ async fn run() -> anyhow::Result<()> {
         Some(Commands::Tree(args)) => {
             let scope_path =
                 resolve_shard_or_path(&cwd, args.path.as_deref(), args.shard.as_deref())?;
-            let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-            let tree = vdb.file_tree()?;
+            let tree = if cwd.join(".markdownvdb/index").is_file() {
+                let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
+                vdb.file_tree()?
+            } else {
+                mdvdb::tree::build_unindexed_file_tree(&cwd, &config)?
+            };
 
             if json {
                 if let Some(ref prefix) = scope_path {
@@ -2748,14 +2911,14 @@ fn mutate_custom_clusters_in_yaml<T>(
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
-        eprintln!("error: {:#}", e);
+        eprintln!("error: {}", sanitize_fatal_error(&format!("{e:#}")));
         process::exit(1);
     }
 }
 
 #[cfg(test)]
 mod embedding_config_cli_tests {
-    use super::parse_yaml_scalar;
+    use super::{parse_yaml_scalar, sanitize_fatal_error, IngestStreamLine, TimedIngestProgress};
 
     #[test]
     fn config_values_preserve_structured_bedrock_templates() {
@@ -2779,6 +2942,50 @@ mod embedding_config_cli_tests {
         assert_eq!(
             parse_yaml_scalar("vendor/future-embedding-v9"),
             serde_yaml::Value::String("vendor/future-embedding-v9".into())
+        );
+    }
+
+    #[test]
+    fn ingest_progress_uses_one_tagged_ndjson_frame() {
+        let phase = mdvdb::IngestPhase::Embedding {
+            completed_batches: 1,
+            total_batches: 2,
+            completed_chunks: 3,
+            total_chunks: 5,
+            estimated_input_tokens: 21,
+            total_estimated_input_tokens: 34,
+            api_calls: 1,
+        };
+        let line = serde_json::to_string(&IngestStreamLine {
+            r#type: "progress",
+            data: TimedIngestProgress {
+                progress: &phase,
+                elapsed_ms: 12,
+                accumulated_errors: 2,
+            },
+            operation: Some("ingest"),
+        })
+        .unwrap();
+
+        assert!(!line.contains('\n'));
+        let json: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(json["type"], "progress");
+        assert_eq!(json["operation"], "ingest");
+        assert_eq!(json["data"]["phase"], "embedding");
+        assert_eq!(json["data"]["completed_chunks"], 3);
+        assert_eq!(json["data"]["estimated_input_tokens"], 21);
+        assert_eq!(json["data"]["elapsed_ms"], 12);
+        assert_eq!(json["data"]["accumulated_errors"], 2);
+    }
+
+    #[test]
+    fn fatal_errors_redact_headers_and_sensitive_query_parameters() {
+        let sanitized = sanitize_fatal_error(
+            "Authorization: Bearer private-token https://host?x-amz-signature=signature&key=value",
+        );
+        assert_eq!(
+            sanitized,
+            "Authorization: Bearer <redacted> https://host?x-amz-signature=<redacted>&key=<redacted>"
         );
     }
 }

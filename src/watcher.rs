@@ -37,8 +37,15 @@ pub struct WatchEventReport {
     pub event_type: WatchEventType,
     /// Relative path of the affected file.
     pub path: String,
+    /// Previous relative path for a rename event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_path: Option<String>,
     /// Number of chunks processed (0 for deletions or skipped files).
     pub chunks_processed: usize,
+    /// Provider-independent local count of inputs successfully embedded.
+    pub estimated_input_tokens: usize,
+    /// Number of embedding API calls made for this event.
+    pub api_calls: usize,
     /// Duration in milliseconds to process this event.
     pub duration_ms: u64,
     /// Whether the event was processed successfully.
@@ -70,6 +77,8 @@ pub enum FileEvent {
 #[derive(Debug)]
 struct EventOutcome {
     chunks_processed: usize,
+    estimated_input_tokens: usize,
+    api_calls: usize,
     module_reports: Vec<ModuleReport>,
 }
 
@@ -231,6 +240,10 @@ impl Watcher {
                 (WatchEventType::Modified, crate::path_util::to_slash(p))
             }
         };
+        let previous_path = match event {
+            FileEvent::Renamed { from, .. } => Some(crate::path_util::to_slash(from)),
+            _ => None,
+        };
 
         // Keep raw index changes, dependency evaluation, materialization, and
         // the final index save in one project-scoped critical section. Reload
@@ -265,21 +278,27 @@ impl Watcher {
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
-        let (success, error, chunks_processed, module_reports) = match &result {
-            Ok(outcome) => (
-                true,
-                None,
-                outcome.chunks_processed,
-                outcome.module_reports.clone(),
-            ),
-            Err(e) => (false, Some(e.to_string()), 0, Vec::new()),
-        };
+        let (success, error, chunks_processed, estimated_input_tokens, api_calls, module_reports) =
+            match &result {
+                Ok(outcome) => (
+                    true,
+                    None,
+                    outcome.chunks_processed,
+                    outcome.estimated_input_tokens,
+                    outcome.api_calls,
+                    outcome.module_reports.clone(),
+                ),
+                Err(e) => (false, Some(e.to_string()), 0, 0, 0, Vec::new()),
+            };
 
         if let Some(ref cb) = self.event_callback {
             cb(&WatchEventReport {
                 event_type,
                 path: path_str,
+                previous_path,
                 chunks_processed,
+                estimated_input_tokens,
+                api_calls,
                 duration_ms,
                 success,
                 error,
@@ -361,6 +380,8 @@ impl Watcher {
                 self.fts_index.commit()?;
                 Ok(EventOutcome {
                     chunks_processed: 0,
+                    estimated_input_tokens: 0,
+                    api_calls: 0,
                     module_reports,
                 })
             }
@@ -414,6 +435,8 @@ impl Watcher {
                     self.run_modules(&ModuleEvent::SchemaChanged, module_run_lock)?;
                 Ok(EventOutcome {
                     chunks_processed: 0,
+                    estimated_input_tokens: 0,
+                    api_calls: 0,
                     module_reports,
                 })
             }
@@ -449,6 +472,8 @@ impl Watcher {
             self.fts_index.commit()?;
             return Ok(EventOutcome {
                 chunks_processed: 0,
+                estimated_input_tokens: 0,
+                api_calls: 0,
                 module_reports,
             });
         }
@@ -470,6 +495,8 @@ impl Watcher {
                 debug!(path = %relative_path.display(), "source and embedding body unchanged, skipping");
                 return Ok(EventOutcome {
                     chunks_processed: 0,
+                    estimated_input_tokens: 0,
+                    api_calls: 0,
                     module_reports: Vec::new(),
                 });
             }
@@ -485,6 +512,8 @@ impl Watcher {
                 let module_reports = self.run_modules(&module_event, module_run_lock)?;
                 return Ok(EventOutcome {
                     chunks_processed: 0,
+                    estimated_input_tokens: 0,
+                    api_calls: 0,
                     module_reports,
                 });
             }
@@ -503,12 +532,12 @@ impl Watcher {
         // Empty-body documents still carry frontmatter and may participate in
         // formulas. Upsert them with zero chunks, without making an empty
         // provider request.
-        let embeddings = if chunks.is_empty() {
+        let (embeddings, api_calls, estimated_input_tokens) = if chunks.is_empty() {
             debug!(path = %relative_path.display(), "document body produced no chunks");
-            Vec::new()
+            (Vec::new(), 0, 0)
         } else {
             let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-            self.provider.embed_batch(&texts).await?
+            crate::embedding::batch::embed_inputs_adaptively(self.provider.as_ref(), texts).await?
         };
 
         // Upsert vector index and FTS index.
@@ -550,6 +579,8 @@ impl Watcher {
 
         Ok(EventOutcome {
             chunks_processed: chunk_count,
+            estimated_input_tokens,
+            api_calls,
             module_reports,
         })
     }

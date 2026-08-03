@@ -715,6 +715,9 @@ impl Index {
             last_updated: state.metadata.last_updated,
             file_size,
             embedding_config: state.metadata.embedding_config.clone(),
+            embedding_compatible: true,
+            reindex_required: false,
+            embedding_compatibility_error: None,
         }
     }
 

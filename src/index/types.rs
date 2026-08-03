@@ -279,6 +279,13 @@ pub struct IndexStatus {
     pub file_size: u64,
     /// Embedding configuration snapshot.
     pub embedding_config: EmbeddingConfig,
+    /// Whether the configured embedding space matches the stored index.
+    pub embedding_compatible: bool,
+    /// True when vector operations and incremental ingestion require reindexing.
+    pub reindex_required: bool,
+    /// Actionable compatibility failure, absent when the embedding space matches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_compatibility_error: Option<String>,
 }
 
 /// Index-side counts for a path scope, returned by `Index::scoped_counts()`.

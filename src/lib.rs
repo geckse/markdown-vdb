@@ -223,8 +223,13 @@ fn without_computed_overlay_fields(
 }
 
 /// Phase of the ingestion pipeline, reported via progress callbacks.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "phase", rename_all = "snake_case")]
 pub enum IngestPhase {
+    /// Preparing the index and embedding-space probe.
+    Preparing { reindex: bool },
+    /// Probing an automatic embedding dimension before opening a generation.
+    Probing,
     /// Discovering markdown files on disk.
     Discovering,
     /// Parsing a file. `current` and `total` are 1-based counts, `path` is relative.
@@ -239,14 +244,32 @@ pub enum IngestPhase {
         total: usize,
         path: String,
     },
+    /// A file failed during parsing or chunking; ingestion continues.
+    FileError {
+        current: usize,
+        total: usize,
+        path: String,
+        message: String,
+        error_count: usize,
+    },
     /// Embedding a batch of chunks.
-    Embedding { batch: usize, total_batches: usize },
+    Embedding {
+        completed_batches: usize,
+        total_batches: usize,
+        completed_chunks: usize,
+        total_chunks: usize,
+        estimated_input_tokens: usize,
+        total_estimated_input_tokens: usize,
+        api_calls: usize,
+    },
     /// Saving the index to disk.
     Saving,
     /// Running clustering.
     Clustering,
     /// Cleaning up removed files.
     Cleaning,
+    /// Cancellation was observed at a safe boundary.
+    Cancelled,
     /// Ingestion complete.
     Done,
 }
@@ -295,6 +318,98 @@ pub struct IngestPreview {
     pub estimated_tokens: usize,
     /// Estimated number of API calls.
     pub estimated_api_calls: usize,
+}
+
+fn build_ingest_preview(
+    root: &Path,
+    config: &Config,
+    existing_hashes: &HashMap<String, String>,
+    reindex: bool,
+    file: Option<PathBuf>,
+) -> Result<IngestPreview> {
+    let disco = discovery::FileDiscovery::new(root, config);
+    let discovered = if let Some(ref single_file) = file {
+        let full = root.join(single_file);
+        if !full.is_file() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("file not found: {}", single_file.display()),
+            )));
+        }
+        vec![single_file.clone()]
+    } else {
+        disco.discover()?
+    };
+
+    let mut files = Vec::new();
+    let mut total_chunks = 0;
+    let mut estimated_tokens = 0;
+    let mut files_to_process = 0;
+    let mut files_unchanged = 0;
+
+    for path in &discovered {
+        let path_str = path_util::to_slash(path);
+        let md = match parser::parse_markdown_file(root, path) {
+            Ok(md) => md,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "failed to parse during preview");
+                continue;
+            }
+        };
+        let status = if reindex {
+            PreviewFileStatus::Changed
+        } else if let Some(existing) = existing_hashes.get(&path_str) {
+            if *existing == md.content_hash {
+                PreviewFileStatus::Unchanged
+            } else {
+                PreviewFileStatus::Changed
+            }
+        } else {
+            PreviewFileStatus::New
+        };
+        let chunks = match chunker::chunk_document(
+            &md,
+            config.chunk_max_tokens,
+            config.chunk_overlap_tokens,
+        ) {
+            Ok(chunks) => chunks,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "failed to chunk during preview");
+                continue;
+            }
+        };
+        let chunk_count = chunks.len();
+        let file_tokens = chunks
+            .iter()
+            .map(|chunk| chunker::count_tokens(&chunk.content))
+            .sum();
+
+        if status == PreviewFileStatus::Unchanged {
+            files_unchanged += 1;
+        } else {
+            files_to_process += 1;
+            total_chunks += chunk_count;
+            estimated_tokens += file_tokens;
+        }
+        files.push(PreviewFileInfo {
+            path: path_str,
+            status,
+            chunks: chunk_count,
+            estimated_tokens: file_tokens,
+        });
+    }
+
+    let batch_size = config.embedding_batch_size.max(1);
+    let estimated_api_calls = total_chunks.div_ceil(batch_size);
+    Ok(IngestPreview {
+        files,
+        total_files: discovered.len(),
+        files_to_process,
+        files_unchanged,
+        total_chunks,
+        estimated_tokens,
+        estimated_api_calls,
+    })
 }
 
 /// Sync-state breakdown of on-disk files vs the index within a scope.
@@ -399,6 +514,8 @@ pub struct IngestResult {
     pub chunks_created: usize,
     /// Number of API calls made to the embedding provider.
     pub api_calls: usize,
+    /// Provider-independent local count of inputs successfully embedded.
+    pub estimated_input_tokens: usize,
     /// Number of files that failed to ingest.
     pub files_failed: usize,
     /// Errors encountered during ingestion.
@@ -1665,6 +1782,7 @@ impl MarkdownVdb {
 
         // Check cancellation after discovery.
         if is_cancelled() {
+            emit(&IngestPhase::Cancelled);
             self.index.save()?;
             return Ok(IngestResult {
                 files_indexed: 0,
@@ -1672,6 +1790,7 @@ impl MarkdownVdb {
                 files_removed: 0,
                 chunks_created: 0,
                 api_calls: 0,
+                estimated_input_tokens: 0,
                 files_failed: 0,
                 errors: Vec::new(),
                 module_reports: Vec::new(),
@@ -1705,6 +1824,7 @@ impl MarkdownVdb {
             files_removed: 0,
             chunks_created: 0,
             api_calls: 0,
+            estimated_input_tokens: 0,
             files_failed: 0,
             errors: Vec::new(),
             module_reports: Vec::new(),
@@ -1751,6 +1871,13 @@ impl MarkdownVdb {
                 Err(e) => {
                     warn!(path = %path.display(), error = %e, "failed to parse");
                     result.files_failed += 1;
+                    emit(&IngestPhase::FileError {
+                        current: file_idx + 1,
+                        total: total_files,
+                        path: path_str.clone(),
+                        message: e.to_string(),
+                        error_count: result.files_failed,
+                    });
                     result.errors.push(IngestError {
                         path: path_str,
                         message: e.to_string(),
@@ -1802,6 +1929,13 @@ impl MarkdownVdb {
                     Err(e) => {
                         warn!(path = %path.display(), error = %e, "failed to chunk");
                         result.files_failed += 1;
+                        emit(&IngestPhase::FileError {
+                            current: file_idx + 1,
+                            total: total_files,
+                            path: path_str.clone(),
+                            message: e.to_string(),
+                            error_count: result.files_failed,
+                        });
                         result.errors.push(IngestError {
                             path: path_str,
                             message: e.to_string(),
@@ -1859,14 +1993,10 @@ impl MarkdownVdb {
         if is_cancelled() {
             result.cancelled = true;
             result.duration_secs = start_time.elapsed().as_secs_f64();
+            emit(&IngestPhase::Cancelled);
             self.index.save()?;
             return Ok(result);
         }
-
-        emit(&IngestPhase::Embedding {
-            batch: 0,
-            total_batches: 0,
-        });
 
         // Include edge chunks in the same batch as regular chunks (no extra API calls).
         all_batch_chunks.extend(edge_batch_chunks);
@@ -1881,8 +2011,28 @@ impl MarkdownVdb {
 
         let embed_start = std::time::Instant::now();
         let embed_result = if all_batch_chunks.is_empty() {
+            emit(&IngestPhase::Embedding {
+                completed_batches: 0,
+                total_batches: 0,
+                completed_chunks: 0,
+                total_chunks: 0,
+                estimated_input_tokens: 0,
+                total_estimated_input_tokens: 0,
+                api_calls: 0,
+            });
             embedding::batch::EmbeddingResult::default()
         } else {
+            let on_batch = |progress: &embedding::batch::EmbeddingBatchProgress| {
+                emit(&IngestPhase::Embedding {
+                    completed_batches: progress.completed_batches,
+                    total_batches: progress.total_batches,
+                    completed_chunks: progress.completed_chunks,
+                    total_chunks: progress.total_chunks,
+                    estimated_input_tokens: progress.estimated_input_tokens,
+                    total_estimated_input_tokens: progress.total_estimated_input_tokens,
+                    api_calls: progress.api_calls,
+                });
+            };
             embedding::batch::embed_chunks(
                 if embedding_space_changed {
                     self.ensure_provider_unchecked()?
@@ -1894,18 +2044,20 @@ impl MarkdownVdb {
                 &embed_existing,
                 &embed_current,
                 self.config.embedding_batch_size,
-                None,
+                Some(&on_batch),
             )
             .await?
         };
         let embed_secs = embed_start.elapsed().as_secs_f64();
 
         result.api_calls = embed_result.api_calls;
+        result.estimated_input_tokens = embed_result.estimated_input_tokens;
 
         // Check cancellation after embedding.
         if is_cancelled() {
             result.cancelled = true;
             result.duration_secs = start_time.elapsed().as_secs_f64();
+            emit(&IngestPhase::Cancelled);
             self.index.save()?;
             return Ok(result);
         }
@@ -2654,108 +2806,25 @@ impl MarkdownVdb {
     /// This is intentionally synchronous because it performs no network requests.
     /// It discovers, parses, and chunks files, then compares hashes with the existing index.
     pub fn preview(&self, reindex: bool, file: Option<PathBuf>) -> Result<IngestPreview> {
-        let disco = discovery::FileDiscovery::new(&self.root, &self.config);
+        build_ingest_preview(
+            &self.root,
+            &self.config,
+            &self.index.get_file_hashes(),
+            reindex,
+            file,
+        )
+    }
 
-        // Discover files to process.
-        let discovered = if let Some(ref single_file) = file {
-            let full = self.root.join(single_file);
-            if !full.is_file() {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("file not found: {}", single_file.display()),
-                )));
-            }
-            vec![single_file.clone()]
-        } else {
-            disco.discover()?
-        };
-
-        // Get existing hashes from index for skip detection.
-        let existing_hashes = self.index.get_file_hashes();
-
-        let mut files = Vec::new();
-        let mut total_chunks: usize = 0;
-        let mut estimated_tokens: usize = 0;
-        let mut files_to_process: usize = 0;
-        let mut files_unchanged: usize = 0;
-
-        for path in &discovered {
-            let path_str = path_util::to_slash(path);
-
-            // Parse the file.
-            let md = match parser::parse_markdown_file(&self.root, path) {
-                Ok(md) => md,
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "failed to parse during preview");
-                    continue;
-                }
-            };
-
-            // Determine file status.
-            let status = if reindex {
-                PreviewFileStatus::Changed
-            } else if let Some(existing) = existing_hashes.get(&path_str) {
-                if *existing == md.content_hash {
-                    PreviewFileStatus::Unchanged
-                } else {
-                    PreviewFileStatus::Changed
-                }
-            } else {
-                PreviewFileStatus::New
-            };
-
-            // Chunk the document.
-            let chunks = match chunker::chunk_document(
-                &md,
-                self.config.chunk_max_tokens,
-                self.config.chunk_overlap_tokens,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(path = %path.display(), error = %e, "failed to chunk during preview");
-                    continue;
-                }
-            };
-
-            let chunk_count = chunks.len();
-            let file_tokens: usize = chunks
-                .iter()
-                .map(|c| chunker::count_tokens(&c.content))
-                .sum();
-
-            if status != PreviewFileStatus::Unchanged {
-                files_to_process += 1;
-                total_chunks += chunk_count;
-                estimated_tokens += file_tokens;
-            } else {
-                files_unchanged += 1;
-            }
-
-            files.push(PreviewFileInfo {
-                path: path_str,
-                status,
-                chunks: chunk_count,
-                estimated_tokens: file_tokens,
-            });
-        }
-
-        // Estimate API calls: chunks are sent in batches.
-        let batch_size = self.config.embedding_batch_size.max(1);
-        let estimated_api_calls = if total_chunks == 0 {
-            0
-        } else {
-            total_chunks.div_ceil(batch_size)
-        };
-
-        Ok(IngestPreview {
-            total_files: discovered.len(),
-            files_to_process,
-            files_unchanged,
-            total_chunks,
-            estimated_tokens,
-            estimated_api_calls,
-            files,
-        })
+    /// Preview ingestion for a collection that does not have an index yet.
+    ///
+    /// No embedding provider is created and no index or FTS files are written.
+    pub fn preview_without_index(
+        root: &Path,
+        config: &Config,
+        reindex: bool,
+        file: Option<PathBuf>,
+    ) -> Result<IngestPreview> {
+        build_ingest_preview(root, config, &HashMap::new(), reindex, file)
     }
 
     /// Return a stats snapshot for the whole vault or a folder scope.
@@ -2865,7 +2934,15 @@ impl MarkdownVdb {
 
     /// Return a status snapshot of the index.
     pub fn status(&self) -> index::types::IndexStatus {
-        self.index.status()
+        let mut status = self.index.status();
+        let compatible = self.embedding_compatible.load(Ordering::Acquire);
+        status.embedding_compatible = compatible;
+        status.reindex_required = !compatible;
+        status.embedding_compatibility_error = (!compatible).then(|| {
+            "embedding provider, model, dimensions, codec, purpose settings, normalization, or endpoint identity changed; run `mdvdb ingest --reindex`"
+                .to_string()
+        });
+        status
     }
 
     /// Return the metadata schema, either from the index or inferred from discovered files.

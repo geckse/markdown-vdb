@@ -336,6 +336,11 @@ pub fn print_ingest_result(result: &IngestResult) {
         "API calls:".dimmed(),
         result.api_calls.to_string().yellow()
     );
+    println!(
+        "  {} {}",
+        "Estimated input tokens:".dimmed(),
+        result.estimated_input_tokens.to_string().yellow()
+    );
 
     if result.files_failed > 0 {
         println!(
@@ -466,6 +471,18 @@ pub fn print_status(status: &IndexStatus) {
         "Dimensions:".cyan(),
         status.embedding_config.dimensions.to_string().yellow()
     );
+    if status.embedding_compatible {
+        println!("  {} {}", "Compatibility:".cyan(), "Ready".green());
+    } else {
+        println!(
+            "  {} {}",
+            "Compatibility:".cyan(),
+            "Reindex required".red().bold()
+        );
+        if let Some(reason) = &status.embedding_compatibility_error {
+            println!("  {}       {}", "Reason:".cyan(), reason);
+        }
+    }
     println!();
 }
 

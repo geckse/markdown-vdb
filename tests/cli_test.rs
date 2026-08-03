@@ -63,6 +63,7 @@ fn test_status_json_without_index_returns_empty() {
     let dir = TempDir::new().unwrap();
     let output = mdvdb_bin()
         .args(["status", "--json"])
+        .env("MDVDB_NO_USER_CONFIG", "1")
         .current_dir(dir.path())
         .output()
         .expect("failed to execute mdvdb");
@@ -77,6 +78,8 @@ fn test_status_json_without_index_returns_empty() {
         serde_json::from_str(&stdout).expect("status JSON should be valid");
     assert_eq!(parsed["document_count"], 0);
     assert_eq!(parsed["chunk_count"], 0);
+    assert_eq!(parsed["embedding_compatible"], false);
+    assert_eq!(parsed["reindex_required"], true);
 }
 
 #[test]
@@ -247,6 +250,52 @@ fn test_ingest_json_output() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("should be valid JSON");
     assert!(json["files_indexed"].as_u64().unwrap() > 0);
     assert_eq!(json["files_failed"].as_u64().unwrap(), 0);
+    assert!(json.get("type").is_none(), "normal JSON remains unframed");
+    assert!(json["estimated_input_tokens"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn test_ingest_json_lines_streams_progress_then_result() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    fs::write(root.join("doc.md"), "# Doc\n\nSome content to embed.\n").unwrap();
+
+    let output = mdvdb_bin()
+        .args(["ingest", "--json", "--json-lines"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "streamed ingest should succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let frames = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        frames.len() > 2,
+        "expected multiple progress frames and one result"
+    );
+    assert_eq!(frames.first().unwrap()["type"], "progress");
+    assert_eq!(frames.first().unwrap()["data"]["phase"], "preparing");
+    assert!(frames[..frames.len() - 1]
+        .iter()
+        .all(|frame| frame["type"] == "progress"));
+    let result = frames.last().unwrap();
+    assert_eq!(result["type"], "result");
+    assert_eq!(result["operation"], "ingest");
+    assert!(result["data"]["estimated_input_tokens"].as_u64().unwrap() > 0);
 }
 
 #[test]
@@ -1416,6 +1465,38 @@ fn test_cli_ingest_preview_json() {
         json.get("estimated_tokens").is_some(),
         "JSON should have estimated_tokens field"
     );
+}
+
+#[test]
+fn test_cli_ingest_preview_with_auto_dimensions_is_offline_and_read_only() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb").join("config.yaml"),
+        "embedding:\n  provider: openai\n  dimensions: auto\n",
+    )
+    .unwrap();
+    fs::write(root.join("doc.md"), "# Doc\n\nSome content.\n").unwrap();
+
+    let output = mdvdb_bin()
+        .args(["ingest", "--preview", "--reindex", "--json"])
+        .env("MDVDB_NO_USER_CONFIG", "1")
+        .env_remove("OPENAI_API_KEY")
+        .current_dir(root)
+        .output()
+        .expect("failed to run mdvdb");
+
+    assert!(
+        output.status.success(),
+        "auto-dimension preview should not probe, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["files_to_process"], 1);
+    assert!(json["estimated_tokens"].as_u64().unwrap() > 0);
+    assert!(!root.join(".markdownvdb/index").exists());
+    assert!(!root.join(".markdownvdb/fts").exists());
 }
 
 #[test]

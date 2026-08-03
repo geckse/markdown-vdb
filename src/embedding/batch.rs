@@ -30,38 +30,49 @@ fn remember_batch_size(provider: &dyn EmbeddingProvider, size: usize) {
     }
 }
 
-async fn embed_batch_adaptively(
+pub(crate) async fn embed_inputs_adaptively(
     provider: &dyn EmbeddingProvider,
-    chunk_ids: Vec<String>,
     texts: Vec<String>,
-) -> crate::Result<(Vec<(String, Vec<f32>)>, usize)> {
-    let mut queue = VecDeque::from([(chunk_ids, texts)]);
-    let mut pairs = Vec::new();
+) -> crate::Result<(Vec<Vec<f32>>, usize, usize)> {
+    if texts.is_empty() {
+        return Ok((Vec::new(), 0, 0));
+    }
+    let cached_batch_size = working_batch_size(provider, texts.len());
+    let mut queue = texts
+        .chunks(cached_batch_size)
+        .map(<[String]>::to_vec)
+        .collect::<VecDeque<_>>();
+    let mut embeddings = Vec::new();
     let mut api_calls = 0;
+    let mut estimated_input_tokens = 0;
 
-    while let Some((chunk_ids, texts)) = queue.pop_front() {
+    while let Some(texts) = queue.pop_front() {
         api_calls += 1;
         match provider
             .embed_batch_for(&texts, EmbeddingPurpose::Document)
             .await
         {
-            Ok(vectors) => pairs.extend(chunk_ids.into_iter().zip(vectors)),
+            Ok(vectors) => {
+                estimated_input_tokens += texts
+                    .iter()
+                    .map(|text| crate::chunker::count_tokens(text))
+                    .sum::<usize>();
+                embeddings.extend(vectors);
+            }
             Err(error) if texts.len() > 1 && provider.is_batch_size_error(&error) => {
                 let midpoint = texts.len() / 2;
                 remember_batch_size(provider, texts.len().div_ceil(2));
-                let right_ids = chunk_ids[midpoint..].to_vec();
-                let left_ids = chunk_ids[..midpoint].to_vec();
                 let right_texts = texts[midpoint..].to_vec();
                 let left_texts = texts[..midpoint].to_vec();
                 // Push right first so the left half is processed first and
                 // input ordering remains stable.
-                queue.push_front((right_ids, right_texts));
-                queue.push_front((left_ids, left_texts));
+                queue.push_front(right_texts);
+                queue.push_front(left_texts);
             }
             Err(error) => return Err(error),
         }
     }
-    Ok((pairs, api_calls))
+    Ok((embeddings, api_calls, estimated_input_tokens))
 }
 
 /// A markdown chunk to be embedded.
@@ -87,6 +98,20 @@ pub struct EmbeddingResult {
     pub skipped: Vec<String>,
     /// Number of API calls made to the embedding provider.
     pub api_calls: usize,
+    /// Provider-independent local count of inputs successfully embedded.
+    pub estimated_input_tokens: usize,
+}
+
+/// Monotonic progress emitted after each logical embedding batch completes.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct EmbeddingBatchProgress {
+    pub completed_batches: usize,
+    pub total_batches: usize,
+    pub completed_chunks: usize,
+    pub total_chunks: usize,
+    pub estimated_input_tokens: usize,
+    pub total_estimated_input_tokens: usize,
+    pub api_calls: usize,
 }
 
 /// Embed chunks using the given provider, skipping files whose content hash is unchanged.
@@ -104,7 +129,7 @@ pub async fn embed_chunks(
     existing_hashes: &HashMap<PathBuf, String>,
     current_hashes: &HashMap<PathBuf, String>,
     batch_size: usize,
-    on_batch: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+    on_batch: Option<&(dyn Fn(&EmbeddingBatchProgress) + Send + Sync)>,
 ) -> crate::Result<EmbeddingResult> {
     let mut skipped = Vec::new();
     let mut to_embed: Vec<&Chunk> = Vec::new();
@@ -138,6 +163,7 @@ pub async fn embed_chunks(
             embeddings: HashMap::new(),
             skipped,
             api_calls: 0,
+            estimated_input_tokens: 0,
         });
     }
 
@@ -149,6 +175,19 @@ pub async fn embed_chunks(
         .map(|b| b.to_vec())
         .collect();
     let total_batches = batches.len();
+    let total_chunks = to_embed.len();
+    let total_estimated_input_tokens = to_embed
+        .iter()
+        .map(|chunk| crate::chunker::count_tokens(&chunk.content))
+        .sum();
+    if let Some(cb) = &on_batch {
+        cb(&EmbeddingBatchProgress {
+            total_batches,
+            total_chunks,
+            total_estimated_input_tokens,
+            ..EmbeddingBatchProgress::default()
+        });
+    }
     tracing::info!(
         chunks = to_embed.len(),
         batches = total_batches,
@@ -161,18 +200,20 @@ pub async fn embed_chunks(
 
     const MAX_CONCURRENT: usize = 4;
 
-    type BatchResult = crate::Result<(usize, Vec<(String, Vec<f32>)>, usize)>;
+    type BatchResult = crate::Result<(usize, Vec<(String, Vec<f32>)>, usize, usize)>;
     let mut stream = stream::iter(batches.into_iter().enumerate().map(|(batch_idx, batch)| {
         let chunk_ids: Vec<String> = batch.iter().map(|c| c.id.clone()).collect();
         let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
         async move {
-            let (pairs, api_calls) = embed_batch_adaptively(provider, chunk_ids, texts).await?;
+            let (vectors, api_calls, estimated_input_tokens) =
+                embed_inputs_adaptively(provider, texts).await?;
+            let pairs = chunk_ids.into_iter().zip(vectors).collect();
             tracing::info!(
                 batch = batch_idx + 1,
                 total = total_batches,
                 "batch complete"
             );
-            let result: BatchResult = Ok((batch_idx, pairs, api_calls));
+            let result: BatchResult = Ok((batch_idx, pairs, api_calls, estimated_input_tokens));
             result
         }
     }))
@@ -181,16 +222,28 @@ pub async fn embed_chunks(
     let mut embeddings: HashMap<String, Vec<f32>> = HashMap::new();
     let mut api_calls: usize = 0;
     let mut completed_count: usize = 0;
+    let mut completed_chunks: usize = 0;
+    let mut estimated_input_tokens: usize = 0;
 
     while let Some(result) = stream.next().await {
-        let (_batch_idx, pairs, batch_api_calls) = result?;
+        let (_batch_idx, pairs, batch_api_calls, batch_estimated_input_tokens) = result?;
         api_calls += batch_api_calls;
         completed_count += 1;
+        completed_chunks += pairs.len();
+        estimated_input_tokens += batch_estimated_input_tokens;
         for (id, vector) in pairs {
             embeddings.insert(id, vector);
         }
         if let Some(cb) = &on_batch {
-            cb(completed_count, total_batches);
+            cb(&EmbeddingBatchProgress {
+                completed_batches: completed_count,
+                total_batches,
+                completed_chunks,
+                total_chunks,
+                estimated_input_tokens,
+                total_estimated_input_tokens,
+                api_calls,
+            });
         }
     }
 
@@ -205,6 +258,7 @@ pub async fn embed_chunks(
         embeddings,
         skipped,
         api_calls,
+        estimated_input_tokens,
     })
 }
 
@@ -387,5 +441,81 @@ mod tests {
             second_calls, 3,
             "cached size 2 avoids another oversized call"
         );
+    }
+
+    #[tokio::test]
+    async fn progress_and_token_accounting_are_monotonic_and_ignore_failed_attempts() {
+        struct RetryProvider;
+
+        #[async_trait]
+        impl EmbeddingProvider for RetryProvider {
+            async fn embed_batch(&self, texts: &[String]) -> crate::Result<Vec<Vec<f32>>> {
+                if texts.len() > 1 {
+                    return Err(crate::Error::EmbeddingProvider(
+                        "413 payload too large".into(),
+                    ));
+                }
+                Ok(vec![vec![1.0, 0.0]])
+            }
+
+            fn dimensions(&self) -> usize {
+                2
+            }
+
+            fn model(&self) -> &str {
+                "token-retry-test-model"
+            }
+
+            fn name(&self) -> &str {
+                "token-retry-test-provider"
+            }
+        }
+
+        let chunks = vec![
+            make_chunk("a.md#0", "a.md", "one two three"),
+            make_chunk("a.md#1", "a.md", "four five"),
+        ];
+        let expected_tokens = chunks
+            .iter()
+            .map(|chunk| crate::chunker::count_tokens(&chunk.content))
+            .sum::<usize>();
+        let progress = Mutex::new(Vec::<EmbeddingBatchProgress>::new());
+        let callback = |event: &EmbeddingBatchProgress| {
+            progress.lock().unwrap().push(event.clone());
+        };
+
+        let result = embed_chunks(
+            &RetryProvider,
+            &chunks,
+            &HashMap::new(),
+            &HashMap::from([(PathBuf::from("a.md"), "changed".to_string())]),
+            2,
+            Some(&callback),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.api_calls, 3,
+            "the failed oversized attempt is counted"
+        );
+        assert_eq!(
+            result.estimated_input_tokens, expected_tokens,
+            "successfully embedded inputs are counted exactly once"
+        );
+
+        let progress = progress.into_inner().unwrap();
+        assert_eq!(progress.first().unwrap().completed_chunks, 0);
+        assert_eq!(progress.last().unwrap().completed_chunks, 2);
+        assert_eq!(
+            progress.last().unwrap().estimated_input_tokens,
+            expected_tokens
+        );
+        assert!(progress.windows(2).all(|events| {
+            events[0].completed_batches <= events[1].completed_batches
+                && events[0].completed_chunks <= events[1].completed_chunks
+                && events[0].estimated_input_tokens <= events[1].estimated_input_tokens
+                && events[0].api_calls <= events[1].api_calls
+        }));
     }
 }
