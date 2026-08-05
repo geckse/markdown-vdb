@@ -1867,8 +1867,20 @@ async fn run() -> anyhow::Result<()> {
             let scope_path =
                 resolve_shard_or_path(&cwd, args.path.as_deref(), args.shard.as_deref())?;
             let tree = if cwd.join(".markdownvdb/index").is_file() {
-                let vdb = MarkdownVdb::open_readonly_with_config(cwd, config)?;
-                vdb.file_tree()?
+                match MarkdownVdb::open_readonly_with_config(cwd.clone(), config.clone())
+                    .and_then(|vdb| vdb.file_tree())
+                {
+                    Ok(tree) => tree,
+                    Err(error) => {
+                        // The tree is primarily a filesystem view; sync
+                        // indicators are an enhancement. Degrade to the plain
+                        // filesystem tree instead of failing outright.
+                        eprintln!(
+                            "warning: index unavailable ({error}); showing filesystem tree without sync status"
+                        );
+                        mdvdb::tree::build_unindexed_file_tree(&cwd, &config)?
+                    }
+                }
             } else {
                 mdvdb::tree::build_unindexed_file_tree(&cwd, &config)?
             };

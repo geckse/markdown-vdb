@@ -9,11 +9,40 @@ use super::ollama::OllamaProvider;
 use super::openai::{CompatibleAuth, OpenAIProvider};
 
 pub(crate) fn embedding_http_client() -> reqwest::Client {
+    embedding_http_client_with(
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_secs(300),
+    )
+}
+
+/// `read_timeout` is an idle timeout that resets on every received chunk —
+/// never a total request deadline. Large batch responses (multi-MB embedding
+/// JSON) and slow local providers legitimately take longer than any sane
+/// total deadline while still making progress.
+pub(crate) fn embedding_http_client_with(
+    connect_timeout: std::time::Duration,
+    read_timeout: std::time::Duration,
+) -> reqwest::Client {
     reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(connect_timeout)
+        .read_timeout(read_timeout)
         .build()
         .expect("embedding HTTP client configuration is valid")
+}
+
+/// reqwest's Display for a body failure is just "error decoding response
+/// body" — the actual cause (timeout, connection reset, JSON mismatch) lives
+/// in the source chain, so include it.
+pub(crate) fn describe_request_error(error: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 /// How an embedding will be used. Providers with asymmetric retrieval modes
@@ -370,5 +399,88 @@ mod tests {
             Ok(_) => panic!("expected error for missing API key"),
         };
         assert!(err.contains("OPENAI_API_KEY"));
+    }
+
+    fn spawn_http_server<F>(respond: F) -> std::net::SocketAddr
+    where
+        F: FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::Read;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                respond(&mut stream);
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn test_read_timeout_is_idle_not_total() {
+        use std::io::Write;
+        // Body takes ~1.1s total but each byte arrives within the 400ms idle
+        // window — a total-deadline client would fail here (the pre-fix bug).
+        let addr = spawn_http_server(|stream| {
+            let body = b"{\"ok\":true}";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            for byte in body {
+                stream.write_all(&[*byte]).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+
+        let client = embedding_http_client_with(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(400),
+        );
+        let value: serde_json::Value = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(value["ok"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn test_stalled_body_reports_timeout_cause() {
+        use std::io::Write;
+        let addr = spawn_http_server(|stream| {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{{"
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        });
+
+        let client = embedding_http_client_with(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(200),
+        );
+        let response = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap();
+        let error = response.json::<serde_json::Value>().await.unwrap_err();
+        assert!(error.is_timeout());
+        // The bare Display is the opaque "error decoding response body";
+        // describe_request_error must surface the actual timeout cause.
+        let message = describe_request_error(&error);
+        assert!(message.contains("timed out"), "message: {message}");
     }
 }

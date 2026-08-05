@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::provider::{embedding_http_client, validate_embeddings, EmbeddingProvider};
+use super::provider::{
+    describe_request_error, embedding_http_client, validate_embeddings, EmbeddingProvider,
+};
 use crate::error::Error;
 
 const MAX_RETRIES: u32 = 3;
@@ -73,7 +75,10 @@ impl EmbeddingProvider for OllamaProvider {
                             self.host
                         )));
                     }
-                    return Err(Error::EmbeddingProvider(format!("request failed: {e}")));
+                    return Err(Error::EmbeddingProvider(format!(
+                        "request failed: {}",
+                        describe_request_error(&e)
+                    )));
                 }
             };
 
@@ -108,10 +113,22 @@ impl EmbeddingProvider for OllamaProvider {
                 )));
             }
 
-            let body: EmbeddingResponse = response
-                .json()
-                .await
-                .map_err(|e| Error::EmbeddingProvider(format!("failed to parse response: {e}")))?;
+            let body: EmbeddingResponse = match response.json().await {
+                Ok(body) => body,
+                Err(error) if error.is_timeout() => {
+                    last_error = Some(Error::EmbeddingProvider(format!(
+                        "transient response read failure: {}",
+                        describe_request_error(&error)
+                    )));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Error::EmbeddingProvider(format!(
+                        "failed to parse response: {}",
+                        describe_request_error(&error)
+                    )))
+                }
+            };
 
             if body.embeddings.len() != texts.len() {
                 return Err(Error::EmbeddingProvider(format!(

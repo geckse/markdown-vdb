@@ -1236,6 +1236,12 @@ pub struct MarkdownVdb {
     index: Arc<Index>,
     /// Full-text search index (Arc for sharing with watcher).
     fts_index: Arc<FtsIndex>,
+    /// True when this read-only instance opened while a vector/FTS
+    /// reconciliation marker was pending. Lexical state may describe an older
+    /// generation, so FTS-dependent queries fail; everything else (tree, get,
+    /// links, semantic search) keeps working. Writable opens repair the split
+    /// during construction and never set this.
+    fts_pending_reconcile: bool,
     /// True when an incompatible archived layout was safely recreated and a
     /// collection-wide ingest is still required before scoped mutations.
     index_rebuilt: AtomicBool,
@@ -1397,6 +1403,7 @@ impl MarkdownVdb {
             index,
             fts_index,
             rebuilt_index,
+            false,
         )
     }
 
@@ -1454,15 +1461,22 @@ impl MarkdownVdb {
         let index = Arc::new(Index::open_with_options(&index_path, write_options)?);
 
         let fts_path = index_dir.join("fts");
-        if fts::reconciliation_required(&root)? {
-            return Err(Error::Fts(
-                "FTS reconciliation is pending; open the project in writable mode to repair it"
-                    .to_string(),
-            ));
-        }
+        // A pending reconciliation only invalidates the lexical projection.
+        // Read-only commands that never consult FTS (tree, get, links,
+        // semantic search) must keep working while a writable process ingests
+        // or after one was interrupted; FTS-dependent queries check the flag.
+        let fts_pending_reconcile = fts::reconciliation_required(&root)?;
         let fts_index = Arc::new(FtsIndex::open_readonly(&fts_path)?);
 
-        Self::finish_open(root, config, embedding_config, index, fts_index, false)
+        Self::finish_open(
+            root,
+            config,
+            embedding_config,
+            index,
+            fts_index,
+            false,
+            fts_pending_reconcile,
+        )
     }
 
     /// Shared constructor tail: validates config compatibility and builds the instance.
@@ -1473,6 +1487,7 @@ impl MarkdownVdb {
         index: Arc<Index>,
         fts_index: Arc<FtsIndex>,
         index_rebuilt: bool,
+        fts_pending_reconcile: bool,
     ) -> Result<Self> {
         let status = index.status();
         let provider_name = format!("{:?}", config.embedding_provider);
@@ -1518,6 +1533,7 @@ impl MarkdownVdb {
             provider: Mutex::new(None),
             index,
             fts_index,
+            fts_pending_reconcile,
             index_rebuilt: AtomicBool::new(index_rebuilt),
             embedding_compatible: AtomicBool::new(compatible),
         })
@@ -1852,6 +1868,10 @@ impl MarkdownVdb {
             line_number: usize,
         }
         let mut edge_metas: Vec<EdgeMeta> = Vec::new();
+        // First edge id seen per distinct context text; only these are embedded.
+        let mut edge_context_canonical: HashMap<String, String> = HashMap::new();
+        // Edge id -> canonical edge id whose embedding it shares.
+        let mut edge_embedding_aliases: HashMap<String, String> = HashMap::new();
 
         let parse_start = std::time::Instant::now();
         let total_files = discovered.len();
@@ -1969,11 +1989,23 @@ impl MarkdownVdb {
                         "edge:{}->{}@{}",
                         source_str, resolved_target, ctx.link.line_number
                     );
-                    edge_batch_chunks.push(embedding::batch::Chunk {
-                        id: edge_id.clone(),
-                        source_path: path.clone(),
-                        content: ctx.paragraph.clone(),
-                    });
+                    // Links sharing a paragraph (link lists, adjacent lines)
+                    // produce byte-identical embedding inputs; embed each
+                    // distinct text once and alias the rest to it.
+                    match edge_context_canonical.entry(ctx.paragraph.clone()) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            slot.insert(edge_id.clone());
+                            edge_batch_chunks.push(embedding::batch::Chunk {
+                                id: edge_id.clone(),
+                                source_path: path.clone(),
+                                content: ctx.paragraph.clone(),
+                            });
+                        }
+                        std::collections::hash_map::Entry::Occupied(canonical) => {
+                            edge_embedding_aliases
+                                .insert(edge_id.clone(), canonical.get().clone());
+                        }
+                    }
                     edge_metas.push(EdgeMeta {
                         edge_id,
                         source: source_str.clone(),
@@ -2158,14 +2190,19 @@ impl MarkdownVdb {
                 }
             }
 
-            // Collect edge vectors from embed results.
+            // Collect edge vectors from embed results, resolving deduplicated
+            // context texts through their canonical edge's embedding.
+            let edge_embedding_for = |edge_id: &String| {
+                embed_result.embeddings.get(edge_id).or_else(|| {
+                    edge_embedding_aliases
+                        .get(edge_id)
+                        .and_then(|canonical| embed_result.embeddings.get(canonical))
+                })
+            };
             let edge_vectors: Vec<(String, Vec<f32>)> = edge_metas
                 .iter()
                 .filter_map(|em| {
-                    embed_result
-                        .embeddings
-                        .get(&em.edge_id)
-                        .map(|v| (em.edge_id.clone(), v.clone()))
+                    edge_embedding_for(&em.edge_id).map(|v| (em.edge_id.clone(), v.clone()))
                 })
                 .collect();
 
@@ -2180,7 +2217,7 @@ impl MarkdownVdb {
                 // Compute strength (cosine similarity to target doc vector) if available.
                 let strength = {
                     let doc_vectors = self.index.get_document_vectors();
-                    let edge_vec = embed_result.embeddings.get(&em.edge_id);
+                    let edge_vec = edge_embedding_for(&em.edge_id);
                     let target_vec = doc_vectors.get(&em.target);
                     match (edge_vec, target_vec) {
                         (Some(ev), Some(tv)) => {
@@ -2750,6 +2787,15 @@ impl MarkdownVdb {
 
     /// Execute a search query against the index.
     pub async fn search(&self, query: search::SearchQuery) -> Result<search::SearchResponse> {
+        // Lexical and hybrid retrieval read the FTS projection, which a
+        // pending reconciliation marks as possibly stale. Semantic queries
+        // never consult it and stay available on a read-only instance.
+        if self.fts_pending_reconcile && query.mode != SearchMode::Semantic {
+            return Err(Error::Fts(
+                "FTS reconciliation is pending; open the project in writable mode to repair it"
+                    .to_string(),
+            ));
+        }
         // Pure lexical retrieval does not use vectors. Avoid constructing a
         // cloud provider (and allow lexical access to an index whose embedding
         // descriptor changed) unless graph expansion explicitly needs a query

@@ -1079,3 +1079,93 @@ async fn watcher_reassigns_topics_when_fingerprint_matches() {
         "new file must be topic-assigned XOR unassigned (topic={in_topic}, unassigned={in_unassigned})"
     );
 }
+
+#[tokio::test]
+async fn failed_event_before_mutation_leaves_no_reconcile_marker() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let marker = project_root.join(".markdownvdb/fts-reconcile-required");
+    // Non-UTF-8 bytes fail markdown parsing before any store mutation.
+    fs::write(
+        project_root.join("docs/broken.md"),
+        [0xffu8, 0xfe, 0x00, 0x81],
+    )
+    .unwrap();
+
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        index,
+        fts_index,
+        provider,
+        None,
+    );
+    let result = watcher
+        .handle_event(&FileEvent::Modified(PathBuf::from("docs/broken.md")))
+        .await;
+
+    assert!(result.is_err(), "non-UTF-8 input must fail parsing");
+    assert!(
+        !marker.exists(),
+        "a pre-mutation failure must not orphan the reconciliation marker"
+    );
+}
+
+#[tokio::test]
+async fn successful_event_retires_the_reconcile_marker() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let marker = project_root.join(".markdownvdb/fts-reconcile-required");
+    fs::write(
+        project_root.join("docs/note.md"),
+        "# Note\n\nSome body text.\n",
+    )
+    .unwrap();
+
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        index,
+        fts_index,
+        provider,
+        None,
+    );
+    watcher
+        .handle_event(&FileEvent::Created(PathBuf::from("docs/note.md")))
+        .await
+        .unwrap();
+
+    assert!(
+        !marker.exists(),
+        "a successful mutating event must retire the reconciliation marker"
+    );
+}
+
+#[tokio::test]
+async fn orphaned_marker_is_repaired_by_the_next_successful_event() {
+    let (_dir, project_root, index, fts_index, provider) = setup();
+    let marker = project_root.join(".markdownvdb/fts-reconcile-required");
+    fs::create_dir_all(project_root.join(".markdownvdb")).unwrap();
+    fs::write(&marker, "1\n").unwrap();
+    fs::write(
+        project_root.join("docs/note.md"),
+        "# Note\n\nSome body text.\n",
+    )
+    .unwrap();
+
+    let watcher = Watcher::new(
+        test_config("docs"),
+        &project_root,
+        index,
+        fts_index,
+        provider,
+        None,
+    );
+    watcher
+        .handle_event(&FileEvent::Created(PathBuf::from("docs/note.md")))
+        .await
+        .unwrap();
+
+    assert!(
+        !marker.exists(),
+        "an orphaned marker must be repaired and retired by the next event"
+    );
+}

@@ -416,6 +416,54 @@ pub struct ModuleRunner {
     modules: Vec<Box<dyn Module>>,
 }
 
+/// Run-scoped cache proving dependency files unchanged via (mtime, len) stat
+/// probes. `apply_execution` re-verifies every known dependency before each
+/// patch, so without this cache a module run pays a full read + hash per
+/// dependency per patch — O(patches × dependencies) file reads. An unchanged
+/// file now costs one stat. The file a patch itself writes is not protected
+/// by this cache; its guard is the writeback's own `expected_content_hash`
+/// comparison, which always reads fresh content.
+#[derive(Default)]
+struct DependencyProbeCache {
+    entries: std::cell::RefCell<HashMap<String, (std::time::SystemTime, u64, String)>>,
+}
+
+impl DependencyProbeCache {
+    /// Content hash of `path`, or `None` when the file is missing or not
+    /// valid UTF-8 (matching the previous parse-failure semantics).
+    fn content_hash(&self, project_root: &Path, path: &str) -> Option<String> {
+        let full_path = project_root.join(path);
+        // Stat before reading: if the file changes between the two calls, the
+        // stale metadata forces a spurious re-read later instead of masking a
+        // concurrent edit behind fresh metadata.
+        let metadata = std::fs::metadata(&full_path).ok()?;
+        let modified = metadata.modified().ok();
+        let len = metadata.len();
+        if let (Some(modified), Some((cached_modified, cached_len, hash))) =
+            (modified, self.entries.borrow().get(path))
+        {
+            if *cached_modified == modified && *cached_len == len {
+                return Some(hash.clone());
+            }
+        }
+        let content = String::from_utf8(std::fs::read(&full_path).ok()?).ok()?;
+        let content_hash = crate::parser::compute_content_hash(&content);
+        if let Some(modified) = modified {
+            self.entries
+                .borrow_mut()
+                .insert(path.to_string(), (modified, len, content_hash.clone()));
+        }
+        Some(content_hash)
+    }
+
+    /// Drop a cached probe after this run itself rewrote the file, so the
+    /// next probe re-reads instead of trusting metadata that a same-length
+    /// write within one mtime tick could leave unchanged.
+    fn invalidate(&self, path: &str) {
+        self.entries.borrow_mut().remove(path);
+    }
+}
+
 #[must_use]
 pub struct ModuleRunLock {
     _file: std::fs::File,
@@ -656,6 +704,7 @@ impl ModuleRunner {
         project_root: &Path,
         execution: &ModuleExecution,
         lock: &ModuleRunLock,
+        probes: &DependencyProbeCache,
     ) -> crate::Result<Option<(String, String, Option<String>)>> {
         lock.verify_project_root(project_root)?;
         let schema_change = execution
@@ -677,9 +726,7 @@ impl ModuleRunner {
                 .expected_dependency_hashes
                 .iter()
                 .find_map(|(path, expected)| {
-                    let actual = crate::parser::parse_markdown_file(project_root, Path::new(path))
-                        .ok()
-                        .map(|file| file.content_hash);
+                    let actual = probes.content_hash(project_root, path);
                     (actual.as_deref() != Some(expected.as_str()))
                         .then(|| (path.clone(), expected.clone(), actual))
                 })
@@ -868,7 +915,9 @@ impl ModuleRunner {
     ) -> crate::Result<()> {
         lock.verify_project_root(project_root)?;
         let module_id = module.descriptor().id;
-        if let Some((path, _, _)) = Self::dependency_change(project_root, execution, lock)? {
+        let probes = DependencyProbeCache::default();
+        if let Some((path, _, _)) = Self::dependency_change(project_root, execution, lock, &probes)?
+        {
             Self::suppress_dependency_change(
                 &module_id,
                 project_root,
@@ -881,7 +930,8 @@ impl ModuleRunner {
         let mut patch_index = 0;
         while patch_index < execution.derived_field_patches.len() {
             if patch_index > 0 {
-                if let Some((path, _, _)) = Self::dependency_change(project_root, execution, lock)?
+                if let Some((path, _, _)) =
+                    Self::dependency_change(project_root, execution, lock, &probes)?
                 {
                     Self::suppress_dependency_change(
                         &module_id,
@@ -903,9 +953,12 @@ impl ModuleRunner {
                 .unwrap_or_default();
             let previous_fields = index.get_computed_fields(&patch.path).unwrap_or_default();
             let dependency_guard = || {
-                if let Some((dependency, _, _)) =
-                    Self::dependency_change(project_root, &dependency_guard_execution, lock)?
-                {
+                if let Some((dependency, _, _)) = Self::dependency_change(
+                    project_root,
+                    &dependency_guard_execution,
+                    lock,
+                    &probes,
+                )? {
                     Err(crate::Error::DependencyChanged { dependency })
                 } else {
                     Ok(())
@@ -940,6 +993,7 @@ impl ModuleRunner {
                     execution
                         .expected_dependency_hashes
                         .insert(patch.path.clone(), writeback.file.content_hash.clone());
+                    probes.invalidate(&patch.path);
                 }
                 Err(error) => {
                     let code = match &error {
@@ -999,7 +1053,9 @@ impl ModuleRunner {
             patch_index += 1;
         }
         if !execution.derived_field_patches.is_empty() {
-            if let Some((path, _, _)) = Self::dependency_change(project_root, execution, lock)? {
+            if let Some((path, _, _)) =
+                Self::dependency_change(project_root, execution, lock, &probes)?
+            {
                 Self::suppress_dependency_change(
                     &module_id,
                     project_root,
@@ -2015,6 +2071,13 @@ impl FormulaModule {
             let Some(file) = context.files.get(path) else {
                 continue;
             };
+            // A file with no cached formula state has nothing to clear. Its
+            // patch would be a pure no-op, and every emitted patch pays the
+            // per-patch dependency re-verification in apply_execution — on a
+            // formula-free vault that turned full ingest into O(files²).
+            if !Self::has_formula_state(file) {
+                continue;
+            }
             execution.files_evaluated += 1;
             let mut entries = file.computed_fields.clone();
             let previous_fields: Vec<String> = entries
@@ -2214,13 +2277,19 @@ impl Module for FormulaModule {
             let Some(file) = context.files.get(&path) else {
                 continue;
             };
-            execution.files_evaluated += 1;
             let definitions = overlay
                 .as_ref()
                 .map(|overlay| Self::definitions_for_path(overlay, &path))
                 .unwrap_or_default();
 
             if definitions.is_empty() {
+                // No definitions and no cached state: emitting a patch would
+                // be a no-op that still pays per-patch dependency
+                // re-verification in apply_execution.
+                if !Self::has_formula_state(file) {
+                    continue;
+                }
+                execution.files_evaluated += 1;
                 let mut entries = file.computed_fields.clone();
                 let before = entries.len();
                 entries.retain(|_, entry| entry.module != FORMULA_MODULE_ID);
@@ -2241,6 +2310,7 @@ impl Module for FormulaModule {
                 continue;
             }
 
+            execution.files_evaluated += 1;
             let program = self.engine.compile(definitions);
             let fingerprint = program.fingerprint().to_string();
             programs.entry(fingerprint.clone()).or_insert(program);
@@ -3458,5 +3528,198 @@ mod tests {
             .frontmatter
             .unwrap();
         assert_eq!(frontmatter["total"], JsonValue::from(4));
+    }
+
+    fn formula_state_entry() -> ComputedFieldEntry {
+        ComputedFieldEntry {
+            module: FORMULA_MODULE_ID.to_string(),
+            definition_fingerprint: "def".to_string(),
+            input_fingerprint: Some("inputs".to_string()),
+            dependency_snapshot: ComputedDependencySnapshot::default(),
+            value_json: Some("1".to_string()),
+            materialized_value_json: None,
+            diagnostic: None,
+        }
+    }
+
+    #[test]
+    fn formula_full_ingest_without_overlay_emits_no_patches_for_clean_files() {
+        let dir = TempDir::new().unwrap();
+        let index = Index::create(
+            &dir.path().join("index.bin"),
+            &EmbeddingConfig {
+                provider: "test".to_string(),
+                model: "test".to_string(),
+                dimensions: 2,
+            },
+        )
+        .unwrap();
+        for path in ["a.md", "b.md", "c.md"] {
+            index.insert_file_hash_for_test(path, "hash");
+        }
+        let files = index.get_all_files();
+        let context = ModuleContext {
+            project_root: dir.path(),
+            files: &files,
+            schema: None,
+            scoped_schemas: None,
+        };
+
+        let execution = FormulaModule::default()
+            .run(&context, &ModuleEvent::FullIngest)
+            .unwrap();
+
+        assert!(
+            execution.derived_field_patches.is_empty(),
+            "clean files without an overlay must not produce no-op patches"
+        );
+        assert_eq!(execution.files_evaluated, 0);
+    }
+
+    #[test]
+    fn formula_missing_overlay_still_clears_files_with_cached_state() {
+        let dir = TempDir::new().unwrap();
+        let index = Index::create(
+            &dir.path().join("index.bin"),
+            &EmbeddingConfig {
+                provider: "test".to_string(),
+                model: "test".to_string(),
+                dimensions: 2,
+            },
+        )
+        .unwrap();
+        index.insert_file_hash_for_test("clean.md", "hash");
+        index.insert_file_hash_for_test("stale.md", "hash");
+        index
+            .replace_computed_fields(
+                "stale.md",
+                HashMap::from([("total".to_string(), formula_state_entry())]),
+            )
+            .unwrap();
+        let files = index.get_all_files();
+        let context = ModuleContext {
+            project_root: dir.path(),
+            files: &files,
+            schema: None,
+            scoped_schemas: None,
+        };
+
+        let execution = FormulaModule::default()
+            .run(&context, &ModuleEvent::FullIngest)
+            .unwrap();
+
+        let patch_paths: Vec<&str> = execution
+            .derived_field_patches
+            .iter()
+            .map(|patch| patch.path.as_str())
+            .collect();
+        assert_eq!(
+            patch_paths,
+            vec!["stale.md"],
+            "cached formula state must still be cleared; clean files must be skipped"
+        );
+        assert_eq!(execution.files_evaluated, 1);
+    }
+
+    #[test]
+    fn formula_overlay_without_definitions_for_a_path_skips_clean_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".markdownvdb.schema.yml"),
+            "scopes:\n  invoices:\n    fields:\n      total:\n        field_type: formula\n        formula: price + fee\n        result_type: number\n",
+        )
+        .unwrap();
+        let index = Index::create(
+            &dir.path().join("index.bin"),
+            &EmbeddingConfig {
+                provider: "test".to_string(),
+                model: "test".to_string(),
+                dimensions: 2,
+            },
+        )
+        .unwrap();
+        index.insert_file_hash_for_test("notes/clean.md", "hash");
+        index.insert_file_hash_for_test("notes/stale.md", "hash");
+        index
+            .replace_computed_fields(
+                "notes/stale.md",
+                HashMap::from([("total".to_string(), formula_state_entry())]),
+            )
+            .unwrap();
+        let files = index.get_all_files();
+        let context = ModuleContext {
+            project_root: dir.path(),
+            files: &files,
+            schema: None,
+            scoped_schemas: None,
+        };
+
+        let execution = FormulaModule::default()
+            .run(&context, &ModuleEvent::FullIngest)
+            .unwrap();
+
+        let patch_paths: Vec<&str> = execution
+            .derived_field_patches
+            .iter()
+            .map(|patch| patch.path.as_str())
+            .collect();
+        assert!(
+            patch_paths.contains(&"notes/stale.md"),
+            "out-of-scope files with cached state must still be cleaned up"
+        );
+        assert!(
+            !patch_paths.contains(&"notes/clean.md"),
+            "out-of-scope files without cached state must not produce no-op patches"
+        );
+    }
+
+    #[test]
+    fn dependency_probe_cache_detects_edits_and_missing_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("dep.md"), "one").unwrap();
+        let probes = DependencyProbeCache::default();
+
+        let first = probes.content_hash(dir.path(), "dep.md").unwrap();
+        assert_eq!(probes.content_hash(dir.path(), "dep.md").unwrap(), first);
+
+        // A different length always changes the stat signature.
+        std::fs::write(dir.path().join("dep.md"), "two three").unwrap();
+        let second = probes.content_hash(dir.path(), "dep.md").unwrap();
+        assert_ne!(second, first);
+
+        std::fs::remove_file(dir.path().join("dep.md")).unwrap();
+        assert!(probes.content_hash(dir.path(), "dep.md").is_none());
+    }
+
+    #[test]
+    fn dependency_probe_cache_serves_cached_hash_until_invalidated() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("dep.md");
+        std::fs::write(&path, "aaa").unwrap();
+        let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let probes = DependencyProbeCache::default();
+        let first = probes.content_hash(dir.path(), "dep.md").unwrap();
+
+        // Same length with a restored mtime: metadata cannot distinguish the
+        // edit, proving the second probe was answered from the cache.
+        std::fs::write(&path, "bbb").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(original_mtime)
+            .unwrap();
+        assert_eq!(
+            probes.content_hash(dir.path(), "dep.md").unwrap(),
+            first,
+            "an unchanged stat signature must be served from the cache"
+        );
+
+        probes.invalidate("dep.md");
+        assert_ne!(
+            probes.content_hash(dir.path(), "dep.md").unwrap(),
+            first,
+            "invalidation must force a re-read"
+        );
     }
 }

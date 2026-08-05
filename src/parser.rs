@@ -524,11 +524,22 @@ pub struct LinkContext {
     pub paragraph: String,
 }
 
+/// Upper bound on an extracted link-context paragraph, in bytes.
+///
+/// Blank-line-free blocks (nav lists, giant tables) can span tens of
+/// kilobytes; such a "paragraph" is not meaningful context for any single
+/// link, and every byte of it becomes an embedding input and persisted
+/// `context_text`. Oversized blocks are reduced to a window of whole lines
+/// centered on the link's line.
+const MAX_LINK_PARAGRAPH_BYTES: usize = 2000;
+
 /// Extract the paragraph surrounding a link at the given 1-based line number.
 ///
 /// Walks backward and forward from `line_number` until hitting an empty line,
 /// a heading line (starting with `# `), or file boundary. Uses FULL file content
 /// because `RawLink.line_number` is file-relative (includes frontmatter lines).
+/// Paragraphs over [`MAX_LINK_PARAGRAPH_BYTES`] are trimmed to a line window
+/// centered on the link's line.
 pub fn extract_link_paragraph(content: &str, line_number: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
     if line_number == 0 || line_number > lines.len() {
@@ -558,14 +569,57 @@ pub fn extract_link_paragraph(content: &str, line_number: usize) -> String {
         end = next;
     }
 
-    let paragraph: String = lines[start..=end].join("\n");
+    // Shrink an oversized block to a contiguous window around the link's
+    // line, growing one line in each direction per round so the link stays
+    // roughly centered.
+    let mut lo = idx;
+    let mut hi = idx;
+    let mut budget = MAX_LINK_PARAGRAPH_BYTES.saturating_sub(lines[idx].len());
+    loop {
+        let mut grew = false;
+        if lo > start {
+            let cost = lines[lo - 1].len() + 1;
+            if cost <= budget {
+                lo -= 1;
+                budget -= cost;
+                grew = true;
+            }
+        }
+        if hi < end {
+            let cost = lines[hi + 1].len() + 1;
+            if cost <= budget {
+                hi += 1;
+                budget -= cost;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    let paragraph: String = lines[lo..=hi].join("\n");
     let trimmed = paragraph.trim();
     if trimmed.is_empty() {
         // Fall back to the single link line
-        lines.get(idx).unwrap_or(&"").trim().to_string()
+        truncate_on_char_boundary(lines.get(idx).unwrap_or(&"").trim()).to_string()
     } else {
-        trimmed.to_string()
+        truncate_on_char_boundary(trimmed).to_string()
     }
+}
+
+/// Cap a context string at [`MAX_LINK_PARAGRAPH_BYTES`] without splitting a
+/// UTF-8 code point. Only a single line longer than the whole budget can
+/// reach the cut, since the window above grows in whole lines.
+fn truncate_on_char_boundary(text: &str) -> &str {
+    if text.len() <= MAX_LINK_PARAGRAPH_BYTES {
+        return text;
+    }
+    let mut cut = MAX_LINK_PARAGRAPH_BYTES;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &text[..cut]
 }
 
 /// Extract link contexts for all provided links using the full file content.
@@ -1097,6 +1151,51 @@ mod tests {
         let fm = fm.unwrap();
         assert!(fm["client"].is_array());
         assert!(extract_frontmatter_links(Some(&fm)).is_empty());
+    }
+
+    // --- extract_link_paragraph windowing tests ---
+
+    #[test]
+    fn extract_link_paragraph_windows_oversized_blocks_around_the_link() {
+        // A blank-line-free 400-line list: one "paragraph" far over the cap.
+        let lines: Vec<String> = (0..400)
+            .map(|i| format!("- [link {i}](target-{i}.md) padding text for line {i}"))
+            .collect();
+        let content = lines.join("\n");
+
+        let paragraph = extract_link_paragraph(&content, 200);
+
+        assert!(
+            paragraph.len() <= MAX_LINK_PARAGRAPH_BYTES,
+            "oversized block must be capped, got {} bytes",
+            paragraph.len()
+        );
+        // 1-based line 200 is "link 199"; the window must stay centered on it.
+        assert!(paragraph.contains("[link 199]"));
+        assert!(paragraph.contains("[link 198]"));
+        assert!(paragraph.contains("[link 200]"));
+        assert!(!paragraph.contains("[link 0]"));
+        assert!(!paragraph.contains("[link 399]"));
+    }
+
+    #[test]
+    fn extract_link_paragraph_truncates_a_single_giant_line_on_a_char_boundary() {
+        // 3-byte code points make the raw cap fall mid-character.
+        let giant = "€".repeat(1000); // 3000 bytes
+        let content = format!("intro\n\n{giant}\n\noutro");
+
+        let paragraph = extract_link_paragraph(&content, 3);
+
+        assert!(paragraph.len() <= MAX_LINK_PARAGRAPH_BYTES);
+        assert!(!paragraph.is_empty());
+        assert!(paragraph.chars().all(|c| c == '€'));
+    }
+
+    #[test]
+    fn extract_link_paragraph_leaves_ordinary_paragraphs_untouched() {
+        let content = "# Heading\n\nfirst line\nsecond [link](x.md) line\nthird line\n\nnext";
+        let paragraph = extract_link_paragraph(content, 4);
+        assert_eq!(paragraph, "first line\nsecond [link](x.md) line\nthird line");
     }
 
     // --- extract_links_with_context tests ---

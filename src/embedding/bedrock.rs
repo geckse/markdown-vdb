@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::provider::{
-    dimension_option, embedding_http_client, validate_embeddings, EmbeddingModelInfo,
-    EmbeddingProvider, EmbeddingPurpose,
+    describe_request_error, dimension_option, embedding_http_client, validate_embeddings,
+    EmbeddingModelInfo, EmbeddingProvider, EmbeddingPurpose,
 };
 use crate::config::{BedrockEmbeddingConfig, BedrockInvocation, Config};
 use crate::error::Error;
@@ -216,9 +216,22 @@ impl BedrockProvider {
                     status.as_u16()
                 )));
             }
-            return response.json().await.map_err(|e| {
-                Error::EmbeddingProvider(format!("failed to parse Bedrock response: {e}"))
-            });
+            match response.json().await {
+                Ok(value) => return Ok(value),
+                Err(error) if error.is_timeout() => {
+                    last_error = Some(format!(
+                        "transient response read failure: {}",
+                        describe_request_error(&error)
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Error::EmbeddingProvider(format!(
+                        "failed to parse Bedrock response: {}",
+                        describe_request_error(&error)
+                    )))
+                }
+            }
         }
         Err(Error::EmbeddingProvider(
             last_error.unwrap_or_else(|| "Bedrock retries exhausted".to_string()),

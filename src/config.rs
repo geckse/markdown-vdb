@@ -157,17 +157,12 @@ impl Default for HuggingFaceEmbeddingConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum BedrockInvocation {
+    #[default]
     Single,
     Batch,
-}
-
-impl Default for BedrockInvocation {
-    fn default() -> Self {
-        Self::Single
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

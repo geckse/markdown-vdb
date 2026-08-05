@@ -3,8 +3,8 @@ use reqwest::{RequestBuilder, StatusCode};
 use serde_json::{json, Value};
 
 use super::provider::{
-    dimension_option, embedding_http_client, validate_embeddings, EmbeddingModelInfo,
-    EmbeddingProvider, EmbeddingPurpose,
+    describe_request_error, dimension_option, embedding_http_client, validate_embeddings,
+    EmbeddingModelInfo, EmbeddingProvider, EmbeddingPurpose,
 };
 use crate::config::{Config, HuggingFaceEmbeddingConfig};
 use crate::error::Error;
@@ -125,9 +125,22 @@ impl HuggingFaceProvider {
                     status.as_u16()
                 )));
             }
-            let value: Value = response.json().await.map_err(|e| {
-                Error::EmbeddingProvider(format!("failed to parse Hugging Face response: {e}"))
-            })?;
+            let value: Value = match response.json().await {
+                Ok(value) => value,
+                Err(error) if error.is_timeout() => {
+                    last_error = Some(format!(
+                        "transient response read failure: {}",
+                        describe_request_error(&error)
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Error::EmbeddingProvider(format!(
+                        "failed to parse Hugging Face response: {}",
+                        describe_request_error(&error)
+                    )))
+                }
+            };
             let vectors = parse_embeddings(&value, texts.len())?;
             validate_embeddings(&vectors, texts.len(), self.dimensions)?;
             return Ok(vectors);
@@ -182,7 +195,10 @@ impl EmbeddingProvider for HuggingFaceProvider {
             )));
         }
         let values: Vec<Value> = response.json().await.map_err(|e| {
-            Error::EmbeddingProvider(format!("failed to parse Hugging Face model catalog: {e}"))
+            Error::EmbeddingProvider(format!(
+                "failed to parse Hugging Face model catalog: {}",
+                describe_request_error(&e)
+            ))
         })?;
         let models = values
             .into_iter()

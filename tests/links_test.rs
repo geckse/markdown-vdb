@@ -658,3 +658,44 @@ async fn test_links_query_accepts_backslash_input() {
     assert_eq!(backlinks.len(), 1);
     assert_eq!(backlinks[0].entry.source, "docs/a.md");
 }
+
+#[tokio::test]
+async fn links_sharing_a_paragraph_all_receive_edge_vectors() {
+    let dir = setup_dir();
+    let root = dir.path();
+
+    // Three links inside one paragraph produce byte-identical context texts;
+    // the embedding is computed once and aliased, but every edge must still
+    // end up with its own vector in the index.
+    fs::write(
+        root.join("a.md"),
+        "# A\n\nSee [B](b.md) with [C](c.md) and [D](d.md) in one shared paragraph.\n",
+    )
+    .unwrap();
+    fs::write(root.join("b.md"), "# B\n\nContent of B.\n").unwrap();
+    fs::write(root.join("c.md"), "# C\n\nContent of C.\n").unwrap();
+    fs::write(root.join("d.md"), "# D\n\nContent of D.\n").unwrap();
+
+    let vdb = MarkdownVdb::open_with_config(root.to_path_buf(), mock_config()).unwrap();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+
+    assert_eq!(vdb.index().status().edge_count, 3);
+    let edge_vectors = vdb.index().get_edge_vectors();
+    let mut edge_ids: Vec<&str> = edge_vectors.keys().map(|id| id.as_str()).collect();
+    edge_ids.sort_unstable();
+    assert_eq!(
+        edge_ids,
+        vec![
+            "edge:a.md->b.md@3",
+            "edge:a.md->c.md@3",
+            "edge:a.md->d.md@3"
+        ]
+    );
+    for (edge_id, vector) in &edge_vectors {
+        assert_eq!(vector.len(), 8, "{edge_id} must have a full vector");
+        assert!(
+            vector.iter().any(|component| *component != 0.0),
+            "{edge_id} must not be a zero vector"
+        );
+    }
+}

@@ -259,17 +259,16 @@ impl Watcher {
                         &self.fts_index,
                     ) {
                         Err(error) => Err(error),
-                        Ok(_) => match crate::fts::begin_reconciliation(&self.project_root) {
+                        // The inner handler records the vector/FTS split
+                        // immediately before its first store mutation, so a
+                        // pre-mutation failure (parse error, embedding
+                        // timeout) leaves no orphaned marker behind and
+                        // read-only commands keep working. Finishing
+                        // tolerates a marker that was never created.
+                        Ok(_) => match self.handle_event_inner(event, &module_run_lock).await {
+                            Ok(outcome) => crate::fts::finish_reconciliation(&self.project_root)
+                                .map(|()| outcome),
                             Err(error) => Err(error),
-                            Ok(()) => {
-                                match self.handle_event_inner(event, &module_run_lock).await {
-                                    Ok(outcome) => {
-                                        crate::fts::finish_reconciliation(&self.project_root)
-                                            .map(|()| outcome)
-                                    }
-                                    Err(error) => Err(error),
-                                }
-                            }
                         },
                     }
                 }
@@ -351,6 +350,7 @@ impl Watcher {
                 }
 
                 info!(path = %relative, "removing deleted file from index");
+                crate::fts::begin_reconciliation(&self.project_root)?;
                 self.index.remove_file(&relative)?;
 
                 // Update link graph: remove links from deleted file.
@@ -389,6 +389,7 @@ impl Watcher {
                 let from_str = crate::path_util::to_slash(from);
                 let to_str = crate::path_util::to_slash(to);
                 debug!(from = %from_str, to = %to.display(), "processing rename event");
+                crate::fts::begin_reconciliation(&self.project_root)?;
                 self.index.remove_file(&from_str)?;
 
                 // Remove old path links from graph before processing new path.
@@ -457,6 +458,7 @@ impl Watcher {
         if !abs_path.is_file() {
             let relative = crate::path_util::to_slash(relative_path);
             info!(path = %relative, "file no longer exists, removing from index");
+            crate::fts::begin_reconciliation(&self.project_root)?;
             self.index.remove_file(&relative)?;
             self.remove_from_clusters(&relative);
             self.fts_index.remove_file(&relative)?;
@@ -540,7 +542,10 @@ impl Watcher {
             crate::embedding::batch::embed_inputs_adaptively(self.provider.as_ref(), texts).await?
         };
 
-        // Upsert vector index and FTS index.
+        // Upsert vector index and FTS index. Embedding — the dominant failure
+        // point — is already behind us, so the recovery marker window starts
+        // only now, at the first companion-store mutation.
+        crate::fts::begin_reconciliation(&self.project_root)?;
         self.index.upsert(&file, &chunks, &embeddings)?;
 
         // Update link graph with body links + frontmatter relations from this

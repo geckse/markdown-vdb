@@ -3,8 +3,8 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 
 use super::provider::{
-    dimension_option, embedding_http_client, validate_embeddings, EmbeddingModelInfo,
-    EmbeddingProvider, EmbeddingPurpose,
+    describe_request_error, dimension_option, embedding_http_client, validate_embeddings,
+    EmbeddingModelInfo, EmbeddingProvider, EmbeddingPurpose,
 };
 use crate::config::{Config, EmbeddingPurposeConfig};
 use crate::error::Error;
@@ -117,9 +117,22 @@ impl GeminiProvider {
                     status.as_u16()
                 )));
             }
-            let value: Value = response.json().await.map_err(|e| {
-                Error::EmbeddingProvider(format!("failed to parse Gemini response: {e}"))
-            })?;
+            let value: Value = match response.json().await {
+                Ok(value) => value,
+                Err(error) if error.is_timeout() => {
+                    last_error = Some(format!(
+                        "transient response read failure: {}",
+                        describe_request_error(&error)
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Error::EmbeddingProvider(format!(
+                        "failed to parse Gemini response: {}",
+                        describe_request_error(&error)
+                    )))
+                }
+            };
             let vectors: Vec<Vec<f32>> = value["embeddings"]
                 .as_array()
                 .ok_or_else(|| {
@@ -177,7 +190,10 @@ impl EmbeddingProvider for GeminiProvider {
                 )));
             }
             let value: Value = response.json().await.map_err(|e| {
-                Error::EmbeddingProvider(format!("failed to parse Gemini model catalog: {e}"))
+                Error::EmbeddingProvider(format!(
+                    "failed to parse Gemini model catalog: {}",
+                    describe_request_error(&e)
+                ))
             })?;
             models.extend(parse_model_page(&value));
             page_token = value["nextPageToken"].as_str().map(str::to_string);

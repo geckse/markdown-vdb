@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::provider::{
-    embedding_http_client, validate_embeddings, EmbeddingModelInfo, EmbeddingProvider,
-    EmbeddingPurpose,
+    describe_request_error, embedding_http_client, validate_embeddings, EmbeddingModelInfo,
+    EmbeddingProvider, EmbeddingPurpose,
 };
 use crate::config::EmbeddingPurposeConfig;
 use crate::error::Error;
@@ -202,12 +202,16 @@ impl OpenAIProvider {
                 Ok(response) => response,
                 Err(error) if error.is_timeout() || error.is_connect() => {
                     last_error = Some(Error::EmbeddingProvider(format!(
-                        "transient request failure: {error}"
+                        "transient request failure: {}",
+                        describe_request_error(&error)
                     )));
                     continue;
                 }
                 Err(error) => {
-                    return Err(Error::EmbeddingProvider(format!("request failed: {error}")))
+                    return Err(Error::EmbeddingProvider(format!(
+                        "request failed: {}",
+                        describe_request_error(&error)
+                    )))
                 }
             };
 
@@ -244,10 +248,22 @@ impl OpenAIProvider {
                 )));
             }
 
-            let body: EmbeddingResponse = response
-                .json()
-                .await
-                .map_err(|e| Error::EmbeddingProvider(format!("failed to parse response: {e}")))?;
+            let body: EmbeddingResponse = match response.json().await {
+                Ok(body) => body,
+                Err(error) if error.is_timeout() => {
+                    last_error = Some(Error::EmbeddingProvider(format!(
+                        "transient response read failure: {}",
+                        describe_request_error(&error)
+                    )));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(Error::EmbeddingProvider(format!(
+                        "failed to parse response: {}",
+                        describe_request_error(&error)
+                    )))
+                }
+            };
 
             if body.data.len() != texts.len() {
                 return Err(Error::EmbeddingProvider(format!(
@@ -341,10 +357,12 @@ impl EmbeddingProvider for OpenAIProvider {
                 response.status()
             )));
         }
-        let value: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| Error::EmbeddingProvider(format!("failed to parse model catalog: {e}")))?;
+        let value: serde_json::Value = response.json().await.map_err(|e| {
+            Error::EmbeddingProvider(format!(
+                "failed to parse model catalog: {}",
+                describe_request_error(&e)
+            ))
+        })?;
         Ok(Some(parse_compatible_model_catalog(&value)))
     }
 

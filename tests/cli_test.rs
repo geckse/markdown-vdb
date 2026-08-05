@@ -3611,3 +3611,35 @@ fn test_version_json_output() {
         serde_json::from_slice(&output.stdout).expect("--version --json must be valid JSON");
     assert_eq!(json["version"].as_str().unwrap(), env!("CARGO_PKG_VERSION"));
 }
+
+#[test]
+fn tree_falls_back_to_filesystem_when_index_is_unreadable() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join(".markdownvdb")).unwrap();
+    fs::write(
+        root.join(".markdownvdb/config.yaml"),
+        "embedding:\n  provider: mock\n  dimensions: 8\n",
+    )
+    .unwrap();
+    fs::write(root.join("notes.md"), "# Notes\n\nBody.\n").unwrap();
+    // A corrupt index must not take the tree down: read-only opens never
+    // rebuild, so the command degrades to the plain filesystem tree.
+    fs::write(root.join(".markdownvdb/index"), "not-a-valid-index").unwrap();
+
+    let output = mdvdb_bin()
+        .current_dir(root)
+        .args(["tree", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "tree must degrade, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(json["root"].is_object());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("notes.md"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("index unavailable"));
+}

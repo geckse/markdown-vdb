@@ -2021,3 +2021,42 @@ async fn test_get_document_accepts_backslash_input() {
     assert_eq!(resp.total_rows, 1);
     assert_eq!(resp.rows[0].path, "docs/guide.md");
 }
+
+#[tokio::test]
+async fn readonly_open_tolerates_a_pending_fts_reconciliation() {
+    let (dir, vdb) = setup_project();
+    vdb.ingest(IngestOptions::default()).await.unwrap();
+    drop(vdb);
+
+    let root = dir.path().canonicalize().unwrap();
+    let marker = root.join(".markdownvdb/fts-reconcile-required");
+    fs::write(&marker, "1\n").unwrap();
+
+    // Non-FTS reads must keep working while the marker is pending.
+    let readonly = MarkdownVdb::open_readonly_with_config(root.clone(), mock_config()).unwrap();
+    let tree = readonly.file_tree().unwrap();
+    assert!(tree.total_files >= 2, "tree must not depend on FTS health");
+    readonly
+        .search(SearchQuery::new("greetings").with_mode(SearchMode::Semantic))
+        .await
+        .expect("semantic search never consults FTS");
+
+    // Lexical-dependent modes surface the pending reconciliation instead of
+    // silently serving a possibly stale projection.
+    let err = readonly
+        .search(SearchQuery::new("greetings").with_mode(SearchMode::Hybrid))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("reconciliation is pending"));
+    let err = readonly
+        .search(SearchQuery::new("greetings").with_mode(SearchMode::Lexical))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("reconciliation is pending"));
+    drop(readonly);
+
+    // A writable open repairs the split and retires the marker.
+    let writable = MarkdownVdb::open_with_config(root.clone(), mock_config()).unwrap();
+    drop(writable);
+    assert!(!marker.exists());
+}
