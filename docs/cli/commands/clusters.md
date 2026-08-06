@@ -35,7 +35,7 @@ Topic definition options:
 |------|------------|-------------|
 | `--description <TEXT>` | `add`, `update` | Natural-language Topic description |
 | `--seeds <A,B,...>` | `add`, `update` | Comma-separated seed phrases |
-| `--threshold <0..1>` | `add`, `update` | Per-Topic similarity threshold |
+| `--threshold <VALUE>` | `add`, `update` | Per-Topic similarity threshold in `0.0..1.0`; on `update`, a negative value clears the override |
 | `--rename <NAME>` | `update` | Rename the Topic within its owner |
 
 A Topic must have a non-empty description, at least one seed, or both. Names are unique
@@ -52,13 +52,19 @@ mdvdb clusters
 mdvdb clusters --shard research
 ```
 
-Collection automatic clusters are maintained by ingest. Shard automatic clusters are computed
-lazily from the existing document vectors already stored in the shared index. They use the
+Collection automatic clusters are built by ingest and updated incrementally by watch when a
+compatible state exists. Shard automatic clusters are computed lazily from the existing document
+vectors already stored in the shared index. They use the
 Collection's clustering algorithm and settings but only the Shard corpus. For Leiden analysis,
 `clustering.knn` remains the configured upper bound; a Shard caps its effective neighborhood at
 `max(2, ceil(sqrt(document_count)))`. This prevents a small Shard from becoming a complete
 similarity graph and collapsing otherwise useful local communities. Collection clustering is
 unchanged.
+
+Leiden community detection over a cosine k-nearest-neighbor graph is the default algorithm. It
+produces stable opaque IDs, TF-IDF labels, representative documents, and an optional parent
+hierarchy for larger corpora. `clustering.algorithm: kmeans` remains available as a fallback; its
+`clustering.granularity` setting does not apply to Leiden.
 
 No embedding provider is initialized by a read. The disposable Shard state is cached below
 `.markdownvdb/cache/shards/`; it does not duplicate document embeddings or graph topology and does
@@ -113,7 +119,7 @@ mdvdb clusters --shard research unassigned
 
 Topics use multi-label threshold assignment. A document joins every Topic whose similarity meets
 the larger of the per-Topic threshold and Collection-wide
-`clustering.topics.min_similarity`. `unassigned` returns documents matching none.
+`clustering.topics.min_similarity` (default `0.30`). `unassigned` returns documents matching none.
 
 ## Nested Shards
 
@@ -138,7 +144,9 @@ Automatic cluster output remains the existing `ClusterSummary[]` array:
     "id": 3,
     "document_count": 12,
     "label": "methods, experiments",
-    "keywords": ["methods", "experiments", "evaluation"]
+    "keywords": ["methods", "experiments", "evaluation"],
+    "parent_id": 9,
+    "representative": "research/methods.md"
   }
 ]
 ```
@@ -147,9 +155,24 @@ Topic output remains `CustomClusterSummary[]`, including definition metadata, do
 mean similarity. `unassigned` retains its existing object shape. Supplying `--shard` changes the
 analysis owner, not these JSON contracts.
 
+```json
+[
+  {
+    "id": 0,
+    "name": "Methods",
+    "description": "Research methods and experiments",
+    "seed_phrases": ["methodology", "experiment"],
+    "threshold": 0.35,
+    "document_count": 8,
+    "mean_score": 0.61
+  }
+]
+```
+
 Shard-local `add`, `update`, and `remove` return
 `{"action": string, "shard_id": string, "topics": TopicDef[]}`. The `topics` list is the complete
-post-mutation local definition state. Collection-level mutation output remains unchanged.
+post-mutation local definition state. Collection-level mutations update project YAML; use
+`clusters list --json` to read their resulting definitions.
 
 IDs are opaque and need not be contiguous. Compatible Shard cache state is reused for best-effort
 stable IDs and colors; a clustering-configuration change starts a fresh local state.

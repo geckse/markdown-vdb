@@ -42,6 +42,7 @@ mdvdb search [OPTIONS] <QUERY>
 | `--decay-include` | | `<PATTERNS>` | | Comma-separated path prefixes where time decay applies (whitelist) |
 | `--hops` | | `<N>` | `1` | Number of link hops for graph-aware boosting (1-3) |
 | `--expand` | | `<N>` | `0` | Graph expansion depth for context (0-3, 0 disables) |
+| `--populate` | | | `false` | Resolve result-file frontmatter relations one level deep |
 
 ### Option Details
 
@@ -61,17 +62,19 @@ The default is controlled by `MDVDB_SEARCH_MIN_SCORE` (default: `0.0`). See [Con
 
 #### `--filter`, `-f`
 
-Metadata filter expressions in `KEY=VALUE` format. Filters match against frontmatter fields using AND logic (all filters must match). The flag can be repeated to apply multiple filters.
+Metadata filter expressions in `KEY=VALUE` format. The CLI exposes exact equality on top-level frontmatter fields; it does not parse range, existence, OR, or arbitrary SQL predicates. Repeat the flag to apply multiple filters with AND logic.
 
 **Auto-type detection**: The value is automatically parsed as:
 
 | Input | Detected Type | Example |
 |-------|---------------|---------|
-| A valid number | Number | `--filter year=2024` |
-| `true` or `false` | Boolean | `--filter draft=false` |
+| A valid JSON number | Number | `--filter year=2024` |
+| Exact lowercase `true` or `false` | Boolean | `--filter draft=false` |
 | Anything else | String | `--filter status=published` |
 
 If the frontmatter field is an array, the filter checks whether the array *contains* the value. For example, `--filter tags=rust` matches a document with `tags: [rust, cli, tools]`.
+
+Filters use effective frontmatter, so successfully materialized Formula, Lookup, and Rollup fields are queryable. Link-shaped relation values are syntax-normalized: for example, `client=clients/acme`, `client=clients/acme.md`, and `client=[[clients/acme]]` can all match `client: "[[clients/acme|Acme]]"`. This normalization is syntactic and does not resolve the target file.
 
 ```bash
 # Single filter
@@ -121,6 +124,16 @@ mdvdb search "authentication" --expand 1
 mdvdb search "authentication" --expand 3
 ```
 
+#### `--populate`
+
+Resolves whole-value frontmatter relations on ranked result files. Each relation includes its raw value, resolved path, existence, title, and target frontmatter. Population is depth one: target frontmatter is returned as stored and is not recursively populated.
+
+```bash
+mdvdb search "paid invoices" --filter status=paid --populate --json
+```
+
+Only ranked `results` are populated. Supplementary `graph_context` entries are unchanged.
+
 ## Conflicting Options
 
 Certain options are mutually exclusive and cannot be used together:
@@ -133,6 +146,7 @@ Certain options are mutually exclusive and cannot be used together:
 | `--mode` | `--semantic`, `--lexical`, `--edge-search` | `--mode` sets the mode explicitly |
 | `--boost-links` | `--no-boost-links` | Cannot enable and disable simultaneously |
 | `--decay` | `--no-decay` | Cannot enable and disable simultaneously |
+| `--path` | `--shard` | A query has one folder scope |
 
 ### Dependency Requirements
 
@@ -202,6 +216,9 @@ mdvdb search "API endpoints" -f category=backend -f draft=false
 
 # Filter with numeric value
 mdvdb search "release notes" --filter year=2024
+
+# Filter a computed field and populate relation context
+mdvdb search "large paid invoices" -f status=paid -f total=240 --populate --json
 ```
 
 ### Search modes
@@ -277,7 +294,7 @@ mdvdb search "error handling" --json | jq '.results[].file.path'
 
 ## JSON Output
 
-When `--json` is used, the output is a `SearchOutput` object:
+When `--json` is used, the output is a `SearchOutput` object. This example includes fields emitted by `--populate`:
 
 ```json
 {
@@ -295,11 +312,26 @@ When `--json` is used, the output is a `SearchOutput` object:
         "path": "docs/auth.md",
         "frontmatter": {
           "title": "Authentication Guide",
-          "tags": ["auth", "security"]
+          "tags": ["auth", "security"],
+          "owner": "[[people/alex]]",
+          "priority": 3
         },
+        "computed_fields": {"priority": 3},
+        "computed_field_errors": {},
         "file_size": 4096,
         "path_components": ["docs", "auth.md"],
-        "modified_at": 1710000000
+        "modified_at": 1710000000,
+        "relations": {
+          "owner": [
+            {
+              "raw": "[[people/alex]]",
+              "path": "people/alex.md",
+              "exists": true,
+              "title": "Alex",
+              "frontmatter": {"title": "Alex"}
+            }
+          ]
+        }
       }
     }
   ],
@@ -336,6 +368,9 @@ When `--json` is used, the output is a `SearchOutput` object:
 | `file.file_size` | `number` | File size in bytes |
 | `file.path_components` | `string[]` | Path split into components |
 | `file.modified_at` | `number?` | Filesystem modification time as Unix timestamp |
+| `file.computed_fields` | `object` | Successful computed values mirrored for provenance; frontmatter is authoritative |
+| `file.computed_field_errors` | `object` | Computed-field diagnostics keyed by field name |
+| `file.relations` | `object?` | Depth-one resolved relations; present only with `--populate` |
 
 ### SearchTimings Fields
 
@@ -381,7 +416,7 @@ Included when using `--edge-search` or `--mode=edge`:
 
 ## Configuration
 
-The following environment variables affect search behavior. Set them in `.markdownvdb/.config`, `.env`, or `~/.mdvdb/config`. See [Configuration](../configuration.md) for full details.
+The following shell overrides affect search behavior. Equivalent values can be set in project `.markdownvdb/config.yaml` or user `~/.mdvdb/config.yaml`. See [Configuration](../configuration.md) for the complete YAML keys and resolution order.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -406,6 +441,8 @@ The following environment variables affect search behavior. Set them in `.markdo
 - [`mdvdb status`](./status.md) -- Check index health and counts
 - [`mdvdb links`](./links.md) -- Explore the link graph for a file
 - [`mdvdb edges`](./edges.md) -- View semantic edges between documents
+- [`mdvdb collection`](./collection.md) -- Query frontmatter rows with the same equality-filter semantics
+- [`mdvdb get`](./get.md) -- Inspect one result and its reverse relations
 - [`mdvdb config`](./config.md) -- View resolved search configuration
 
 ## See Also

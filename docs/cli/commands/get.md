@@ -1,168 +1,121 @@
 ---
 title: "mdvdb get"
-description: "Get metadata for a specific indexed file including path, content hash, frontmatter, chunk count, file size, and timestamps"
+description: "Inspect one indexed document, its frontmatter, computed fields, and optional relations"
 category: "commands"
 ---
 
 # mdvdb get
 
-Retrieve detailed metadata for a specific file from the index. Returns the file's path, content hash, frontmatter, chunk count, file size, and timestamps (indexed and modified).
+Retrieve index metadata for one Markdown document. The command reports its frontmatter, computed values and diagnostics, chunk count, file size, content hash, and timestamps.
 
 ## Usage
 
 ```bash
-mdvdb get <FILE_PATH> [OPTIONS]
+mdvdb get [OPTIONS] <FILE_PATH>
 ```
 
-## Arguments
+| Name | Required | Description |
+|------|----------|-------------|
+| `<FILE_PATH>` | Yes | Project-relative path as stored in the index |
+| `--populate` | No | Resolve frontmatter relations and reverse references, one level deep |
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `FILE_PATH` | Yes | Relative path to the markdown file (e.g., `docs/readme.md`) |
-
-The `FILE_PATH` must be the relative path as stored in the index (relative to the project root). If the file is not in the index, the command exits with an error.
-
-## Options
-
-This command has no command-specific options. Only [global options](#global-options) apply.
-
-## Global Options
-
-These options apply to all commands. See [Commands Index](./index.md) for details.
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--verbose` | `-v` | Increase log verbosity (-v info, -vv debug, -vvv trace) |
-| `--root` | | Project root directory (defaults to current directory) |
-| `--no-color` | | Disable colored output |
-| `--json` | | Output results as JSON |
-
-## Human-Readable Output
-
-When run without `--json`, get displays a formatted summary of the document:
-
-```
-  ● docs/api/endpoints.md
-
-  File size:  4.2 KB
-  Indexed at: 2 hours ago
-  Modified at: 45 minutes ago
-  Hash:     a1b2c3d4e5f6...
-  Chunks:   7
-
-  Frontmatter:
-    title: API Endpoints
-    tags: ["api", "reference"]
-    status: published
-```
-
-### Output Fields
-
-| Field | Description |
-|-------|-------------|
-| **File size** | Size of the markdown file on disk (human-readable format) |
-| **Indexed at** | When the file was last ingested (relative time format) |
-| **Modified at** | Filesystem modification time of the file (relative time format). Only shown if available. |
-| **Hash** | SHA-256 content hash used for change detection |
-| **Chunks** | Number of text chunks the file was split into |
-| **Frontmatter** | YAML frontmatter key-value pairs, if present in the file |
+The command also accepts all [global options](./index.md#global-options), including `--json` and `--root`.
 
 ## Examples
 
 ```bash
-# Get metadata for a specific file
-mdvdb get docs/readme.md
+# Inspect metadata
+mdvdb get docs/api.md
 
-# Get metadata as JSON
-mdvdb get docs/readme.md --json
+# Include resolved relation targets and documents that reference this file
+mdvdb get invoices/invoice-104.md --populate
 
-# Get metadata for a file in a specific project
-mdvdb get notes/meeting.md --root /path/to/project
-
-# Get metadata with debug logging
-mdvdb get docs/api.md -vv
+# Machine-readable output
+mdvdb get invoices/invoice-104.md --populate --json
 ```
 
-## JSON Output
-
-### DocumentInfo (`--json`)
+## JSON output
 
 ```json
 {
-  "path": "docs/api/endpoints.md",
-  "content_hash": "a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890",
+  "path": "invoices/invoice-104.md",
+  "content_hash": "a1b2c3d4e5f67890...",
   "frontmatter": {
-    "title": "API Endpoints",
-    "tags": ["api", "reference"],
-    "status": "published"
+    "title": "Invoice 104",
+    "client": "[[clients/acme]]",
+    "price": 120,
+    "quantity": 2,
+    "total": 240
   },
-  "chunk_count": 7,
-  "file_size": 4301,
-  "indexed_at": 1710849000,
-  "modified_at": 1710854700
+  "computed_fields": {
+    "total": 240
+  },
+  "computed_field_errors": {},
+  "chunk_count": 3,
+  "file_size": 712,
+  "indexed_at": 1770000100,
+  "modified_at": 1770000000,
+  "relations": {
+    "client": [
+      {
+        "raw": "[[clients/acme]]",
+        "path": "clients/acme.md",
+        "exists": true,
+        "title": "Acme",
+        "frontmatter": {
+          "title": "Acme",
+          "domain": "acme.example"
+        }
+      }
+    ]
+  },
+  "referenced_by": [
+    {
+      "source": "payments/payment-104.md",
+      "field": "invoice",
+      "title": "Payment 104"
+    }
+  ]
 }
 ```
 
-### DocumentInfo Fields
+### Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `path` | `string` | Relative path to the markdown file from the project root |
-| `content_hash` | `string` | SHA-256 hex digest of the file's content. Used for change detection during incremental ingest. |
-| `frontmatter` | `object \| null` | Parsed YAML frontmatter as a JSON object. `null` if the file has no frontmatter block. |
-| `chunk_count` | `number` | Number of text chunks this file was split into during ingestion |
-| `file_size` | `number` | Size of the file on disk in bytes |
-| `indexed_at` | `number` | Unix timestamp (seconds since epoch) when the file was last ingested |
-| `modified_at` | `number \| null` | Unix timestamp of the file's filesystem modification time. `null` if the mtime is not available. |
+| `path` | `string` | Project-relative document path |
+| `content_hash` | `string` | SHA-256 hash used for change detection |
+| `frontmatter` | `object \| null` | Parsed, materialized YAML frontmatter; authoritative value surface |
+| `computed_fields` | `object` | Successful Formula, Lookup, and Rollup values mirrored for provenance |
+| `computed_field_errors` | `object` | Diagnostics keyed by computed field name |
+| `chunk_count` | `number` | Number of indexed text chunks |
+| `file_size` | `number` | File size in bytes |
+| `indexed_at` | `number` | Unix timestamp of the last ingest |
+| `modified_at` | `number \| null` | Filesystem modification timestamp |
+| `relations` | `object` | Resolved frontmatter relations; present only with `--populate` |
+| `referenced_by` | `array` | Reverse frontmatter references; present only with `--populate` |
 
-### Frontmatter
+A computed-field diagnostic has `module`, `field`, stable `code`, human-readable `message`, and optional `span_start`/`span_end` byte offsets.
 
-The `frontmatter` field contains the parsed YAML frontmatter block from the top of the markdown file. The structure depends entirely on the file's content -- there is no fixed schema. Common fields include `title`, `tags`, `date`, `status`, `author`, etc.
+Each populated relation contains:
 
-If the file has no frontmatter (no `---` delimited block at the top), this field is `null`.
+- `raw`: the literal frontmatter value.
+- `path`: resolved project-relative target, or `null` if it cannot be resolved.
+- `exists`: whether the target exists in the indexed file set.
+- `title`: target display title, or `null` for a missing target.
+- `frontmatter`: raw target frontmatter, or `null`; it is never populated recursively.
 
-```json
-// File with frontmatter
-{ "frontmatter": { "title": "My Doc", "tags": ["rust", "cli"] } }
-
-// File without frontmatter
-{ "frontmatter": null }
-```
-
-## Error Handling
-
-If the specified file is not in the index, the command exits with an error:
-
-```
-Error: file not in index: docs/nonexistent.md
-```
-
-This typically means the file either:
-- Has not been ingested yet -- run [`mdvdb ingest`](./ingest.md) first
-- Was excluded by `.gitignore`, `.mdvdbignore`, or `MDVDB_IGNORE_PATTERNS`
-- Was deleted from disk and removed from the index on the last ingest
-
-Use [`mdvdb tree`](./tree.md) to see which files are indexed and their sync status.
+When `--populate` is omitted, `relations` and `referenced_by` are absent rather than `null`.
 
 ## Notes
 
-- The `get` command opens the index in **read-only** mode. It never modifies the index.
-- The `file_size` field is raw bytes in JSON mode, but displayed in human-readable format (e.g., "4.2 KB") in human-readable mode.
-- The `indexed_at` and `modified_at` fields are Unix timestamps in JSON mode, but displayed as relative time strings (e.g., "2 hours ago") in human-readable mode.
-- The `content_hash` is the SHA-256 hash of the file's raw content. It is used during incremental ingest to skip unchanged files.
-- The `modified_at` field may be `null` if the filesystem modification time could not be read when the file was indexed.
+- `get` returns metadata and matched relation context, not the Markdown body.
+- `get` is read-only and never recomputes modules or modifies the index.
+- If the path is not indexed, run [`mdvdb ingest`](./ingest.md) and check [`mdvdb tree`](./tree.md).
 
-## Related Commands
+## Related commands
 
-- [`mdvdb tree`](./tree.md) -- View file tree with sync status to find file paths
-- [`mdvdb ingest`](./ingest.md) -- Index files so they appear in `get` results
-- [`mdvdb status`](./status.md) -- Quick summary of index counts
-- [`mdvdb schema`](./schema.md) -- View the inferred metadata schema across all files
-- [`mdvdb links`](./links.md) -- View outgoing links from a specific file
-
-## See Also
-
-- [Index Storage](../concepts/index-storage.md) -- How files, chunks, and hashes are stored in the index
-- [Chunking](../concepts/chunking.md) -- How files are split into chunks
-- [JSON Output Reference](../json-output.md) -- Complete JSON schema reference
-- [Configuration](../configuration.md) -- All environment variables and config options
+- [`mdvdb collection`](./collection.md) -- Query a folder as frontmatter rows and columns
+- [`mdvdb modules`](./modules.md) -- Recompute or inspect computed fields
+- [`mdvdb schema`](./schema.md) -- Inspect field definitions
+- [`mdvdb links`](./links.md) -- Traverse document links

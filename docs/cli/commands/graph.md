@@ -6,7 +6,7 @@ category: "commands"
 
 # mdvdb graph
 
-Show graph data (nodes, edges, clusters) for visualization. Outputs the complete graph structure of the indexed markdown files in a format suitable for graph visualization tools (e.g., D3.js, Cytoscape, Gephi). The graph can be generated at document level (one node per file) or chunk level (one node per chunk within each file).
+Show graph data (nodes, edges, automatic communities, Topics, and edge types) for visualization. The graph can be generated at document level (one node per file) or chunk level (one node per chunk within each file), then scoped by a folder or analyzed through a named Shard.
 
 ## Usage
 
@@ -25,6 +25,7 @@ This command takes no arguments.
 | `--level` | | `document` | Graph granularity level: `document` or `chunk` |
 | `--path` | | | Restrict visible graph topology to this collection-relative folder |
 | `--shard` | | | Use a configured Shard as the graph analysis context |
+| `--compact` | | `false` | With `--json`, emit the versioned compact wire format; alias `--intern-contexts` |
 
 ### `--level <LEVEL>`
 
@@ -32,10 +33,10 @@ Controls the granularity of the graph nodes.
 
 | Level | Description |
 |-------|-------------|
-| `document` (default) | One node per indexed file. Edges are markdown links between files. Clusters are document-level communities. |
+| `document` (default) | One node per indexed file. Edges are body links and frontmatter Relations between files. Clusters are document-level communities. |
 | `chunk` | One node per chunk within each file. Edges are the top-k most similar chunk pairs across different files (based on cosine similarity of embeddings). Intra-file edges are excluded. |
 
-At **document level**, edges come from the markdown link graph (explicit links between files). At **chunk level**, edges come from embedding similarity (the top 5 most similar cross-file chunks for each chunk).
+At **document level**, edges come from body links and whole-value frontmatter Relations. At **chunk level**, edges come from embedding similarity (the top 5 most similar cross-file chunks for each chunk).
 
 ### `--path <PREFIX>`
 
@@ -71,6 +72,22 @@ Shard automatic clusters are computed lazily from existing stored document embed
 outside the index. Graph reads never initialize an embedding provider. When local Topic centroids
 need to be created after a definition change, topology and automatic clusters remain available and
 the optional `analysis.topics` status reports `needs_ingest`.
+
+### `--compact`
+
+`--compact` requires `--json` and emits a minified, versioned app wire format. Repeated edge
+paragraphs move into one response-level `contexts` array; each edge uses `context_index` instead of
+repeating `context_text`. The alias `--intern-contexts` has identical behavior.
+
+```bash
+mdvdb graph --json --compact
+mdvdb graph --shard research --json --compact
+mdvdb graph --level chunk --json --compact
+```
+
+Consumers must check `format` and `version` before interpreting the response. Compact version 1
+uses `format: "mdvdb.graph.compact"`. Chunk similarity edges have no context, so their
+`context_index` is absent and `contexts` is normally empty.
 
 ## Global Options
 
@@ -157,6 +174,9 @@ mdvdb graph --level chunk --path src/ --json
 # Analyze a Shard, then project one descendant folder
 mdvdb graph --shard research --path work/research/drafts --json
 
+# Minified app wire format with interned edge contexts
+mdvdb graph --shard research --json --compact
+
 # Graph with debug logging
 mdvdb graph -vv
 ```
@@ -177,14 +197,16 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
       "path": "docs/architecture.md",
       "label": null,
       "chunk_index": null,
-      "cluster_id": 2
+      "cluster_id": 2,
+      "custom_cluster_id": null
     },
     {
       "id": "docs/api/endpoints.md",
       "path": "docs/api/endpoints.md",
       "label": null,
       "chunk_index": null,
-      "cluster_id": 0
+      "cluster_id": 0,
+      "custom_cluster_id": null
     }
   ],
   "edges": [
@@ -195,7 +217,8 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
       "relationship_type": "api-reference",
       "strength": 0.82,
       "context_text": "See the API endpoints documentation for details.",
-      "edge_cluster_id": 1
+      "edge_cluster_id": 1,
+      "field": null
     }
   ],
   "clusters": [
@@ -248,6 +271,7 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
       "label": "Introduction",
       "chunk_index": 0,
       "cluster_id": 2,
+      "custom_cluster_id": null,
       "size": 1234.0
     },
     {
@@ -256,6 +280,7 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
       "label": "Architecture > Data Flow",
       "chunk_index": 1,
       "cluster_id": 2,
+      "custom_cluster_id": null,
       "size": 890.0
     }
   ],
@@ -263,7 +288,8 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
     {
       "source": "docs/architecture.md#1",
       "target": "docs/api/endpoints.md#0",
-      "weight": 0.8723
+      "weight": 0.8723,
+      "field": null
     }
   ],
   "clusters": [
@@ -287,6 +313,7 @@ The JSON output is a `GraphData` object containing nodes, edges, and clusters ar
 | `clusters` | `GraphCluster[]` | Document cluster groupings with labels |
 | `level` | `string` | Graph level: `"document"` or `"chunk"` |
 | `edge_clusters` | `GraphCluster[]` | Edge cluster groupings (semantic relationship types). Only present at document level when edge clustering has been performed. Omitted when empty. |
+| `custom_clusters` | `GraphCluster[]` | User-defined Topic summaries represented by visible nodes. Omitted when empty. |
 | `analysis` | `GraphAnalysisInfo` | Optional analysis context and readiness metadata. Present for Shard-native analysis; additive in compact wire version 1. |
 
 ### GraphAnalysisInfo
@@ -313,6 +340,9 @@ their parent document's assignments, so legend counts remain document counts.
 | `label` | `string?` | Display label. At document level: `null`. At chunk level: heading hierarchy joined by ` > ` (e.g., `"API > Authentication > OAuth2"`). |
 | `chunk_index` | `number?` | Chunk index within the file. `null` at document level. |
 | `cluster_id` | `number?` | Document cluster assignment. `null` if the file is not assigned to a cluster. |
+| `custom_cluster_id` | `number?` | Highest-scoring Topic assignment, or `null` for Unassigned. |
+| `custom_cluster_ids` | `number[]?` | All Topic memberships, ordered by score; omitted when empty. |
+| `custom_cluster_scores` | `number[]?` | Similarities parallel to `custom_cluster_ids`; omitted when empty. |
 | `size` | `number?` | Content length in characters (chunk level only). Omitted at document level. |
 
 ### GraphEdge Fields
@@ -326,15 +356,62 @@ their parent document's assignments, so legend counts remain document counts.
 | `strength` | `number?` | Semantic edge strength -- cosine similarity between edge embedding and target document embedding (document level only). Omitted when not available. |
 | `context_text` | `string?` | Paragraph context surrounding the link (document level only). Omitted when not available. |
 | `edge_cluster_id` | `number?` | Edge cluster assignment (document level only). Omitted when not available. |
+| `field` | `string \| null` | Originating frontmatter field for a Relation edge; always present and `null` for body/similarity edges. |
 
 ### GraphCluster Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | `number` | Cluster identifier (0-based) |
-| `label` | `string` | Auto-generated label from top TF-IDF keywords |
-| `keywords` | `string[]` | Cross-cluster TF-IDF keywords |
+| `id` | `number` | Opaque cluster or Topic identifier; IDs need not be contiguous |
+| `label` | `string` | Automatic TF-IDF label or user-defined Topic name |
+| `keywords` | `string[]` | Automatic TF-IDF keywords or Topic seed phrases |
 | `member_count` | `number` | Number of members in this cluster |
+| `description` | `string?` | User-defined Topic description; omitted for automatic clusters |
+| `threshold` | `number?` | Per-Topic threshold override |
+| `parent_id` | `number?` | Parent automatic community when a hierarchy exists |
+
+### CompactGraphData (`--json --compact`)
+
+```json
+{
+  "format": "mdvdb.graph.compact",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "docs/architecture.md",
+      "path": "docs/architecture.md",
+      "label": null,
+      "chunk_index": null,
+      "cluster_id": 2,
+      "custom_cluster_id": null
+    },
+    {
+      "id": "docs/api/endpoints.md",
+      "path": "docs/api/endpoints.md",
+      "label": null,
+      "chunk_index": null,
+      "cluster_id": 0,
+      "custom_cluster_id": null
+    }
+  ],
+  "edges": [
+    {
+      "source": "docs/architecture.md",
+      "target": "docs/api/endpoints.md",
+      "weight": null,
+      "context_index": 0,
+      "field": null
+    }
+  ],
+  "contexts": ["See the API endpoints documentation for details."],
+  "clusters": [],
+  "level": "document"
+}
+```
+
+Compact responses retain `nodes`, `clusters`, optional `custom_clusters`, optional
+`edge_clusters`, and optional Shard `analysis`. Only the edge context representation changes:
+`context_text` becomes a zero-based `context_index` into `contexts`.
 
 ## Document vs Chunk Level
 
@@ -342,17 +419,17 @@ their parent document's assignments, so legend counts remain document counts.
 |--------|----------------|-------------|
 | **Nodes** | One per indexed file | One per chunk (heading section) |
 | **Node ID** | File path (e.g., `docs/api.md`) | Chunk ID (e.g., `docs/api.md#0`) |
-| **Edges** | Explicit markdown links | Top-k cosine similarity (cross-file only) |
+| **Edges** | Body links and frontmatter Relations | Top-k cosine similarity (cross-file only) |
 | **Edge weight** | Not applicable (null) | Cosine similarity (0.0 to 1.0) |
-| **Clusters** | Document-level k-means clusters | Same clusters (inherited from parent file) |
-| **Edge metadata** | Relationship type, strength, context | None (similarity-only) |
+| **Clusters** | Document-level automatic communities (Leiden by default) | Same communities and Topics inherited from the parent file |
+| **Edge metadata** | Relationship type, strength, context, Relation field | None (similarity-only) |
 | **Use case** | Knowledge graph visualization | Semantic similarity exploration |
 
 ## Notes
 
 - The `graph` command opens the index in **read-only** mode. It never modifies the index.
 - Run [`mdvdb ingest`](./ingest.md) to populate nodes (indexed files/chunks), edges (links and similarities), and clusters.
-- At document level, edges come from the link graph. At chunk level, edges are computed from embedding similarity (top 5 most similar chunks per chunk, excluding intra-file pairs).
+- At document level, edges come from body links and frontmatter Relations. At chunk level, edges are computed from embedding similarity (top 5 most similar chunks per chunk, excluding intra-file pairs).
 - The `edge_clusters` field is only populated at document level and only when edge clustering has been performed during ingestion (`MDVDB_EDGE_EMBEDDINGS=true`).
 - For chunk-level graphs, the `size` field on nodes represents the character count of the chunk content, useful for sizing nodes in visualization.
 - Cluster IDs at chunk level are inherited from the parent document's cluster assignment.

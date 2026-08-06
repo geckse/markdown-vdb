@@ -37,6 +37,17 @@ mdvdb tree --path docs
 mdvdb tree --path src/components
 ```
 
+#### `--shard <ID>`
+
+Resolves a configured Shard to its recursive folder scope and returns the same tree contract,
+rooted at that folder. Shards use the shared collection index; this option does not open a separate
+index. `--shard` conflicts with `--path`.
+
+```bash
+mdvdb tree --shard research
+mdvdb tree --shard research --json
+```
+
 ## Global Options
 
 These options apply to all commands. See [Commands Index](./index.md) for details.
@@ -140,6 +151,9 @@ mdvdb tree --no-color
 
 # Show tree scoped to a directory as JSON
 mdvdb tree --path blog --json
+
+# Show the recursive folder represented by a named Shard
+mdvdb tree --shard research
 ```
 
 ## JSON Output
@@ -261,7 +275,9 @@ When `--path` is used, the JSON output has the same structure but rooted at the 
 
 ## Notes
 
-- The `tree` command opens the index in **read-only** mode. It never modifies the index.
+- The `tree` command never modifies the index. If no usable index exists, it still returns a
+  discovery-only tree and marks every on-disk document `new`; if an existing index cannot be
+  opened, it warns and degrades to that filesystem view.
 - File discovery respects `.gitignore`, `.mdvdbignore`, and `MDVDB_IGNORE_PATTERNS` -- excluded files do not appear in the tree.
 - Summary counts in `--path` and `--shard` mode are recomputed from the visible subtree.
 - Deleted files appear in the tree even though they no longer exist on disk. They will be removed from the index on the next [`mdvdb ingest`](./ingest.md).

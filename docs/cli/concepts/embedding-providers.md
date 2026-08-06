@@ -1,300 +1,314 @@
 ---
 title: "Embedding Providers"
-description: "Setup and configuration for OpenAI, Ollama, and Custom embedding providers"
+description: "Configure the eight supported embedding backends, credentials, model discovery, and automatic dimensions"
 category: "concepts"
 ---
 
 # Embedding Providers
 
-mdvdb uses embedding providers to convert text into vector representations for semantic search. Three provider types are supported: **OpenAI** (default, cloud-hosted), **Ollama** (local, self-hosted), and **Custom** (any OpenAI-compatible API endpoint).
+mdvdb converts Markdown chunks and search queries into vectors through one configured embedding
+provider. Provider-native model identifiers are treated as opaque strings: using a new model,
+deployment, endpoint label, or immutable revision does not require an mdvdb release when its
+transport is already supported.
 
-## Provider Overview
+Start with automatic dimension discovery:
 
-| Provider | Type | Default Model | Default Dimensions | API Key Required | Network Required |
-|----------|------|---------------|-------------------|-----------------|-----------------|
-| **openai** | Cloud | `text-embedding-3-small` | `1536` | Yes (`OPENAI_API_KEY`) | Yes |
-| **ollama** | Local | `text-embedding-3-small`* | `1536`* | No | No (localhost) |
-| **custom** | Any | `text-embedding-3-small`* | `1536`* | Optional | Yes |
-
-\* *Ollama and Custom providers inherit the default model/dimensions values but you should override them to match your actual model. See setup sections below.*
-
-## How Embedding Works
-
-During **ingestion**, mdvdb:
-1. Chunks each markdown file into sections (by headings, with a token size guard).
-2. Computes a SHA-256 content hash for each source file.
-3. Compares hashes against the index -- unchanged files are skipped entirely.
-4. Sends changed chunks to the embedding provider in batches (up to `MDVDB_EMBEDDING_BATCH_SIZE` texts per request, with up to 4 concurrent batch requests).
-5. Stores the resulting vectors in the HNSW index.
-
-During **search** (semantic, hybrid, or edge modes), the query text is embedded using the same provider, and the resulting vector is compared against stored vectors using cosine similarity.
-
-## OpenAI (Default)
-
-The default provider uses [OpenAI's embedding API](https://platform.openai.com/docs/guides/embeddings). The recommended model is `text-embedding-3-small`, which offers a good balance of quality and cost.
-
-### Setup
-
-1. **Get an API key** from [platform.openai.com](https://platform.openai.com/api-keys).
-
-2. **Set the key** in your project config or environment:
-
-   ```bash
-   # In .markdownvdb/.config
-   OPENAI_API_KEY=sk-proj-your-key-here
-   ```
-
-   Or as a shell environment variable:
-
-   ```bash
-   export OPENAI_API_KEY=sk-proj-your-key-here
-   ```
-
-   Or in a `.env` file (useful if other tools also read this key):
-
-   ```bash
-   # .env
-   OPENAI_API_KEY=sk-proj-your-key-here
-   ```
-
-3. **Verify** the provider is reachable:
-
-   ```bash
-   mdvdb doctor
-   ```
-
-   Look for the "Provider reachable" check to show "Pass".
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_EMBEDDING_PROVIDER` | `openai` | Set to `openai` (or omit -- it is the default) |
-| `MDVDB_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI model name |
-| `MDVDB_EMBEDDING_DIMENSIONS` | `1536` | Vector dimensions (must match model) |
-| `OPENAI_API_KEY` | *(required)* | Your OpenAI API key |
-| `MDVDB_EMBEDDING_BATCH_SIZE` | `100` | Texts per API request |
-
-### Available Models
-
-| Model | Dimensions | Notes |
-|-------|-----------|-------|
-| `text-embedding-3-small` | 1536 | Default. Good quality, low cost. |
-| `text-embedding-3-large` | 3072 | Higher quality, higher cost. |
-| `text-embedding-ada-002` | 1536 | Legacy model. |
-
-When changing models, you **must** update `MDVDB_EMBEDDING_DIMENSIONS` to match and re-ingest all files (`mdvdb ingest --reindex`). Dimension mismatch will cause errors.
-
-### Custom Endpoint
-
-OpenAI-compatible providers (e.g., Azure OpenAI, LiteLLM proxy) can be used by setting a custom endpoint while keeping the `openai` provider type:
-
-```bash
-MDVDB_EMBEDDING_PROVIDER=openai
-MDVDB_EMBEDDING_ENDPOINT=https://your-deployment.openai.azure.com/openai/deployments/your-model/embeddings?api-version=2024-02-01
-OPENAI_API_KEY=your-azure-key
+```yaml
+# .markdownvdb/config.yaml
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dimensions: auto
+  batch_size: 100
 ```
 
-### Retry Behavior
-
-The OpenAI provider retries automatically on transient failures:
-- **Rate limiting (429)**: retries up to 3 times with exponential backoff (1s, 2s, 4s).
-- **Server errors (5xx)**: retries up to 3 times with exponential backoff.
-- **Authentication errors (401)**: fails immediately (no retry).
-- **Other client errors (4xx)**: fails immediately (no retry).
-
-## Ollama (Local)
-
-[Ollama](https://ollama.ai) runs embedding models locally on your machine. No API key is needed, and no data leaves your network.
-
-### Setup
-
-1. **Install Ollama** from [ollama.ai](https://ollama.ai).
-
-2. **Pull an embedding model**:
-
-   ```bash
-   ollama pull nomic-embed-text
-   ```
-
-3. **Configure mdvdb** to use Ollama:
-
-   ```bash
-   # In .markdownvdb/.config
-   MDVDB_EMBEDDING_PROVIDER=ollama
-   MDVDB_EMBEDDING_MODEL=nomic-embed-text
-   MDVDB_EMBEDDING_DIMENSIONS=768
-   ```
-
-4. **Verify** Ollama is running and accessible:
-
-   ```bash
-   mdvdb doctor
-   ```
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_EMBEDDING_PROVIDER` | | Set to `ollama` |
-| `MDVDB_EMBEDDING_MODEL` | `text-embedding-3-small` | Model name (override to your Ollama model) |
-| `MDVDB_EMBEDDING_DIMENSIONS` | `1536` | Vector dimensions (override to match your model) |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `MDVDB_EMBEDDING_BATCH_SIZE` | `100` | Texts per API request |
-
-### Popular Ollama Embedding Models
-
-| Model | Dimensions | Notes |
-|-------|-----------|-------|
-| `nomic-embed-text` | 768 | Recommended. Good quality, fast. |
-| `mxbai-embed-large` | 1024 | Higher quality, larger model. |
-| `all-minilm` | 384 | Smallest, fastest. Good for testing. |
-| `snowflake-arctic-embed` | 1024 | Strong retrieval performance. |
-
-### Remote Ollama
-
-To use an Ollama instance running on a different machine:
+Store credentials outside YAML:
 
 ```bash
-OLLAMA_HOST=http://192.168.1.100:11434
+printf '%s' "$OPENAI_API_KEY" \
+  | mdvdb config secret set OPENAI_API_KEY --stdin
+
+mdvdb embedding probe
+mdvdb doctor
 ```
 
-### Error Handling
+## Supported providers
 
-- **Connection refused**: Ollama server is not running. Start it with `ollama serve`.
-- **Model not found (404)**: The specified model is not pulled. Run `ollama pull <model>`.
-- **Server errors (5xx)**: retries up to 3 times with exponential backoff.
+| Provider | `embedding.provider` | Credential or connection | Model discovery |
+|---|---|---|---|
+| OpenAI | `openai` | `OPENAI_API_KEY`; optional `embedding.endpoint` | No |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | Yes |
+| Google Gemini | `gemini` | `GEMINI_API_KEY` | Yes |
+| Azure OpenAI | `azure` | Endpoint plus an API key or bearer token | No |
+| AWS Bedrock | `bedrock` | Bedrock bearer token, AWS credentials, or a shared profile | Yes |
+| Hugging Face | `huggingface` | `HF_TOKEN` for serverless; optional for endpoint mode | Serverless only |
+| Ollama | `ollama` | `OLLAMA_HOST`, default `http://localhost:11434` | No |
+| OpenAI-compatible | `custom` | Exact `embedding.endpoint`; optional `OPENAI_API_KEY` | No |
 
-## Custom Provider
+Accepted aliases include `google`, `azure-openai`, `aws-bedrock`, and `hf`. The internal mock
+provider is for tests and is not one of the eight user-facing backends.
 
-The Custom provider works with any API endpoint that implements the [OpenAI embeddings API format](https://platform.openai.com/docs/api-reference/embeddings). This includes self-hosted inference servers, API proxies, and alternative embedding services.
+## Settings and secret precedence
 
-### Setup
+Ordinary settings resolve from highest to lowest priority:
 
-1. **Set the endpoint** to your embedding API:
+1. Shell `MDVDB_*` overrides
+2. Project `.markdownvdb/config.yaml`
+3. User `~/.mdvdb/config.yaml`
+4. Built-in defaults
 
-   ```bash
-   # In .markdownvdb/.config
-   MDVDB_EMBEDDING_PROVIDER=custom
-   MDVDB_EMBEDDING_ENDPOINT=http://localhost:8080/v1/embeddings
-   MDVDB_EMBEDDING_MODEL=your-model-name
-   MDVDB_EMBEDDING_DIMENSIONS=768
-   ```
+Project YAML is deep-merged over user YAML. Mapping keys merge independently; a higher-priority
+scalar or sequence replaces the lower-priority value.
 
-2. **Set an API key** if your endpoint requires authentication:
+Credentials and connection secrets use a separate chain:
 
-   ```bash
-   OPENAI_API_KEY=your-api-key
-   ```
+1. Shell environment
+2. Project-root `.env`
+3. Project `.markdownvdb/.env`
+4. User `~/.mdvdb/.env`
+5. Legacy user `~/.mdvdb/config`
 
-   If no API key is needed, you can omit `OPENAI_API_KEY` -- the Custom provider will send an empty authorization header.
+`mdvdb config secret set` writes the project `.markdownvdb/.env`;
+`mdvdb config --global secret set` writes the user `.env`. Both read the value from stdin so it
+does not appear in process arguments. Never put credentials in `config.yaml`.
 
-3. **Verify** the endpoint is accessible:
+Set `MDVDB_NO_USER_CONFIG=1` to ignore user-level YAML and user-level secret files.
 
-   ```bash
-   mdvdb doctor
-   ```
+## Automatic dimensions
 
-### Configuration
+`embedding.dimensions` accepts `auto` or a positive integer. Prefer `auto` unless a provider
+requires a fixed output size:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_EMBEDDING_PROVIDER` | | Set to `custom` |
-| `MDVDB_EMBEDDING_ENDPOINT` | *(required)* | Your embedding API endpoint URL |
-| `MDVDB_EMBEDDING_MODEL` | `text-embedding-3-small` | Model name sent in requests |
-| `MDVDB_EMBEDDING_DIMENSIONS` | `1536` | Vector dimensions (must match your model) |
-| `OPENAI_API_KEY` | *(optional)* | API key for authentication (if needed) |
-| `MDVDB_EMBEDDING_BATCH_SIZE` | `100` | Texts per API request |
+```yaml
+embedding:
+  provider: ollama
+  model: nomic-embed-text
+  dimensions: auto
+```
 
-### API Format
-
-The Custom provider sends requests in the OpenAI embeddings format:
+With an existing compatible index, mdvdb reuses the dimension recorded by that index. A new index
+or explicit full reindex makes one minimal provider request before creating the replacement index.
+Use `mdvdb embedding probe --json` to make the same live check explicitly:
 
 ```json
 {
-  "input": ["text to embed", "another text"],
-  "model": "your-model-name",
-  "dimensions": 768
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "dimensions": 768,
+  "latency_ms": 42
 }
 ```
 
-And expects responses in the same format:
+The vector itself is never printed. A probe requires provider connectivity and valid credentials,
+and a hosted provider may charge for the request.
 
-```json
-{
-  "data": [
-    { "embedding": [0.1, 0.2, ...], "index": 0 },
-    { "embedding": [0.3, 0.4, ...], "index": 1 }
-  ]
-}
-```
-
-### Compatible Services
-
-Examples of services that work with the Custom provider:
-
-| Service | Endpoint Example |
-|---------|-----------------|
-| [LiteLLM](https://litellm.ai) | `http://localhost:4000/v1/embeddings` |
-| [vLLM](https://vllm.ai) | `http://localhost:8000/v1/embeddings` |
-| [TEI](https://github.com/huggingface/text-embeddings-inference) | `http://localhost:8080/v1/embeddings` |
-| [LocalAI](https://localai.io) | `http://localhost:8080/v1/embeddings` |
-| Azure OpenAI | `https://<resource>.openai.azure.com/openai/deployments/<model>/embeddings?api-version=2024-02-01` |
-
-## Shared Configuration
-
-These variables apply to all providers:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_EMBEDDING_BATCH_SIZE` | `100` | Maximum number of texts sent in a single API request. Larger batches reduce API calls but increase memory usage and latency per request. |
-| `MDVDB_EMBEDDING_DIMENSIONS` | `1536` | Number of dimensions in each embedding vector. Must match the model's output dimensions. |
-
-### Batch Processing
-
-mdvdb processes embeddings in batches for efficiency:
-
-1. Texts are grouped into batches of `MDVDB_EMBEDDING_BATCH_SIZE`.
-2. Up to **4 batches** are processed concurrently (concurrent API requests).
-3. Each batch is sent as a single API call to the provider.
-
-### Content-Hash Skipping
-
-During incremental ingestion, mdvdb computes SHA-256 hashes of each source file. If a file's hash matches what is already in the index, all of its chunks are skipped -- no embedding API call is made. This dramatically reduces API costs on subsequent ingests.
-
-To force re-embedding of all files (e.g., after changing models), use:
+Changing the provider, model, dimensions, semantic endpoint, purpose handling, normalization, or
+provider codec changes the embedding space. Run:
 
 ```bash
 mdvdb ingest --reindex
 ```
 
-## Switching Providers
+Semantic search and incremental ingestion remain blocked on an incompatible index until the
+reindex succeeds. Lexical and metadata operations remain available, and a failed replacement
+leaves the previous on-disk generation intact.
 
-When switching between providers or changing the embedding model:
+## Model discovery
 
-1. **Update the configuration** with the new provider, model, and dimensions.
-2. **Re-ingest all files** with `mdvdb ingest --reindex` to rebuild all embeddings.
-3. **Verify** with `mdvdb doctor` that the new provider is reachable and working.
+Discovery reads a provider's live catalog:
 
-Mixing embeddings from different providers or models in the same index will produce poor search results because the vector spaces are incompatible.
+```bash
+# Configured provider
+mdvdb embedding models
 
-## Troubleshooting
+# Temporary provider override
+mdvdb embedding models --provider gemini --json
+```
 
-| Problem | Cause | Solution |
-|---------|-------|----------|
-| "OpenAI provider requires OPENAI_API_KEY to be set" | Missing API key | Set `OPENAI_API_KEY` in config or environment |
-| "authentication failed (401): invalid API key" | Wrong API key | Verify your API key at platform.openai.com |
-| "Cannot connect to Ollama at ..." | Ollama not running | Start Ollama with `ollama serve` |
-| "Model X not found in Ollama" | Model not pulled | Run `ollama pull <model>` |
-| "Custom provider requires MDVDB_EMBEDDING_ENDPOINT to be set" | Missing endpoint | Set `MDVDB_EMBEDDING_ENDPOINT` |
-| "expected dimension X, got Y" | Dimension mismatch | Set `MDVDB_EMBEDDING_DIMENSIONS` to match model output |
-| "rate limited (429)" | Too many API requests | Reduce `MDVDB_EMBEDDING_BATCH_SIZE` or wait |
+OpenRouter, Gemini, Bedrock, and Hugging Face serverless expose discovery. OpenAI, Azure OpenAI,
+Ollama, Custom, and Hugging Face endpoint mode accept model IDs directly without a catalog.
+Discovery is advisory, not an allowlist; an undiscovered provider-native ID is still accepted.
 
-## See Also
+Prefer immutable model revisions when an embedding space must be reproducible. A remote alias can
+change without any local configuration change.
 
-- [mdvdb search](../commands/search.md) -- Search command reference
-- [mdvdb ingest](../commands/ingest.md) -- Ingest command reference
-- [mdvdb doctor](../commands/doctor.md) -- Diagnostic checks including provider connectivity
-- [Search Modes](./search-modes.md) -- How different search modes use embeddings
-- [Configuration](../configuration.md) -- All environment variables
-- [Chunking](./chunking.md) -- How text is prepared before embedding
+## Provider configuration
+
+### OpenAI
+
+OpenAI is the default:
+
+```yaml
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dimensions: auto
+```
+
+```dotenv
+OPENAI_API_KEY=...
+```
+
+Set `embedding.endpoint` only when you intentionally need an alternative OpenAI-compatible route
+with OpenAI authentication behavior.
+
+### OpenRouter
+
+```yaml
+embedding:
+  provider: openrouter
+  model: vendor/provider-model-id
+  dimensions: auto
+```
+
+```dotenv
+OPENROUTER_API_KEY=...
+```
+
+The default endpoint is `https://openrouter.ai/api/v1/embeddings`.
+
+### Google Gemini
+
+```yaml
+embedding:
+  provider: gemini
+  model: provider-native-model-id
+  dimensions: auto
+  purpose:
+    mode: native
+    query: RETRIEVAL_QUERY
+    document: RETRIEVAL_DOCUMENT
+```
+
+```dotenv
+GEMINI_API_KEY=...
+```
+
+Gemini uses its native batch embedding API. Purpose handling is explicit configuration:
+
+- `none` sends text unchanged.
+- `native` sends the configured query/document task values.
+- `prefix` prepends the configured query/document strings.
+
+### Azure OpenAI
+
+```yaml
+embedding:
+  provider: azure
+  model: my-embedding-deployment
+  dimensions: auto
+  endpoint: https://my-resource.openai.azure.com
+  azure:
+    auth: api_key
+```
+
+```dotenv
+AZURE_OPENAI_API_KEY=...
+```
+
+The endpoint can instead come from `AZURE_OPENAI_ENDPOINT`. For an externally acquired Microsoft
+Entra token, set `embedding.azure.auth: bearer` and provide
+`AZURE_OPENAI_ACCESS_TOKEN`. mdvdb invokes `{endpoint}/openai/v1/embeddings`.
+
+### AWS Bedrock
+
+```yaml
+embedding:
+  provider: bedrock
+  model: provider.model-id-or-inference-profile
+  dimensions: auto
+  bedrock:
+    region: eu-central-1
+    format: titan       # titan | cohere | custom
+```
+
+Authentication resolves in this order:
+
+1. `AWS_BEARER_TOKEN_BEDROCK`
+2. `AWS_ACCESS_KEY_ID` plus `AWS_SECRET_ACCESS_KEY`, with optional `AWS_SESSION_TOKEN`
+3. `embedding.bedrock.profile`, `AWS_PROFILE`, or the `default` shared-credentials profile
+
+`format` selects the request/response codec independently of the model ID. Bedrock also supports
+single or batch invocation, a custom JSON request template, typed `$input`, `$inputs`,
+`$dimensions`, and `$purpose` placeholders, and RFC 6901 response pointers. See the
+[provider transport guide](https://github.com/geckse/markdown-vdb/blob/main/docs/embedding-providers.md#aws-bedrock)
+for the custom-codec schema.
+
+### Hugging Face
+
+Serverless mode derives its route from the Hub model ID and requires `HF_TOKEN`:
+
+```yaml
+embedding:
+  provider: huggingface
+  model: sentence-transformers/provider-model
+  dimensions: auto
+  huggingface:
+    mode: serverless
+    normalize: true
+    truncate: true
+    truncation_direction: right
+    query_prompt_name: query
+    document_prompt_name: passage
+```
+
+For a managed Inference Endpoint, self-hosted TEI instance, or compatible private service, use its
+exact URL:
+
+```yaml
+embedding:
+  provider: huggingface
+  model: stable-endpoint-label
+  dimensions: auto
+  huggingface:
+    mode: endpoint
+    endpoint: https://example.endpoints.huggingface.cloud/embed
+```
+
+`HF_TOKEN` is optional in endpoint mode. The response must contain one pooled dense float vector
+per input; token-level tensors and sparse output are rejected.
+
+### Ollama
+
+```yaml
+embedding:
+  provider: ollama
+  model: nomic-embed-text
+  dimensions: auto
+```
+
+Ollama uses `http://localhost:11434` by default. Override a remote service in the shell or secret
+file:
+
+```dotenv
+OLLAMA_HOST=http://192.168.1.100:11434
+```
+
+Make sure the model is present before probing or ingesting:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+### OpenAI-compatible endpoint
+
+Use `custom` for a service that accepts and returns the OpenAI embeddings wire format:
+
+```yaml
+embedding:
+  provider: custom
+  model: provider-native-model-id
+  dimensions: auto
+  endpoint: https://embeddings.example.test/v1/embeddings
+```
+
+If the endpoint requires a bearer token, store it as `OPENAI_API_KEY`; omit it for an unauthenticated
+private endpoint. mdvdb uses the URL exactly as configured.
+
+## Related pages
+
+- [`mdvdb embedding`](../commands/embedding.md) — discover models and probe dimensions
+- [`mdvdb config`](../commands/config.md) — inspect settings and manage secrets
+- [`mdvdb doctor`](../commands/doctor.md) — validate provider connectivity and index compatibility
+- [Configuration](../configuration.md) — complete YAML and precedence reference
+- [Ingestion](../commands/ingest.md) — build or replace the index

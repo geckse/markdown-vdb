@@ -1,147 +1,123 @@
 ---
 title: "Installation"
-description: "How to install mdvdb via cargo, GitHub releases, or from source"
+description: "Install a tagged mdvdb release or build the current development version"
 category: "guides"
 ---
 
 # Installation
 
-There are three ways to install **mdvdb**: from crates.io via `cargo install`, from pre-built GitHub Release binaries, or by building from source.
+Choose between a tagged GitHub release and the current `main` branch:
 
-## Install via Cargo (Recommended)
+- **Tagged release** — a published, reproducible version with pre-built binaries.
+- **Current main** — the newest code in the repository. It may contain features that have not
+  reached a release tag yet.
 
-If you have a [Rust toolchain](https://rustup.rs/) installed (Rust 1.70+), the simplest method is:
+Do not infer the latest release from examples or from the version in a checkout. Check
+[GitHub Releases](https://github.com/geckse/markdown-vdb/releases), and verify the installed binary
+with `mdvdb --version`.
+
+## Install the latest tagged release
+
+On macOS or Linux, the repository install script detects your operating system and architecture,
+downloads the latest tagged release, and installs `mdvdb`:
 
 ```bash
-cargo install mdvdb
+curl -fsSL https://raw.githubusercontent.com/geckse/markdown-vdb/main/install.sh | sh
 ```
 
-This downloads the latest release from [crates.io](https://crates.io/crates/mdvdb), compiles it for your platform, and installs the `mdvdb` binary into `~/.cargo/bin/`.
-
-Make sure `~/.cargo/bin` is in your `PATH`:
+The default destination is `/usr/local/bin`. To install without administrator access, choose a
+directory you own and add it to `PATH`:
 
 ```bash
-# bash / zsh
-export PATH="$HOME/.cargo/bin:$PATH"
-
-# fish
-fish_add_path ~/.cargo/bin
+mkdir -p "$HOME/.local/bin"
+curl -fsSL https://raw.githubusercontent.com/geckse/markdown-vdb/main/install.sh \
+  | INSTALL_DIR="$HOME/.local/bin" sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-### Updating
+If you prefer to inspect scripts before running them, download
+[`install.sh`](https://github.com/geckse/markdown-vdb/blob/main/install.sh), review it, and then run
+it locally.
 
-To update to the latest version:
+### Manual release download
+
+Release archives and raw binaries are published at
+[github.com/geckse/markdown-vdb/releases](https://github.com/geckse/markdown-vdb/releases).
+Assets use the release tag and Rust target in their names, for example:
+
+| Platform | Target |
+|---|---|
+| macOS, Apple Silicon | `aarch64-apple-darwin` |
+| macOS, Intel | `x86_64-apple-darwin` |
+| Linux, x86-64 | `x86_64-unknown-linux-gnu` |
+| Linux, ARM64 | `aarch64-unknown-linux-gnu` |
+| Windows, x86-64 | `x86_64-pc-windows-msvc` |
+
+Unix archives follow `mdvdb-<TAG>-<TARGET>.tar.gz`; Windows archives use `.zip`. Extract the
+archive and put `mdvdb` or `mdvdb.exe` in a directory on `PATH`.
+
+## Install current main
+
+Install the latest development snapshot with the current stable Rust toolchain:
 
 ```bash
-cargo install mdvdb --force
+cargo install \
+  --git https://github.com/geckse/markdown-vdb.git \
+  --branch main \
+  --locked
 ```
 
-## Pre-built Binaries (GitHub Releases)
-
-Pre-built binaries for major platforms are available on the [GitHub Releases](https://github.com/nicholasgasior/markdown-vdb/releases) page.
-
-1. Download the archive for your platform:
-
-   | Platform | Archive |
-   |----------|---------|
-   | macOS (Apple Silicon) | `mdvdb-aarch64-apple-darwin.tar.gz` |
-   | macOS (Intel) | `mdvdb-x86_64-apple-darwin.tar.gz` |
-   | Linux (x86_64) | `mdvdb-x86_64-unknown-linux-gnu.tar.gz` |
-   | Linux (ARM64) | `mdvdb-aarch64-unknown-linux-gnu.tar.gz` |
-   | Windows (x86_64) | `mdvdb-x86_64-pc-windows-msvc.zip` |
-
-2. Extract the binary:
-
-   ```bash
-   # macOS / Linux
-   tar -xzf mdvdb-*.tar.gz
-   chmod +x mdvdb
-
-   # Move to a directory in your PATH
-   sudo mv mdvdb /usr/local/bin/
-   ```
-
-   On Windows, extract the `.zip` and move `mdvdb.exe` to a directory in your `PATH`.
-
-## Build from Source
-
-Clone the repository and build a release binary:
+This follows `main`; it is not the same promise as installing the newest release tag. To build an
+exact tag from source, replace `--branch main` with `--tag <TAG>`:
 
 ```bash
-git clone https://github.com/nicholasgasior/markdown-vdb.git
+cargo install \
+  --git https://github.com/geckse/markdown-vdb.git \
+  --tag <TAG> \
+  --locked
+```
+
+For development, clone the repository instead:
+
+```bash
+git clone https://github.com/geckse/markdown-vdb.git
 cd markdown-vdb
-cargo build --release
+cargo build --release --locked
 ```
 
-The compiled binary is at `target/release/mdvdb`. Copy it to a location in your `PATH`:
+The binary is written to `target/release/mdvdb` (`mdvdb.exe` on Windows).
+
+### Source-build requirements
+
+Use a current stable Rust toolchain. Native dependencies also require a C/C++ toolchain and CMake.
+Typical setup commands are:
 
 ```bash
-# macOS / Linux
-sudo cp target/release/mdvdb /usr/local/bin/
-
-# Or add the target directory to PATH
-export PATH="$(pwd)/target/release:$PATH"
-```
-
-### Build Dependencies
-
-Building from source requires:
-
-- **Rust 1.70+** (install via [rustup](https://rustup.rs/))
-- **A C compiler** (`cc` / `gcc` / `clang`) for native dependencies (`usearch`, `tiktoken-rs`)
-- **CMake** (required by `usearch` for HNSW index compilation)
-- **pkg-config** (Linux only, for system library discovery)
-
-#### Platform-Specific Notes
-
-**macOS:**
-
-Xcode Command Line Tools provide the C compiler and CMake:
-
-```bash
+# macOS
 xcode-select --install
-```
 
-Or install CMake separately via Homebrew:
-
-```bash
-brew install cmake
-```
-
-**Linux (Debian/Ubuntu):**
-
-```bash
-sudo apt-get update
+# Debian / Ubuntu
 sudo apt-get install build-essential cmake pkg-config
-```
 
-**Linux (Fedora/RHEL):**
-
-```bash
+# Fedora / RHEL
 sudo dnf install gcc gcc-c++ cmake pkg-config
 ```
 
-**Windows:**
+On Windows, install Visual Studio Build Tools with the C++ workload and CMake.
 
-Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the "C++ build tools" workload, and install [CMake](https://cmake.org/download/).
-
-## Verify Installation
-
-After installing via any method, confirm that `mdvdb` is available:
+## Verify and update
 
 ```bash
 mdvdb --version
+mdvdb --help
 ```
 
-You should see output like:
+To update, repeat the method you originally used: rerun the release installer for the newest tag,
+or rerun `cargo install --git ... --branch main --locked` for a newer development snapshot.
 
-```
-mdvdb 0.1.0
-```
+## Next steps
 
-## Next Steps
-
-- [Quick Start](./quickstart.md) -- Go from zero to your first search in 5 minutes
-- [Configuration](./configuration.md) -- Set up embedding providers and customize behavior
-- [Shell Completions](./shell-completions.md) -- Enable tab completions for your shell
-- [Command Reference](./commands/index.md) -- Browse all available commands
+- [Quick Start](./quickstart.md) — initialize, configure, ingest, and query a collection
+- [Configuration](./configuration.md) — YAML settings, secrets, and embedding providers
+- [Shell Completions](./shell-completions.md) — enable completions for your shell
+- [Command Reference](./commands/index.md) — browse CLI commands

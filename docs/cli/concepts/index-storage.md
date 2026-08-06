@@ -6,13 +6,17 @@ category: "concepts"
 
 # Index Storage
 
-mdvdb stores all index data in a `.markdownvdb/` directory at the project root. This directory contains a binary index file for vector search and metadata, plus a full-text search directory for lexical search. The index is designed for fast loading via memory mapping and safe updates via atomic writes.
+mdvdb keeps project configuration and generated local state in `.markdownvdb/`. The primary
+binary index stores vectors and metadata, Tantivy owns the lexical index, and disposable sidecars
+hold Shard-local analysis. The primary index is designed for fast memory-mapped loading and safe
+replacement through atomic writes.
 
 ## Directory Structure
 
 ```
 .markdownvdb/
-  .config              # Project configuration (dotenv format)
+  config.yaml          # Project settings (YAML; keep this)
+  .env                 # Optional project secrets (keep this private)
   index                # Binary index file (vectors + metadata)
   fts/                 # Full-text search directory (Tantivy segments)
     meta.json          # Tantivy meta file
@@ -22,19 +26,26 @@ mdvdb stores all index data in a `.markdownvdb/` directory at the project root. 
     *.pos              # Position data
     *.term             # Term dictionary
     *.fast             # Fast fields (columnar data)
+  cache/
+    shards/*.json      # Disposable Shard-local communities and Topics
+  modules.lock         # Cross-process computed-module coordination
 ```
 
 ### `index` (Binary Index File)
 
-The main index file contains all vector embeddings and document metadata in a single binary file. It uses a custom format with three regions: a fixed header, an rkyv-serialized metadata region, and a usearch HNSW graph.
+The main index file contains document and semantic-edge vectors plus indexed document metadata.
+It uses a custom format with three regions: a fixed header, an rkyv-serialized metadata region,
+and a usearch HNSW graph. The lexical index and Shard sidecars remain separate.
 
 ### `fts/` (Full-Text Search Directory)
 
 The FTS directory contains a [Tantivy](https://github.com/quickwit-oss/tantivy) full-text search index. Tantivy uses a segment-based architecture similar to Lucene, with BM25 scoring for lexical search. This directory is managed entirely by Tantivy and is rebuilt during ingestion.
 
-### `.config` (Project Configuration)
+### `config.yaml` and `.env`
 
-The `.config` file uses dotenv syntax to store project-level configuration. See [Configuration](../configuration.md) for details.
+`config.yaml` stores non-secret project settings. `.env` stores optional project credentials.
+Computed-field declarations live separately in `.markdownvdb.schema.yml` at the collection root.
+See [Configuration](../configuration.md) and [Computed Fields](./computed-fields.md).
 
 ## Binary Index Format
 
@@ -78,18 +89,20 @@ block-beta
 
 ### rkyv Metadata Region
 
-The metadata region contains all document and chunk data, serialized using [rkyv](https://rkyv.org/) for zero-copy deserialization. When loaded via memory mapping, metadata fields can be accessed directly from the mapped memory without full deserialization.
+The metadata region contains document and chunk data serialized with
+[rkyv](https://rkyv.org/). mdvdb validates and deserializes that region when opening the index.
 
 The metadata includes:
 
 | Field | Description |
 |-------|-------------|
 | `chunks` | Map from chunk ID (e.g., `"path.md#0"`) to stored chunk data (content, headings, line ranges) |
-| `files` | Map from relative file path to stored file data (content hash, frontmatter, file size, chunk IDs) |
+| `files` | Map from relative file path to stored file data (content hashes, frontmatter, file size, chunk IDs, computed-field bookkeeping) |
 | `embedding_config` | Provider name, model name, and vector dimensions used to build this index |
 | `last_updated` | Unix timestamp (seconds since epoch) of the last index save |
 | `schema` | Auto-inferred metadata schema (field names, types, value distributions) |
-| `cluster_state` | K-means cluster assignments and centroids |
+| `cluster_state` | Automatic community assignments (Leiden by default; K-means optional) |
+| `custom_cluster_state` | Multi-label user Topic definitions, centroids, and memberships |
 | `link_graph` | Extracted links between documents (outgoing, incoming, edge data) |
 | `file_mtimes` | File modification timestamps for time decay scoring |
 | `scoped_schemas` | Path-scoped schemas for directory-level metadata inference |
@@ -98,7 +111,8 @@ When `MDVDB_INDEX_COMPRESSION` is `true` (the default), the metadata region is c
 
 ### usearch HNSW Region
 
-The HNSW (Hierarchical Navigable Small World) region contains the vector index for approximate nearest-neighbor search. It is serialized by the `usearch` library and loaded directly from the memory-mapped file.
+The HNSW (Hierarchical Navigable Small World) region contains the vector index for approximate
+nearest-neighbor search. It is serialized and loaded by `usearch`.
 
 Key HNSW parameters (set at index creation):
 
@@ -122,14 +136,14 @@ F16 quantization halves memory usage with negligible impact on search quality fo
 
 ## Memory Mapping
 
-mdvdb loads the index file using **memory mapping** (`memmap2`). Instead of reading the entire file into memory, the operating system maps the file into the process's virtual address space. Pages are loaded on demand by the OS page cache.
+mdvdb opens the binary index through **memory mapping** (`memmap2`) so its regions can be
+validated and handed to the metadata and HNSW decoders without a separate whole-file read.
 
 ### Benefits
 
-- **Fast startup** -- opening a large index is nearly instantaneous because no data is copied.
-- **Low memory usage** -- only pages that are actually accessed are loaded into physical memory.
+- **Efficient file access** -- the OS can page the mapped index regions as they are read.
 - **OS-managed caching** -- the operating system manages the page cache, automatically evicting pages under memory pressure.
-- **Shared across processes** -- multiple mdvdb processes reading the same index share physical memory pages.
+- **Shared file cache** -- multiple processes can benefit from the operating system's cached pages.
 
 ### How It Works
 
@@ -140,13 +154,13 @@ flowchart LR
     CACHE -->|"read from disk"| DISK["index file<br/>on disk"]
     CACHE -->|"cached pages"| VM
 
-    style PROCESS fill:#e3f2fd
-    style DISK fill:#fff9c4
+    style PROCESS fill:#e3f2fd,color:#111827
+    style DISK fill:#fff9c4,color:#111827
 ```
 
 1. `memmap2::Mmap::map()` creates a memory-mapped view of the index file.
 2. The header is read to locate the metadata and HNSW regions.
-3. When metadata or HNSW data is accessed, the OS transparently loads the relevant pages from disk into the page cache.
+3. The metadata and HNSW regions are validated and decoded by their respective loaders.
 4. Subsequent accesses to the same pages hit the cache without disk I/O.
 
 ## Atomic Writes
@@ -163,7 +177,8 @@ This pattern ensures that the `index` file is always either the complete old ver
 
 - **Crash safety** -- a power failure or process kill during ingestion does not corrupt the index.
 - **Read safety** -- other processes reading the index via memory mapping see a consistent snapshot.
-- **No locking required** -- the rename operation is atomic on all supported platforms (Linux, macOS, Windows NTFS).
+- **Coordinated mutations** -- atomic replacement prevents partial generations; mdvdb also uses
+  project lock files to coordinate cross-process index and computed-module writes.
 
 ## Concurrency
 
@@ -179,17 +194,18 @@ At runtime, the index is protected by a `parking_lot::RwLock`:
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_INDEX_DIR` | `.markdownvdb` | Directory for index files (relative to project root) |
-| `MDVDB_VECTOR_QUANTIZATION` | `f16` | Vector precision: `f16` or `f32` |
-| `MDVDB_INDEX_COMPRESSION` | `true` | Enable zstd compression of metadata region |
+| YAML key | Shell override | Default | Description |
+|----------|----------------|---------|-------------|
+| `index.quantization` | `MDVDB_VECTOR_QUANTIZATION` | `f16` | Vector precision: `f16` or `f32` |
+| `index.compression` | `MDVDB_INDEX_COMPRESSION` | `true` | Enable zstd compression of metadata region |
 
 ## Index Lifecycle
 
 ### Creation
 
-An index is created on the first `mdvdb ingest` run. The `.markdownvdb/` directory is created automatically if it does not exist. Running `mdvdb init` creates the `.markdownvdb/.config` file but does not create the index itself.
+An index is created on the first `mdvdb ingest` run. The `.markdownvdb/` directory is created
+automatically if it does not exist. Running `mdvdb init` creates
+`.markdownvdb/config.yaml` but does not create the index itself.
 
 ### Updates
 
@@ -210,14 +226,13 @@ Incremental ingestion (`mdvdb ingest`) updates the index:
 
 This is necessary when changing embedding providers, models, dimensions, or chunk settings.
 
-### Deletion
+### Safe rebuild
 
-To delete the index and start fresh:
+Rebuild generated vector, metadata, lexical, community, and Topic state without deleting project
+configuration or secrets:
 
 ```bash
-rm -rf .markdownvdb/
-mdvdb init         # Re-create config
-mdvdb ingest       # Rebuild index from scratch
+mdvdb ingest --reindex
 ```
 
 ## Diagnostics
@@ -228,13 +243,23 @@ Use `mdvdb doctor` to check the health of your index:
 mdvdb doctor
 ```
 
-Doctor checks include:
-- Index file exists and is readable
-- Magic bytes and version are valid
-- Metadata can be deserialized
-- Embedding provider is reachable
-- Vector dimensions match configuration
-- FTS index is accessible
+Doctor returns nine named checks:
+
+| Check | What it reports |
+|-------|-----------------|
+| **Config loaded** | Active provider, model, and dimensions after configuration resolution |
+| **User config** | Whether `~/.mdvdb/config.yaml` (or the `MDVDB_CONFIG_HOME` equivalent) exists |
+| **Project config** | Whether the project `.markdownvdb/` directory exists |
+| **API key** | Explicit OpenAI key presence; other provider credentials are exercised when the provider is constructed |
+| **Provider reachable** | Result of a test embedding request with a five-second timeout |
+| **Index** | Empty, healthy, or mismatched counts; healthy means `vector_count == chunk_count + edge_count` |
+| **Source directories** | Discovered source directories and Markdown file count, or the discovery error |
+| **Relations** | Dangling Relation targets, unused overlay target folders, and the unquoted-`[[...]]` YAML footgun |
+| **Shards** | Invalid definitions, missing Shard folders, and malformed local Topic definitions |
+
+Relations and Shards report repairable content/configuration problems as warnings. Some corrupt or
+incompatible storage failures can prevent the project from opening before a `DoctorResult` is
+produced; they are not separate doctor checks.
 
 Use `mdvdb status` to see index statistics:
 
@@ -242,7 +267,9 @@ Use `mdvdb status` to see index statistics:
 mdvdb status
 ```
 
-This shows document count, chunk count, vector count, file size, last updated timestamp, and embedding configuration.
+This shows document, chunk, total-vector, and semantic-edge counts; file size and last-update time;
+the stored embedding configuration; and whether the runtime embedding space is compatible. JSON
+also exposes `reindex_required` and an actionable compatibility reason when present.
 
 ## See Also
 

@@ -1,214 +1,167 @@
 ---
 title: "mdvdb init"
-description: "Initialize a new markdown-vdb project by creating a configuration file"
+description: "Create project or user-level YAML configuration"
 category: "commands"
 ---
 
 # mdvdb init
 
-Initialize a new markdown-vdb project by creating a configuration file. By default, creates a project-level config at `.markdownvdb/.config` in the current directory. With `--global`, creates a user-level config at `~/.mdvdb/config` that applies to all projects.
+Create a YAML configuration for a collection or for user-wide defaults.
 
 ## Usage
 
 ```bash
-mdvdb init [OPTIONS]
+mdvdb init [--global]
 ```
 
-## Options
+| Flag | Effect |
+|---|---|
+| `--global` | Create user defaults at `~/.mdvdb/config.yaml` instead of project config |
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--global` | `false` | Create user-level config at `~/.mdvdb/config` instead of project config |
+The standard global flags also apply. Use `mdvdb --root <PATH> init` to initialize a different
+collection root.
 
-### Option Details
+## Project initialization
 
-#### `--global`
-
-Creates a user-level configuration file at `~/.mdvdb/config` (or the path specified by `MDVDB_CONFIG_HOME`). User-level settings apply to all projects as the lowest-priority file source -- any project-level `.markdownvdb/.config` or `.env` file will override them.
-
-This is ideal for storing shared credentials (like `OPENAI_API_KEY`) or default preferences that you want across all your projects.
+Run `init` at the root of a Markdown collection:
 
 ```bash
-# Create user-level config
-mdvdb init --global
-```
-
-## Global Options
-
-These options apply to all commands. See [Commands Index](./index.md) for details.
-
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--verbose` | `-v` | Increase log verbosity (-v info, -vv debug, -vvv trace) |
-| `--root` | | Project root directory (defaults to current directory) |
-| `--no-color` | | Disable colored output |
-| `--json` | | Output results as JSON |
-
-## Project-Level Init (Default)
-
-Running `mdvdb init` without `--global` creates a `.markdownvdb/.config` file in the current directory (or the directory specified by `--root`) with a default configuration template:
-
-```bash
+cd my-notes
 mdvdb init
 ```
 
-### Generated Project Config
+It creates `.markdownvdb/config.yaml` with a starter configuration equivalent to:
 
-The generated `.markdownvdb/.config` file contains:
+```yaml
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dimensions: auto
+  batch_size: 100
+
+search:
+  limit: 10
+  min_score: 0.0
+  mode: hybrid
+  rrf_k: 60.0
+
+chunking:
+  max_tokens: 512
+  overlap_tokens: 50
+
+clustering:
+  enabled: true
+  rebalance_threshold: 50
+
+watch:
+  enabled: true
+  debounce_ms: 300
+
+sources:
+  dirs: [.]
+```
+
+Unwritten settings retain built-in defaults, including Leiden as the automatic clustering
+algorithm. Edit the YAML directly or use dotted scalar updates such as:
 
 ```bash
-# markdown-vdb configuration
-# See https://github.com/example/markdown-vdb for documentation
-
-# Embedding provider: openai, ollama, or custom
-MDVDB_EMBEDDING_PROVIDER=openai
-MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-MDVDB_EMBEDDING_DIMENSIONS=1536
-MDVDB_EMBEDDING_BATCH_SIZE=100
-
-# Source directories (comma-separated)
-MDVDB_SOURCE_DIRS=.
-
-# Chunking
-MDVDB_CHUNK_MAX_TOKENS=512
-MDVDB_CHUNK_OVERLAP_TOKENS=50
-
-# Search defaults
-MDVDB_SEARCH_DEFAULT_LIMIT=10
-MDVDB_SEARCH_MIN_SCORE=0.0
-MDVDB_SEARCH_MODE=hybrid
-MDVDB_SEARCH_RRF_K=60.0
-
-# File watching
-MDVDB_WATCH=true
-MDVDB_WATCH_DEBOUNCE_MS=300
-
-# Clustering
-MDVDB_CLUSTERING_ENABLED=true
-MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
+mdvdb config set embedding.provider ollama
+mdvdb config set embedding.model nomic-embed-text
+mdvdb config set embedding.dimensions auto
 ```
 
-### Directory Structure After Init
+After the first ingest, the directory also contains generated index data:
 
+```text
+.markdownvdb/
+├── config.yaml
+├── index
+└── fts/
 ```
-your-project/
-  .markdownvdb/
-    .config          # <-- created by mdvdb init
-```
 
-The `.markdownvdb/` directory will also contain the `index` file (binary) and `fts/` directory (Tantivy segments) after running [`mdvdb ingest`](./ingest.md).
+Features such as Shard-local analysis may later add a disposable `cache/` directory.
 
-## User-Level Init (`--global`)
+`init` creates configuration only. It does not scan, embed, or index files; run `mdvdb ingest`
+after configuring a provider.
 
-Running `mdvdb init --global` creates a `~/.mdvdb/config` file with a minimal template focused on credentials and provider defaults:
+## User defaults
 
 ```bash
 mdvdb init --global
 ```
 
-### Generated User Config
+This creates `~/.mdvdb/config.yaml`, or `$MDVDB_CONFIG_HOME/config.yaml` when
+`MDVDB_CONFIG_HOME` is set. The generated file is intentionally minimal:
 
-The generated `~/.mdvdb/config` file contains:
+```yaml
+# Values here apply unless project config.yaml overrides them.
+# Credentials belong in .env, not YAML.
+
+# embedding:
+#   provider: openai
+#   model: text-embedding-3-small
+#   dimensions: auto
+```
+
+User YAML supplies defaults. Project `.markdownvdb/config.yaml` is deep-merged over it, and shell
+`MDVDB_*` overrides have the highest settings priority.
+
+Do not store API keys in either YAML file. Put shared credentials in `~/.mdvdb/.env`, or write them
+through stdin:
 
 ```bash
-# mdvdb user-level configuration
-# Values here apply to all projects unless overridden by project .markdownvdb
-
-# API credentials
-# OPENAI_API_KEY=sk-...
-
-# Default embedding provider
-# MDVDB_EMBEDDING_PROVIDER=openai
-# MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-# MDVDB_EMBEDDING_DIMENSIONS=1536
-
-# Ollama host (if using Ollama)
-# OLLAMA_HOST=http://localhost:11434
+printf '%s' "$OPENAI_API_KEY" \
+  | mdvdb config --global secret set OPENAI_API_KEY --stdin
 ```
 
-Note that user-level config values are commented out by default. Uncomment and set the values you want to apply globally.
+See [Configuration](../configuration.md) for the full settings and secret precedence rules.
 
-### Config Resolution Priority
+## Existing and legacy configurations
 
-User-level config (`~/.mdvdb/config`) has the **lowest priority** among file sources. The full resolution order is:
+`init` never overwrites an existing configuration. It returns `ConfigAlreadyExists` when it finds:
 
-1. **Shell environment variables** (highest priority)
-2. **`.markdownvdb/.config`** (project config)
-3. **`.markdownvdb`** (legacy flat file)
-4. **`.env`** (shared secrets)
-5. **`~/.mdvdb/config`** (user-level defaults)
-6. **Built-in defaults** (lowest priority)
+- `.markdownvdb/config.yaml`
+- legacy `.markdownvdb/.config`
+- a legacy flat `.markdownvdb` file
+- an existing user `config.yaml` for `--global`
 
-See [Configuration](../configuration.md) for the complete config resolution documentation.
+Loading a legacy dotenv configuration automatically migrates recognized settings to YAML,
+preserves secrets in `.env`, and retains the old file as a backup. Review the migrated files
+instead of deleting the old configuration before migration.
 
-## Human-Readable Output
+## Output
 
-### Project Init
+On success, `init` prints the created project directory or user config path. It has no distinct
+JSON response body; use the following commands to verify the result:
 
+```bash
+mdvdb config --json
+mdvdb doctor --json
 ```
-  ✓ Initialized
-
-  Config: /path/to/project/.markdownvdb
-  Edit it to configure your embedding provider and other settings.
-```
-
-### Global Init
-
-```
-  ✓ User config initialized
-
-  Config: /home/user/.mdvdb/config
-  Uncomment and set your API key and default settings.
-```
-
-## JSON Output
-
-The `init` command does not produce JSON output. It always prints a human-readable success message regardless of the `--json` flag. To verify the resulting configuration after init, use [`mdvdb config --json`](./config.md).
-
-## Error Handling
-
-### Config Already Exists
-
-If the configuration file already exists, `mdvdb init` returns an error instead of overwriting:
-
-```
-Error: config already exists at .markdownvdb/.config
-```
-
-This applies to both project-level and user-level (`--global`) initialization. To modify an existing config, edit the file directly.
-
-### Legacy Config Detected
-
-If a legacy flat `.markdownvdb` file exists (from an older version), project-level init also returns a "config already exists" error. To migrate, rename or remove the legacy file, then run `mdvdb init` again.
 
 ## Examples
 
 ```bash
-# Initialize a project in the current directory
+# Current directory
 mdvdb init
 
-# Initialize a project at a specific path
-mdvdb init --root /path/to/project
+# Another collection root
+mdvdb --root /path/to/notes init
 
-# Create user-level config for shared credentials
+# User-wide YAML defaults
 mdvdb init --global
 
-# Typical workflow: init, configure, ingest
+# Typical first run
 mdvdb init
-# Edit .markdownvdb/.config to set OPENAI_API_KEY
+mdvdb embedding probe
 mdvdb ingest
+mdvdb search "first query"
 ```
 
-## Related Commands
+## Related pages
 
-- [`mdvdb config`](./config.md) -- View the resolved configuration after init
-- [`mdvdb doctor`](./doctor.md) -- Verify configuration and provider connectivity
-- [`mdvdb ingest`](./ingest.md) -- Index markdown files after initializing
-- [`mdvdb status`](./status.md) -- Check index status
-
-## See Also
-
-- [Configuration](../configuration.md) -- All environment variables, config files, and resolution order
-- [Quick Start](../quickstart.md) -- Getting started from zero to first search
-- [Embedding Providers](../concepts/embedding-providers.md) -- Configure OpenAI, Ollama, or custom providers
-- [Index Storage](../concepts/index-storage.md) -- The `.markdownvdb/` directory structure
+- [Configuration](../configuration.md) — YAML, secrets, providers, and precedence
+- [Quick Start](../quickstart.md) — first collection workflow
+- [`mdvdb config`](./config.md) — inspect and mutate settings
+- [`mdvdb ingest`](./ingest.md) — build or refresh the index
+- [`mdvdb doctor`](./doctor.md) — diagnose configuration and provider issues

@@ -22,8 +22,8 @@ flowchart TD
     EMIT_SUB --> INDEX
     INDEX --> STORE["Store in Index"]
 
-    style FILE fill:#e3f2fd
-    style STORE fill:#c8e6c9
+    style FILE fill:#e3f2fd,color:#111827
+    style STORE fill:#c8e6c9,color:#111827
 ```
 
 ## Stage 1: Heading-Based Splitting
@@ -140,15 +140,15 @@ Where:
 
 ### Setting Values
 
-```bash
-# In .markdownvdb/.config or environment
-MDVDB_CHUNK_MAX_TOKENS=512
-MDVDB_CHUNK_OVERLAP_TOKENS=50
-
-# Larger chunks for long-form documents
-MDVDB_CHUNK_MAX_TOKENS=1024
-MDVDB_CHUNK_OVERLAP_TOKENS=100
+```yaml
+# .markdownvdb/config.yaml
+chunking:
+  max_tokens: 1024
+  overlap_tokens: 100
 ```
+
+For a one-off run, the equivalent shell overrides are
+`MDVDB_CHUNK_MAX_TOKENS=1024` and `MDVDB_CHUNK_OVERLAP_TOKENS=100`.
 
 After changing chunk settings, re-ingest all files to apply the new configuration:
 

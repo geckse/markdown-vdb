@@ -6,7 +6,7 @@ category: "commands"
 
 # Command Reference
 
-This page lists all available `mdvdb` commands. Click a command name for its full reference page with options, examples, and JSON output format.
+This page lists all 21 commands shown by `mdvdb --help`. Click a command name for its full reference page with options, examples, and JSON output format.
 
 ## All Commands
 
@@ -15,14 +15,18 @@ This page lists all available `mdvdb` commands. Click a command name for its ful
 | [`mdvdb search`](./search.md) | Semantic search across indexed markdown files |
 | [`mdvdb ingest`](./ingest.md) | Ingest markdown files into the index |
 | [`mdvdb status`](./status.md) | Show index status and configuration |
+| [`mdvdb info`](./info.md) | Show collection or folder stats and a reindex estimate |
 | [`mdvdb schema`](./schema.md) | Show inferred metadata schema |
 | [`mdvdb clusters`](./clusters.md) | Inspect automatic communities and manage Collection or Shard Topics |
 | [`mdvdb shards`](./shards.md) | Manage named recursive folder scopes |
 | [`mdvdb tree`](./tree.md) | Show file tree with sync status indicators |
 | [`mdvdb get`](./get.md) | Get metadata for a specific file |
+| [`mdvdb collection`](./collection.md) | Query a folder as frontmatter rows and columns (`list` alias) |
 | [`mdvdb watch`](./watch.md) | Watch for file changes and re-index automatically |
+| [`mdvdb modules`](./modules.md) | Inspect and run computed-field modules |
 | [`mdvdb init`](./init.md) | Initialize a new `.markdownvdb` config file |
 | [`mdvdb config`](./config.md) | Show resolved configuration |
+| [`mdvdb embedding`](./embedding.md) | Discover provider models and probe dimensions |
 | [`mdvdb doctor`](./doctor.md) | Run diagnostic checks on config, provider, and index |
 | [`mdvdb links`](./links.md) | Show links originating from a file |
 | [`mdvdb backlinks`](./backlinks.md) | Show backlinks pointing to a file |
@@ -41,6 +45,7 @@ These commands form the primary usage loop. See [Search Modes](../concepts/searc
 | [`search`](./search.md) | Find relevant content using semantic, lexical, or hybrid search |
 | [`ingest`](./ingest.md) | Index markdown files (supports incremental and full re-indexing) |
 | [`status`](./status.md) | Check how many files, chunks, and vectors are in the index |
+| [`collection`](./collection.md) | Query a folder as a filterable and pageable frontmatter table |
 
 ### Setup & Configuration
 
@@ -50,6 +55,7 @@ See [Configuration](../configuration.md) for the full environment variable and c
 |---------|---------|
 | [`init`](./init.md) | Create a `.markdownvdb` config file (project or global) |
 | [`config`](./config.md) | Display the fully resolved configuration with all values |
+| [`embedding`](./embedding.md) | Discover models and verify provider dimensions with a live probe |
 | [`shards`](./shards.md) | Create and manage project-local named folder scopes |
 | [`doctor`](./doctor.md) | Diagnose issues with config, embedding provider, and index |
 
@@ -60,6 +66,7 @@ See [Clustering](../concepts/clustering.md) for how clusters are computed and [I
 | Command | Purpose |
 |---------|---------|
 | [`schema`](./schema.md) | View auto-inferred frontmatter metadata schema |
+| [`info`](./info.md) | View scoped file, chunk, vector, sync, and reindex statistics |
 | [`clusters`](./clusters.md) | View automatic communities or manage independent scoped Topics |
 | [`tree`](./tree.md) | View file tree with per-file sync status (New/Modified/Synced/Deleted) |
 | [`get`](./get.md) | Retrieve metadata and frontmatter for a single file |
@@ -83,6 +90,7 @@ See [Ignore Files](../concepts/ignore-files.md) for how the watcher determines w
 | Command | Purpose |
 |---------|---------|
 | [`watch`](./watch.md) | Monitor filesystem for changes and re-index automatically |
+| [`modules`](./modules.md) | Validate, recompute, and inspect Formula/Lookup/Rollup data |
 
 ## Hidden Commands
 
@@ -95,7 +103,7 @@ The following commands are available but hidden from `--help` output:
 
 ## Global Options
 
-Every command accepts these global flags. See [Global Options](../index.md#global-options) for details.
+Every subcommand accepts the first four global flags below. `--version` is a top-level flag and must be used as `mdvdb --version`. See [Global Options](../index.md#global-options) for details.
 
 | Flag | Short | Description |
 |------|-------|-------------|
@@ -103,7 +111,7 @@ Every command accepts these global flags. See [Global Options](../index.md#globa
 | `--root <PATH>` | | Project root directory (defaults to current directory) |
 | `--no-color` | | Disable colored output |
 | `--json` | | Output results as JSON |
-| `--version` | | Print version information with logo |
+| `--version` | | Print version information with logo (top level only) |
 
 ## See Also
 
@@ -111,6 +119,6 @@ Every command accepts these global flags. See [Global Options](../index.md#globa
 - [Configuration](../configuration.md) - Environment variables and config file reference
 - [JSON Output Reference](../json-output.md) - JSON schemas for `--json` output
 - [Search Modes](../concepts/search-modes.md) - Hybrid, semantic, lexical, and edge search
-- [Embedding Providers](../concepts/embedding-providers.md) - OpenAI, Ollama, and custom providers
+- [Embedding Providers](../concepts/embedding-providers.md) - Supported local and cloud embedding backends
 - [Link Graph](../concepts/link-graph.md) - Link extraction, backlinks, and graph traversal
 - [Time Decay](../concepts/time-decay.md) - Time-based scoring for search results

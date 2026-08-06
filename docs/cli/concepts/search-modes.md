@@ -60,11 +60,11 @@ flowchart TD
     EXPAND -->|no| RESULT
     APPLY_EXPAND --> RESULT["Final Results"]
 
-    style Q fill:#e3f2fd
-    style RRF fill:#fff9c4
-    style RNORM fill:#fff9c4
-    style RESULT fill:#c8e6c9
-    style ERES fill:#c8e6c9
+    style Q fill:#e3f2fd,color:#111827
+    style RRF fill:#fff9c4,color:#111827
+    style RNORM fill:#fff9c4,color:#111827
+    style RESULT fill:#c8e6c9,color:#111827
+    style ERES fill:#c8e6c9,color:#111827
 ```
 
 ## Hybrid Mode (Default)
@@ -113,7 +113,10 @@ mdvdb search --mode hybrid "authentication patterns"
 
 ## Semantic Mode
 
-Semantic mode uses only vector-based retrieval. The query is embedded using the configured provider (OpenAI, Ollama, or Custom), then the nearest neighbors are found in the HNSW index using cosine similarity.
+Semantic mode uses only vector-based retrieval. The query is embedded using the configured
+provider, then the nearest neighbors are found in the HNSW index using cosine similarity. mdvdb
+supports OpenAI, OpenRouter, Gemini, Azure OpenAI, AWS Bedrock, Hugging Face, Ollama, and custom
+OpenAI-compatible endpoints.
 
 ### How It Works
 
@@ -243,15 +246,15 @@ Edge mode returns results in the `edge_results` array rather than the standard `
 
 ### Setting the Default Mode
 
-The default search mode is set via the `MDVDB_SEARCH_MODE` environment variable:
+Set the persistent default in YAML:
 
-```bash
-# In .markdownvdb/.config or environment
-MDVDB_SEARCH_MODE=hybrid    # default
-MDVDB_SEARCH_MODE=semantic
-MDVDB_SEARCH_MODE=lexical
-MDVDB_SEARCH_MODE=edge
+```yaml
+# .markdownvdb/config.yaml
+search:
+  mode: hybrid # hybrid | semantic | lexical | edge
 ```
+
+`MDVDB_SEARCH_MODE` is the equivalent shell override.
 
 The `--mode` flag (or shorthands `--semantic`, `--lexical`, `--edge-search`) overrides this default on a per-query basis.
 

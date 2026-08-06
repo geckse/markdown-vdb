@@ -6,7 +6,9 @@ category: "commands"
 
 # mdvdb backlinks
 
-Show files that link TO a specific file. Unlike [`mdvdb links`](./links.md) which shows both outgoing and incoming links, `backlinks` focuses exclusively on incoming links -- files in the index that contain a link pointing to the specified file.
+Show files that link TO a specific file. Unlike [`mdvdb links`](./links.md), which shows both
+directions, `backlinks` focuses on incoming graph connections. A backlink may come from a body
+Markdown link, a body wikilink, or a whole-value frontmatter Relation.
 
 ## Usage
 
@@ -44,14 +46,16 @@ When run without `--json`, backlinks displays a formatted list of files linking 
 ```
   ● Backlinks to docs/api/endpoints.md
 
-  Incoming: 3 incoming links
+  Incoming: 4 incoming links
 
   ├── docs/architecture.md "API Endpoints"
   │   line 12
   ├── docs/index.md "Endpoints Reference"
   │   line 34
-  └── docs/api/overview.md "Endpoints" [wikilink]
-      line 8
+  ├── docs/api/overview.md "Endpoints" [wikilink]
+  │   line 8
+  └── projects/relaunch.md "API Endpoints" (reference)
+      frontmatter
 ```
 
 If no files link to the target:
@@ -67,8 +71,10 @@ If no files link to the target:
 | Element | Description |
 |---------|-------------|
 | **Source file** | The file that contains a link pointing to the target |
-| **Link text** | The display text of the markdown link (in quotes) |
-| **Line number** | The line number in the source file where the link appears |
+| **Link text** | The display text of the body link or frontmatter Relation (in quotes) |
+| **Line number** | For a body link, the 1-based line where it appears |
+| `frontmatter` | Location shown instead of a line number for a frontmatter Relation |
+| `(field)` | Dimmed badge naming the originating frontmatter Relation field |
 | `[wikilink]` | Blue badge indicating the link uses `[[wikilink]]` syntax |
 
 ## Examples
@@ -101,7 +107,8 @@ mdvdb backlinks docs/readme.md -vv
         "target": "docs/api/endpoints.md",
         "text": "API Endpoints",
         "line_number": 12,
-        "is_wikilink": false
+        "is_wikilink": false,
+        "field": null
       },
       "state": "Valid"
     },
@@ -111,7 +118,8 @@ mdvdb backlinks docs/readme.md -vv
         "target": "docs/api/endpoints.md",
         "text": "Endpoints Reference",
         "line_number": 34,
-        "is_wikilink": false
+        "is_wikilink": false,
+        "field": null
       },
       "state": "Valid"
     },
@@ -121,12 +129,24 @@ mdvdb backlinks docs/readme.md -vv
         "target": "docs/api/endpoints.md",
         "text": "Endpoints",
         "line_number": 8,
-        "is_wikilink": true
+        "is_wikilink": true,
+        "field": null
+      },
+      "state": "Valid"
+    },
+    {
+      "entry": {
+        "source": "projects/relaunch.md",
+        "target": "docs/api/endpoints.md",
+        "text": "API Endpoints",
+        "line_number": 0,
+        "is_wikilink": false,
+        "field": "reference"
       },
       "state": "Valid"
     }
   ],
-  "total_backlinks": 3
+  "total_backlinks": 4
 }
 ```
 
@@ -142,7 +162,7 @@ mdvdb backlinks docs/readme.md -vv
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `entry` | `LinkEntry` | The link entry with source, target, text, and line number |
+| `entry` | `LinkEntry` | The link entry with source, target, text, location, syntax, and Relation origin |
 | `state` | `string` | `"Valid"` if the source file exists in the index, `"Broken"` if not |
 
 ### LinkEntry Fields
@@ -151,9 +171,10 @@ mdvdb backlinks docs/readme.md -vv
 |-------|------|-------------|
 | `source` | `string` | Source file path -- the file containing the link (relative to project root) |
 | `target` | `string` | Target file path -- the queried file (resolved relative to project root) |
-| `text` | `string` | Display text of the markdown link |
-| `line_number` | `number` | Line number in the source file (1-based) |
+| `text` | `string` | Display text of the body link or frontmatter Relation |
+| `line_number` | `number` | Body links use a 1-based source line; frontmatter Relations use the `0` sentinel |
 | `is_wikilink` | `boolean` | `true` if the link uses `[[wikilink]]` syntax |
+| `field` | `string \| null` | Originating frontmatter field for a Relation; always serialized and `null` for body links |
 
 ## Backlinks vs Links
 
@@ -170,8 +191,12 @@ Use `mdvdb backlinks` when you want a focused answer to "who links to this file?
 
 - The `backlinks` command opens the index in **read-only** mode. It never modifies the index.
 - Backlinks are computed from the link graph built during ingestion. Run [`mdvdb ingest`](./ingest.md) to populate the link graph.
-- Both standard markdown links (`[text](target.md)`) and wikilinks (`[[target]]`) are tracked as backlinks.
-- Link targets are resolved relative to the source file's directory, so a link `[text](../api/endpoints.md)` in `docs/guides/setup.md` correctly resolves to `docs/api/endpoints.md`.
+- Body Markdown links and wikilinks are tracked, as are whole-value link-shaped strings and
+  string-list elements in frontmatter. Relation entries identify their originating `field`.
+- Body link targets are resolved relative to the source file's directory, so
+  `[text](../api/endpoints.md)` in `docs/guides/setup.md` resolves to `docs/api/endpoints.md`.
+  Relation targets use the collection-root, overlay `target:`, and source-directory rules in
+  [Relations](../concepts/relations.md).
 - The `backlinks` array contains `ResolvedLink` objects (with an `entry` and `state` field), the same type used in the `outgoing` array of [`mdvdb links`](./links.md).
 - For multi-hop backlink traversal (e.g., "what links to the files that link to this file?"), use [`mdvdb links --depth 2`](./links.md) which includes both outgoing and incoming multi-hop trees.
 

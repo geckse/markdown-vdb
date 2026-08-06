@@ -1,500 +1,347 @@
 ---
 title: "Configuration"
-description: "Complete reference for all environment variables, config files, and resolution order"
+description: "Configure mdvdb with YAML, environment overrides, and separate secret files"
 category: "guides"
 ---
 
 # Configuration
 
-> Current releases use YAML at `.markdownvdb/config.yaml`. Legacy dotenv files described below
-> are migrated and remain documented for compatibility.
+mdvdb keeps ordinary settings in YAML and credentials in `.env` files. A project initialized with
+`mdvdb init` has this layout:
+
+```text
+my-notes/
+├── .markdownvdb/
+│   ├── config.yaml   # project settings
+│   ├── .env          # optional project credentials; never YAML
+│   ├── index         # generated vector/metadata index
+│   ├── fts/          # generated BM25 segments
+│   └── cache/        # optional disposable derived state
+└── ... Markdown files ...
+```
+
+User defaults live at `~/.mdvdb/config.yaml`; user-level credentials live at
+`~/.mdvdb/.env`. Set `MDVDB_CONFIG_HOME` to replace the `~/.mdvdb` directory.
+
+## Resolution and merging
+
+Ordinary settings resolve in this order, from highest to lowest priority:
+
+1. Shell `MDVDB_*` environment overrides
+2. Project `.markdownvdb/config.yaml`
+3. User `~/.mdvdb/config.yaml`
+4. Built-in defaults
+
+User and project YAML are deep-merged: mappings merge key by key, while a higher-priority scalar
+or sequence replaces the lower-priority value. Set `MDVDB_NO_USER_CONFIG=1` to skip user settings.
+
+Credentials and connection secrets have their own precedence:
+
+1. Shell environment
+2. `<project>/.env`
+3. `<project>/.markdownvdb/.env`
+4. `~/.mdvdb/.env`
+5. Legacy `~/.mdvdb/config`
+
+Only values already present in the shell may act as `MDVDB_*` overrides. `MDVDB_*` entries loaded
+from `.env` are discarded; put ordinary settings in YAML.
+
+Legacy project dotenv configurations are migrated to `config.yaml` when loaded. Non-`MDVDB_*`
+values are preserved in a sibling `.env`, and the old config is retained as a backup. New
+documentation and automation should use YAML directly.
+
+## Canonical YAML shape
+
+Every section is optional. Omitted values use the next lower-priority source or the built-in
+default.
+
+```yaml
+# .markdownvdb/config.yaml
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dimensions: auto
+  batch_size: 100
+  # endpoint: https://example.test/v1/embeddings
+
+search:
+  limit: 10
+  min_score: 0.0
+  mode: hybrid          # hybrid | semantic | lexical | edge
+  rrf_k: 60.0
+  bm25_norm_k: 1.5
+  boost_links: false
+  boost_hops: 1
+  expand_graph: 0
+  expand_limit: 3
+  decay:
+    enabled: false
+    half_life: 90
+    include: []
+    exclude: []
+
+chunking:
+  max_tokens: 512
+  overlap_tokens: 50
+
+clustering:
+  enabled: true
+  algorithm: leiden    # leiden | kmeans
+  knn: 15
+  resolution: 1.0
+  min_cluster_size: 2
+  rebalance_threshold: 50
+  granularity: 1.0     # K-means fallback only
+  topics:
+    min_similarity: 0.30
+  custom: []
+
+watch:
+  enabled: true
+  debounce_ms: 300
+
+index:
+  quantization: f16    # f16 | f32
+  compression: true
+  edge_embeddings: true
+  edge_boost_weight: 0.15
+  edge_cluster_rebalance: 50
+
+sources:
+  dirs: [.]
+  ignore: []
+```
+
+`.gitignore`, `.mdvdbignore`, built-in directory exclusions, and `sources.ignore` all participate
+in discovery. Paths are relative to the collection root.
+
+## Embedding providers
+
+Provider and model are independent: model identifiers are opaque provider-native strings. Use
+`dimensions: auto` unless you need to pin a known positive dimension.
+
+| Provider | `embedding.provider` | Credential / connection |
+|---|---|---|
+| OpenAI | `openai` | `OPENAI_API_KEY`; optional `embedding.endpoint` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` |
+| Google Gemini | `gemini` | `GEMINI_API_KEY` |
+| Azure OpenAI | `azure` | `AZURE_OPENAI_ENDPOINT` plus API key or bearer token |
+| AWS Bedrock | `bedrock` | Bedrock bearer token, AWS credentials, or a profile |
+| Hugging Face | `huggingface` | `HF_TOKEN` for serverless; optional for private endpoints |
+| Ollama | `ollama` | `OLLAMA_HOST`, default `http://localhost:11434` |
+| OpenAI-compatible | `custom` | Exact `embedding.endpoint`; optional bearer token |
+
+### OpenAI
+
+```yaml
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dimensions: auto
+```
+
+```dotenv
+OPENAI_API_KEY=...
+```
+
+### Ollama
+
+```yaml
+embedding:
+  provider: ollama
+  model: nomic-embed-text
+  dimensions: auto
+```
+
+```dotenv
+# Optional; this is the default
+OLLAMA_HOST=http://localhost:11434
+```
+
+### OpenAI-compatible endpoint
+
+```yaml
+embedding:
+  provider: custom
+  model: provider-native-model-id
+  dimensions: auto
+  endpoint: https://embeddings.example.test/v1/embeddings
+```
+
+Azure authentication mode, Gemini purpose values, Hugging Face endpoint behavior, and Bedrock
+request codecs use nested provider options. See the
+[provider transport guide](https://github.com/geckse/markdown-vdb/blob/main/docs/embedding-providers.md)
+for those schemas.
+
+Inspect live models when the provider exposes a catalog, or make a minimal inference to resolve
+dimensions:
+
+```bash
+mdvdb embedding models --json
+mdvdb embedding models --provider openrouter --json
+mdvdb embedding probe --json
+```
+
+Catalog discovery is advisory, not an allowlist. Changing provider, model, dimensions, endpoint,
+purpose, or codec changes the embedding space; run `mdvdb ingest --reindex` before semantic search
+or incremental ingestion continues. The previous on-disk generation remains intact if probing or
+replacement fails.
+
+## Secrets
+
+Never put credentials in `config.yaml`. Either export them in the shell, edit an appropriate
+`.env`, or use the stdin-only secret command:
+
+```bash
+# Project-local .markdownvdb/.env
+printf '%s' "$OPENAI_API_KEY" \
+  | mdvdb config secret set OPENAI_API_KEY --stdin
+
+# Shared ~/.mdvdb/.env
+printf '%s' "$OPENAI_API_KEY" \
+  | mdvdb config --global secret set OPENAI_API_KEY --stdin
+
+# Remove an entry
+mdvdb config secret unset OPENAI_API_KEY
+```
+
+Supported names are:
+
+```text
+OPENAI_API_KEY
+OPENROUTER_API_KEY
+GEMINI_API_KEY
+AZURE_OPENAI_API_KEY
+AZURE_OPENAI_ACCESS_TOKEN
+HF_TOKEN
+AWS_BEARER_TOKEN_BEDROCK
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_SESSION_TOKEN
+OLLAMA_HOST
+```
+
+## Search, graph, and decay examples
+
+```yaml
+search:
+  mode: hybrid
+  limit: 20
+  min_score: 0.2
+  boost_links: true
+  boost_hops: 2
+  expand_graph: 1
+  expand_limit: 5
+  decay:
+    enabled: true
+    half_life: 30
+    include: [memory/daily]
+    exclude: [memory/pinned]
+```
+
+Decay applies `0.5^(age_days / half_life)` to eligible result scores. Exclusions take precedence
+over inclusions. Per-query flags such as `--decay`, `--decay-half-life`, `--boost-links`, and
+`--expand` override the defaults for one search.
+
+## Leiden communities and Topics
+
+Leiden community detection is the default automatic clustering algorithm. K-means remains an
+optional fallback.
+
+Topics are independent, user-defined semantic groupings. A document can belong to multiple Topics:
+
+```yaml
+clustering:
+  algorithm: leiden
+  knn: 15
+  resolution: 1.0
+  min_cluster_size: 2
+  topics:
+    min_similarity: 0.30
+  custom:
+    - name: Reliability
+      description: Incidents, recovery, and resilience work
+      seeds: [incident, rollback, failover]
+      threshold: 0.35
+```
+
+Prefer `mdvdb clusters add|update|remove|list` for Topic mutations so writes are locked and atomic.
+Run ingest after changing a Topic so its centroid and assignments can be computed.
 
 ## Project-local Shards
 
-Named Shards are the one project-local configuration domain that is intentionally not merged with
-user defaults. This prevents a Shard from another project appearing in the current Collection.
+Shards are named recursive folder lenses over one shared collection index. They are deliberately
+read only from the raw project config and never inherited from user YAML:
 
 ```yaml
 shards:
   research:
     name: Research
-    path: work/research
+    path: notes/research
     topics:
       - name: Methods
-        description: Research methods and experiments
+        description: Research methods and evaluation
         seeds: [methodology, experiment]
         threshold: 0.35
-  papers:
-    name: Papers
-    path: work/research/papers
 ```
 
-The key (`research`) is an immutable kebab-case ID. `name` and `path` can be updated through
-[`mdvdb shards`](./commands/shards.md). Paths are collection-relative recursive folder scopes:
-they do not create another index or isolate links. Shard, topic, and `config set` mutations share
-an advisory `.markdownvdb/config.lock` and preserve unrelated YAML keys.
+Use [`mdvdb shards`](./commands/shards.md) for CRUD. Shard-local Topics do not inherit from the
+Collection or from ancestor, sibling, or child Shards. Derived Shard analysis is disposable cache;
+document embeddings and link topology remain in the shared index.
 
-The optional `topics` list belongs only to that Shard. It uses the same definition shape as
-`clustering.custom`, but Collection, parent-Shard, and sibling Topics are not inherited. Topic names
-need only be unique inside their owner. Automatic clustering settings and
-`clustering.topics.min_similarity` remain Collection-wide. During Shard-local Leiden analysis,
-the configured `clustering.knn` is an upper bound: the effective KNN is capped at
-`max(2, ceil(sqrt(document_count)))` to preserve meaningful communities in small Shards. This
-adaptive cap does not change Collection clustering.
+## Schema overlays are separate
 
-Shard graph analysis writes only disposable derived state to
-`.markdownvdb/cache/shards/<ID>.json`. These files can be removed safely and never contain document
-embeddings or graph topology. New or changed Shard Topic definitions need one ingest to create
-their centroids; read-only graph and cluster commands never contact an embedding provider.
+`.markdownvdb.schema.yml` is not runtime configuration. It annotates inferred frontmatter fields
+and declares Relation, Formula, Lookup, and Rollup columns. Computed values are materialized into
+Markdown frontmatter and become available to `search` filters and `collection` filtering/sorting.
+See the [Quick Start](./quickstart.md#6-add-relations-and-computed-fields) for an example.
 
-Runtime settings support YAML plus legacy dotenv-style files and environment variables. The
-sections below explain the legacy `KEY=VALUE` compatibility path as well as resolution priority.
+## Manage and inspect settings
 
-## Config Resolution Order
-
-Configuration values are resolved in a strict priority order. The first source that sets a variable wins -- later sources never override it.
-
-```mermaid
-flowchart TD
-    A["1. Shell Environment Variables"] --> B["2. Project Config<br/>.markdownvdb/.config"]
-    B --> C["3. Legacy Project Config<br/>.markdownvdb (flat file)"]
-    C --> D["4. Dotenv File<br/>.env"]
-    D --> E["5. User Config<br/>~/.mdvdb/config"]
-    E --> F["6. Built-in Defaults"]
-
-    A -.- G["Highest priority"]
-    F -.- H["Lowest priority"]
-
-    style A fill:#c8e6c9
-    style B fill:#bbdefb
-    style C fill:#bbdefb
-    style D fill:#fff9c4
-    style E fill:#ffe0b2
-    style F fill:#f8bbd0
-    style G fill:none,stroke:none,color:#388e3c
-    style H fill:none,stroke:none,color:#c62828
-```
-
-**How it works:** mdvdb uses `dotenvy` to load config files. Each file is loaded in order, but `dotenvy` never overwrites a variable that is already set. This means:
-
-1. **Shell environment** always wins -- export a variable in your shell and it takes precedence over everything.
-2. **`.markdownvdb/.config`** is tried first (new location). If it doesn't exist, the legacy flat `.markdownvdb` file is tried instead.
-3. **`.env`** is loaded as a fallback -- useful for shared secrets like `OPENAI_API_KEY` that other tools also read.
-4. **`~/.mdvdb/config`** provides user-level defaults that apply to all projects.
-5. **Built-in defaults** are used for any variable not set by any source.
-
-## Config File Format
-
-Config files use dotenv syntax -- one `KEY=VALUE` pair per line:
+Edit YAML directly or use dotted keys for scalar updates:
 
 ```bash
-# This is a comment
-MDVDB_EMBEDDING_PROVIDER=openai
-MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-MDVDB_EMBEDDING_DIMENSIONS=1536
+mdvdb config set search.limit 20
+mdvdb config set clustering.algorithm leiden
+mdvdb config unset search.min_score
 
-# Blank lines are ignored
-OPENAI_API_KEY=sk-...
+# Mutate user defaults instead
+mdvdb config --global set search.limit 20
 
-# Quotes are optional but supported
-MDVDB_SOURCE_DIRS="docs, notes"
-```
-
-Rules:
-- Lines starting with `#` are comments
-- Blank lines are ignored
-- No spaces around `=` (follow standard dotenv convention)
-- Values with commas are treated as comma-separated lists where applicable
-- Boolean values accept: `true`, `false`, `1`, `0`, `yes`, `no` (case-insensitive)
-
-## Config File Locations
-
-### Project Config (`.markdownvdb/.config`)
-
-The primary project config lives inside the `.markdownvdb/` directory:
-
-```
-my-project/
-  .markdownvdb/
-    .config          # Project configuration
-    index            # Binary index file (auto-generated)
-    fts/             # Full-text search segments (auto-generated)
-  docs/
-    ...
-```
-
-Create it with:
-
-```bash
-mdvdb init
-```
-
-This generates `.markdownvdb/.config` with commented defaults. See [mdvdb init](./commands/init.md) for details.
-
-### Legacy Config (`.markdownvdb` flat file)
-
-Earlier versions of mdvdb used a flat `.markdownvdb` file (not a directory) for configuration. This is still supported as a fallback. If `.markdownvdb/.config` exists, the legacy flat file is ignored.
-
-### User Config (`~/.mdvdb/config`)
-
-User-level configuration provides defaults that apply to all projects on your machine. This is the ideal place for API credentials and personal preferences.
-
-```
-~/.mdvdb/
-  config             # User-level configuration
-```
-
-Create it with:
-
-```bash
-mdvdb init --global
-```
-
-This generates `~/.mdvdb/config` with a commented template for API credentials and provider settings. See [mdvdb init](./commands/init.md) for details.
-
-The user config directory can be customized with the `MDVDB_CONFIG_HOME` environment variable:
-
-```bash
-export MDVDB_CONFIG_HOME=/custom/config/path
-# User config is now read from /custom/config/path/config
-```
-
-### `.env` File
-
-mdvdb also reads a `.env` file in the project root. This is useful when you share API keys with other tools that also use `.env`:
-
-```bash
-# .env
-OPENAI_API_KEY=sk-...
-```
-
-The `.env` file has lower priority than `.markdownvdb/.config`, so project-specific settings always override `.env`.
-
-## Initialization Commands
-
-### `mdvdb init`
-
-Creates `.markdownvdb/.config` in the current directory with default values:
-
-```bash
-mdvdb init
-```
-
-Generated file contents:
-
-```bash
-# markdown-vdb configuration
-MDVDB_EMBEDDING_PROVIDER=openai
-MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-MDVDB_EMBEDDING_DIMENSIONS=1536
-MDVDB_EMBEDDING_BATCH_SIZE=100
-MDVDB_SOURCE_DIRS=.
-MDVDB_CHUNK_MAX_TOKENS=512
-MDVDB_CHUNK_OVERLAP_TOKENS=50
-MDVDB_SEARCH_DEFAULT_LIMIT=10
-MDVDB_SEARCH_MIN_SCORE=0.0
-MDVDB_SEARCH_MODE=hybrid
-MDVDB_SEARCH_RRF_K=60.0
-MDVDB_WATCH=true
-MDVDB_WATCH_DEBOUNCE_MS=300
-MDVDB_CLUSTERING_ENABLED=true
-MDVDB_CLUSTERING_REBALANCE_THRESHOLD=50
-```
-
-Returns an error if `.markdownvdb/.config` or a legacy `.markdownvdb` flat file already exists.
-
-### `mdvdb init --global`
-
-Creates `~/.mdvdb/config` with a template for user-level settings:
-
-```bash
-mdvdb init --global
-```
-
-Generated file contents:
-
-```bash
-# mdvdb user-level configuration
-# Values here apply to all projects unless overridden by project .markdownvdb
-
-# API credentials
-# OPENAI_API_KEY=sk-...
-
-# Default embedding provider
-# MDVDB_EMBEDDING_PROVIDER=openai
-# MDVDB_EMBEDDING_MODEL=text-embedding-3-small
-# MDVDB_EMBEDDING_DIMENSIONS=1536
-
-# Ollama host (if using Ollama)
-# OLLAMA_HOST=http://localhost:11434
-```
-
-Returns an error if the user config file already exists.
-
-## Environment Variables Reference
-
-All configuration variables recognized by mdvdb, organized by category. Every variable can be set in any config file or as a shell environment variable.
-
-### Embedding Provider
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_EMBEDDING_PROVIDER` | `openai` | String | Embedding backend: `openai`, `ollama`, or `custom` |
-| `MDVDB_EMBEDDING_MODEL` | `text-embedding-3-small` | String | Model name passed to the provider |
-| `MDVDB_EMBEDDING_DIMENSIONS` | `1536` | Integer | Vector dimensions (must be > 0) |
-| `MDVDB_EMBEDDING_BATCH_SIZE` | `100` | Integer | Texts per embedding API call (must be > 0) |
-| `OPENAI_API_KEY` | *(none)* | String | OpenAI API key (required for `openai` provider) |
-| `OLLAMA_HOST` | `http://localhost:11434` | String | Ollama server URL |
-| `MDVDB_EMBEDDING_ENDPOINT` | *(none)* | String | Custom OpenAI-compatible endpoint URL (for `custom` provider) |
-
-See [Embedding Providers](./concepts/embedding-providers.md) for setup guides.
-
-### Source & Discovery
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_SOURCE_DIRS` | `.` | Comma-list | Directories to scan for Markdown files (relative to project root) |
-| `MDVDB_IGNORE_PATTERNS` | *(none)* | Comma-list | Additional gitignore-style patterns to exclude from scanning |
-
-Patterns from `.gitignore` and `.mdvdbignore` are always applied automatically. See [Ignore Files](./concepts/ignore-files.md).
-
-### Chunking
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_CHUNK_MAX_TOKENS` | `512` | Integer | Maximum tokens per chunk (heading-split primary, token guard secondary) |
-| `MDVDB_CHUNK_OVERLAP_TOKENS` | `50` | Integer | Token overlap when sub-splitting oversized chunks (must be < `MDVDB_CHUNK_MAX_TOKENS`) |
-
-See [Chunking](./concepts/chunking.md) for details on the chunking algorithm.
-
-### Search
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_SEARCH_DEFAULT_LIMIT` | `10` | Integer | Default number of results returned |
-| `MDVDB_SEARCH_MIN_SCORE` | `0.0` | Float | Minimum similarity score threshold (range: 0.0 to 1.0) |
-| `MDVDB_SEARCH_MODE` | `hybrid` | String | Default search mode: `hybrid`, `semantic`, `lexical`, or `edge` |
-| `MDVDB_SEARCH_RRF_K` | `60.0` | Float | Reciprocal Rank Fusion constant for hybrid mode (must be > 0) |
-| `MDVDB_BM25_NORM_K` | `1.5` | Float | BM25 saturation normalization constant (must be > 0). A BM25 score equal to this value maps to 0.5 after normalization. Higher values compress scores. |
-
-See [Search Modes](./concepts/search-modes.md) for details on each mode.
-
-### Time Decay
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_SEARCH_DECAY` | `false` | Boolean | Whether time decay is applied to search scores by default |
-| `MDVDB_SEARCH_DECAY_HALF_LIFE` | `90.0` | Float | Half-life in days (must be > 0). After this many days, a document's score is halved. |
-| `MDVDB_SEARCH_DECAY_EXCLUDE` | *(none)* | Comma-list | Path prefixes excluded from time decay (immune even when decay is enabled) |
-| `MDVDB_SEARCH_DECAY_INCLUDE` | *(none)* | Comma-list | Path prefixes where time decay applies. Empty means all files are eligible. |
-
-See [Time Decay](./concepts/time-decay.md) for details on the decay formula and path filtering.
-
-### Link Graph & Boosting
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_SEARCH_BOOST_LINKS` | `false` | Boolean | Whether link boosting is applied to search results by default |
-| `MDVDB_SEARCH_BOOST_HOPS` | `1` | Integer | Number of link-graph hops for link-boost scoring (range: 1 to 3) |
-| `MDVDB_SEARCH_EXPAND_GRAPH` | `0` | Integer | Graph expansion depth for adding linked-file results (0 = disabled, range: 0 to 3) |
-| `MDVDB_SEARCH_EXPAND_LIMIT` | `3` | Integer | Maximum number of graph-expanded results to add (range: 1 to 10) |
-
-See [Link Graph](./concepts/link-graph.md) for details on graph-based search features.
-
-### Edge Embeddings
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_EDGE_EMBEDDINGS` | `true` | Boolean | Whether to compute and store semantic edge embeddings between linked files |
-| `MDVDB_EDGE_BOOST_WEIGHT` | `0.15` | Float | Weight for edge-based boost in search scoring (range: 0.0 to 1.0) |
-| `MDVDB_EDGE_CLUSTER_REBALANCE` | `50` | Integer | Threshold for rebalancing edge clusters (must be > 0) |
-
-### Index Storage
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_VECTOR_QUANTIZATION` | `f16` | String | Vector quantization type for the HNSW index: `f16` or `f32`. `f16` uses half the memory with minimal accuracy loss. |
-| `MDVDB_INDEX_COMPRESSION` | `true` | Boolean | Whether to compress the metadata region with zstd |
-
-See [Index Storage](./concepts/index-storage.md) for details on the index file format.
-
-### File Watching
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_WATCH` | `true` | Boolean | Whether file watching is enabled |
-| `MDVDB_WATCH_DEBOUNCE_MS` | `300` | Integer | Debounce interval in milliseconds before reacting to file changes |
-
-### Clustering
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_CLUSTERING_ENABLED` | `true` | Boolean | Whether k-means document clustering is enabled |
-| `MDVDB_CLUSTERING_REBALANCE_THRESHOLD` | `50` | Integer | Number of document changes before clusters are rebalanced |
-
-See [Clustering](./concepts/clustering.md) for details on how clustering works.
-
-### Special Variables
-
-These variables control mdvdb behavior but are not part of the standard config file:
-
-| Variable | Default | Type | Description |
-|----------|---------|------|-------------|
-| `MDVDB_CONFIG_HOME` | `~/.mdvdb` | Path | Override the user-level config directory. When set, user config is read from `$MDVDB_CONFIG_HOME/config` instead of `~/.mdvdb/config`. |
-| `MDVDB_NO_USER_CONFIG` | *(none)* | Any | When set to any value, skip loading the user-level config file (`~/.mdvdb/config`). Useful for testing or CI environments. |
-| `NO_COLOR` | *(none)* | Any | Disable colored output. This is a [standard](https://no-color.org/) environment variable respected by mdvdb. Equivalent to `--no-color` flag. |
-
-## Validation Constraints
-
-mdvdb validates configuration values at load time and returns an error if any constraint is violated:
-
-| Constraint | Error |
-|------------|-------|
-| `MDVDB_EMBEDDING_DIMENSIONS` must be > 0 | `embedding_dimensions must be > 0` |
-| `MDVDB_EMBEDDING_BATCH_SIZE` must be > 0 | `embedding_batch_size must be > 0` |
-| `MDVDB_CHUNK_OVERLAP_TOKENS` must be < `MDVDB_CHUNK_MAX_TOKENS` | `chunk_overlap_tokens (N) must be less than chunk_max_tokens (M)` |
-| `MDVDB_SEARCH_MIN_SCORE` must be in [0.0, 1.0] | `search_min_score (N) must be in [0.0, 1.0]` |
-| `MDVDB_SEARCH_RRF_K` must be > 0 | `search_rrf_k must be > 0` |
-| `MDVDB_BM25_NORM_K` must be > 0 | `bm25_norm_k must be > 0` |
-| `MDVDB_SEARCH_DECAY_HALF_LIFE` must be > 0 | `search_decay_half_life must be > 0` |
-| `MDVDB_SEARCH_BOOST_HOPS` must be in [1, 3] | `search_boost_hops (N) must be in [1, 3]` |
-| `MDVDB_SEARCH_EXPAND_GRAPH` must be in [0, 3] | `search_expand_graph (N) must be in [0, 3]` |
-| `MDVDB_SEARCH_EXPAND_LIMIT` must be in [1, 10] | `search_expand_limit (N) must be in [1, 10]` |
-| `MDVDB_EDGE_BOOST_WEIGHT` must be in [0.0, 1.0] | `edge_boost_weight (N) must be in [0.0, 1.0]` |
-| `MDVDB_EDGE_CLUSTER_REBALANCE` must be > 0 | `edge_cluster_rebalance must be > 0` |
-| `MDVDB_EMBEDDING_PROVIDER` must be `openai`, `ollama`, or `custom` | `unknown embedding provider 'X': expected openai, ollama, or custom` |
-| `MDVDB_SEARCH_MODE` must be `hybrid`, `semantic`, `lexical`, or `edge` | Parse error |
-| `MDVDB_VECTOR_QUANTIZATION` must be `f16` or `f32` | `unknown vector quantization 'X': expected f16 or f32` |
-
-## Type Reference
-
-### Boolean values
-
-Boolean variables accept these values (case-insensitive):
-
-| True | False |
-|------|-------|
-| `true` | `false` |
-| `1` | `0` |
-| `yes` | `no` |
-
-### Comma-separated lists
-
-Variables of type "Comma-list" accept comma-separated values with optional whitespace:
-
-```bash
-# Both are equivalent:
-MDVDB_SOURCE_DIRS=docs,notes,wiki
-MDVDB_SOURCE_DIRS=docs, notes, wiki
-
-# Path prefixes for decay filtering:
-MDVDB_SEARCH_DECAY_EXCLUDE=archive/, legacy/
-MDVDB_SEARCH_DECAY_INCLUDE=blog/, news/
-```
-
-### Enum values
-
-Some variables accept a fixed set of values:
-
-| Variable | Valid Values |
-|----------|-------------|
-| `MDVDB_EMBEDDING_PROVIDER` | `openai`, `ollama`, `custom` |
-| `MDVDB_SEARCH_MODE` | `hybrid`, `semantic`, `lexical`, `edge` |
-| `MDVDB_VECTOR_QUANTIZATION` | `f16`, `f32` |
-
-All enum values are case-insensitive (`OpenAI`, `OPENAI`, `openai` are all valid).
-
-## Viewing Resolved Configuration
-
-To see the final resolved configuration with all values and their effective settings:
-
-```bash
+# Show the fully resolved runtime configuration
 mdvdb config
-```
-
-For machine-readable output:
-
-```bash
 mdvdb config --json
 ```
 
-See [mdvdb config](./commands/config.md) for details.
-
-## Examples
-
-### Minimal OpenAI Setup
+Environment overrides remain useful for CI and one-off commands:
 
 ```bash
-# .markdownvdb/.config
-OPENAI_API_KEY=sk-...
+MDVDB_SEARCH_MODE=lexical mdvdb search "exact identifier"
+MDVDB_NO_USER_CONFIG=1 mdvdb doctor
 ```
 
-Everything else uses defaults: `openai` provider, `text-embedding-3-small` model, 1536 dimensions.
+Common mappings include:
 
-### Ollama Local Setup
+| Environment variable | YAML key |
+|---|---|
+| `MDVDB_EMBEDDING_PROVIDER` | `embedding.provider` |
+| `MDVDB_EMBEDDING_MODEL` | `embedding.model` |
+| `MDVDB_EMBEDDING_DIMENSIONS` | `embedding.dimensions` (numeric override) |
+| `MDVDB_SOURCE_DIRS` | `sources.dirs` (comma-separated) |
+| `MDVDB_IGNORE_PATTERNS` | `sources.ignore` (comma-separated) |
+| `MDVDB_SEARCH_MODE` | `search.mode` |
+| `MDVDB_SEARCH_DEFAULT_LIMIT` | `search.limit` |
+| `MDVDB_SEARCH_DECAY` | `search.decay.enabled` |
+| `MDVDB_SEARCH_DECAY_HALF_LIFE` | `search.decay.half_life` |
+| `MDVDB_CLUSTERING_ALGORITHM` | `clustering.algorithm` |
+| `MDVDB_WATCH` | `watch.enabled` |
 
-```bash
-# .markdownvdb/.config
-MDVDB_EMBEDDING_PROVIDER=ollama
-MDVDB_EMBEDDING_MODEL=nomic-embed-text
-MDVDB_EMBEDDING_DIMENSIONS=768
-```
+## Related pages
 
-### Custom Provider (OpenAI-Compatible)
-
-```bash
-# .markdownvdb/.config
-MDVDB_EMBEDDING_PROVIDER=custom
-MDVDB_EMBEDDING_ENDPOINT=https://my-server.example.com/v1/embeddings
-MDVDB_EMBEDDING_MODEL=my-model
-MDVDB_EMBEDDING_DIMENSIONS=768
-```
-
-### Tuned Search Configuration
-
-```bash
-# .markdownvdb/.config
-MDVDB_SEARCH_MODE=hybrid
-MDVDB_SEARCH_DEFAULT_LIMIT=20
-MDVDB_SEARCH_MIN_SCORE=0.3
-MDVDB_SEARCH_RRF_K=60.0
-
-# Enable time decay for blog posts, exempt reference docs
-MDVDB_SEARCH_DECAY=true
-MDVDB_SEARCH_DECAY_HALF_LIFE=30.0
-MDVDB_SEARCH_DECAY_INCLUDE=blog/,news/
-MDVDB_SEARCH_DECAY_EXCLUDE=reference/,api/
-
-# Enable link boosting with 2-hop traversal
-MDVDB_SEARCH_BOOST_LINKS=true
-MDVDB_SEARCH_BOOST_HOPS=2
-```
-
-### Multi-Directory Project
-
-```bash
-# .markdownvdb/.config
-MDVDB_SOURCE_DIRS=docs,wiki,notes
-MDVDB_IGNORE_PATTERNS=drafts/**,*.draft.md
-```
-
-### CI/Testing Configuration
-
-```bash
-# Disable user config and file watching for CI
-export MDVDB_NO_USER_CONFIG=1
-export MDVDB_WATCH=false
-export MDVDB_CLUSTERING_ENABLED=false
-```
-
-## Related Pages
-
-- [mdvdb init](./commands/init.md) -- Create project or user config files
-- [mdvdb config](./commands/config.md) -- View resolved configuration
-- [mdvdb doctor](./commands/doctor.md) -- Validate configuration
-- [Embedding Providers](./concepts/embedding-providers.md) -- Provider setup guides
-- [Search Modes](./concepts/search-modes.md) -- Search mode details
-- [Time Decay](./concepts/time-decay.md) -- Time decay scoring
-- [Ignore Files](./concepts/ignore-files.md) -- File exclusion patterns
-- [Index Storage](./concepts/index-storage.md) -- Index directory structure
-- [Quick Start](./quickstart.md) -- Getting started guide
+- [`mdvdb init`](./commands/init.md) — create project or user YAML
+- [`mdvdb config`](./commands/config.md) — inspect configuration command behavior
+- [`mdvdb doctor`](./commands/doctor.md) — validate config, provider, and index
+- [Quick Start](./quickstart.md) — complete first-run workflow
+- [Search Modes](./concepts/search-modes.md) — retrieval behavior
+- [Time Decay](./concepts/time-decay.md) — decay semantics and path controls
+- [Ignore Files](./concepts/ignore-files.md) — discovery exclusions

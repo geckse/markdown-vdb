@@ -115,8 +115,8 @@ mdvdb orphans -vv
 
 A file is considered an orphan if it meets **both** of these conditions:
 
-1. **No outgoing links** -- the file contains no markdown links (`[text](target.md)`) or wikilinks (`[[target]]`) pointing to other indexed files.
-2. **No incoming links** -- no other indexed file contains a link pointing to this file.
+1. **No outgoing graph entries** -- the file contains no body Markdown links, body wikilinks, or whole-value frontmatter Relations. A broken target still counts as an outgoing entry.
+2. **No incoming links** -- no other indexed file contains a body link or frontmatter Relation pointing to this file.
 
 The orphan check runs against the link graph built during ingestion. Only files that have been ingested are considered. Files excluded by `.gitignore` or `.mdvdbignore` are not in the index and therefore not part of the orphan analysis.
 
@@ -125,7 +125,7 @@ The orphan check runs against the link graph built during ingestion. Only files 
 - The `orphans` command opens the index in **read-only** mode. It never modifies the index.
 - Orphan detection requires a populated link graph. Run [`mdvdb ingest`](./ingest.md) first to build the graph.
 - A file is only an orphan if it has **neither** outgoing nor incoming links. A file with outgoing links but no incoming links is **not** an orphan.
-- Links to files outside the index (broken links) do not count as outgoing connections for orphan purposes -- only links to indexed files are considered.
+- A broken link still counts as an outgoing graph entry, so a file containing only broken links is not reported as an orphan. Use [`mdvdb links`](./links.md) or [`mdvdb doctor`](./doctor.md) to find broken targets.
 - To see the full link context for a specific file, use [`mdvdb links`](./links.md).
 - To find files that link TO a specific file, use [`mdvdb backlinks`](./backlinks.md).
 

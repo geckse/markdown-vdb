@@ -6,7 +6,10 @@ category: "commands"
 
 # mdvdb links
 
-Show links originating from a specific file. Displays both outgoing links (links in this file pointing to other files) and incoming links (backlinks from other files pointing to this one). With `--depth 2` or `--depth 3`, performs multi-hop BFS traversal to show the extended link neighborhood as a tree.
+Show graph connections for a specific file. These include body Markdown links, body wikilinks, and
+whole-value frontmatter Relations. The command displays both outgoing connections and incoming
+backlinks. With `--depth 2` or `--depth 3`, it performs multi-hop traversal and returns the extended
+neighborhood as a tree.
 
 ## Usage
 
@@ -34,12 +37,12 @@ Controls how many hops of links to follow from the target file.
 
 | Depth | Behavior | Output Format |
 |-------|----------|---------------|
-| `1` (default) | Shows only direct outgoing and incoming links | Flat list with link metadata (text, line number, state) |
+| `1` (default) | Shows only direct outgoing and incoming links | Flat list with link metadata (text, body line or frontmatter location, Relation field, state) |
 | `2` | Shows direct links plus links from those linked files | Tree structure with nested children |
 | `3` | Shows 3 levels of link traversal | Tree structure with deeper nesting |
 
-- **Depth 1** returns a `LinksOutput` wrapping a `LinkQueryResult` -- a flat list of outgoing `ResolvedLink` entries and incoming `LinkEntry` entries with full metadata (link text, line number, wikilink flag, broken state).
-- **Depth 2-3** triggers a BFS (breadth-first search) traversal from the file, returning a `NeighborhoodResult` -- a tree of `NeighborhoodNode` objects with recursive `children` arrays showing the multi-hop link graph.
+- **Depth 1** returns a `LinksOutput` wrapping a `LinkQueryResult` -- a flat list of outgoing `ResolvedLink` entries and incoming `LinkEntry` entries. Every entry records its link text, body line or frontmatter location, wikilink flag, and optional Relation field. Validity state wraps outgoing entries; incoming entries are stored `LinkEntry` values.
+- **Depth 2-3** recursively builds an outgoing and incoming neighborhood from the file, returning a `NeighborhoodResult` with `NeighborhoodNode.children` trees and per-branch cycle protection.
 
 The depth value must be between 1 and 3 (inclusive). Values outside this range are rejected by the CLI parser.
 
@@ -75,13 +78,15 @@ When run with the default `--depth 1`, the output shows a flat list of outgoing 
   └── docs/deploy.md "Deployment"
       line 58
 
-  Incoming: 2
+  Incoming: 3
   ├── docs/index.md "Architecture Overview"
   │   line 8
+  ├── projects/relaunch.md "Architecture" (design)
+  │   frontmatter
   └── docs/api/overview.md "Architecture"
       line 15
 
-  5 outgoing, 2 incoming, 1 broken
+  5 outgoing, 3 incoming, 1 broken
 ```
 
 ### Output Elements
@@ -91,8 +96,10 @@ When run with the default `--depth 1`, the output shows a flat list of outgoing 
 | **Outgoing** | Links found in this file pointing to other files |
 | **Incoming** | Links in other files pointing to this file (backlinks) |
 | Link target | The resolved relative path of the linked file |
-| Link text | The display text of the markdown link (in quotes) |
-| Line number | The line number in the source file where the link appears |
+| Link text | The display text of the body link or frontmatter Relation (in quotes) |
+| Line number | For a body link, the 1-based line where the link appears |
+| `frontmatter` | Location shown instead of a line number for a frontmatter Relation |
+| `(field)` | Dimmed badge naming the originating frontmatter Relation field |
 | `[broken]` | Red badge indicating the target file does not exist in the index |
 | `[wikilink]` | Blue badge indicating the link uses `[[wikilink]]` syntax |
 
@@ -124,7 +131,7 @@ When run with `--depth 2` or `--depth 3`, the output shows a tree of links with 
 
 The multi-hop display includes:
 - **Depth counts** in the header showing how many levels were explored for outgoing and incoming
-- **Total counts** for unique outgoing and incoming files across all depths
+- **Total counts** for outgoing and incoming tree nodes across all depths; a file may appear in different branches
 - **Tree structure** with box-drawing characters showing the parent-child relationship
 - **`[broken]`** badges on nodes whose target files don't exist
 
@@ -167,7 +174,8 @@ When `--depth` is 1 (the default), the output is a `LinksOutput` wrapper around 
           "target": "docs/api/endpoints.md",
           "text": "API Endpoints",
           "line_number": 12,
-          "is_wikilink": false
+          "is_wikilink": false,
+          "field": null
         },
         "state": "Valid"
       },
@@ -177,9 +185,21 @@ When `--depth` is 1 (the default), the output is a `LinksOutput` wrapper around 
           "target": "docs/missing.md",
           "text": "Missing Page",
           "line_number": 31,
-          "is_wikilink": false
+          "is_wikilink": false,
+          "field": null
         },
         "state": "Broken"
+      },
+      {
+        "entry": {
+          "source": "docs/architecture.md",
+          "target": "clients/acme.md",
+          "text": "Acme Corp",
+          "line_number": 0,
+          "is_wikilink": false,
+          "field": "client"
+        },
+        "state": "Valid"
       }
     ],
     "incoming": [
@@ -188,7 +208,8 @@ When `--depth` is 1 (the default), the output is a `LinksOutput` wrapper around 
         "target": "docs/architecture.md",
         "text": "Architecture Overview",
         "line_number": 8,
-        "is_wikilink": false
+        "is_wikilink": false,
+        "field": null
       }
     ]
   }
@@ -214,7 +235,7 @@ When `--depth` is 1 (the default), the output is a `LinksOutput` wrapper around 
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `entry` | `LinkEntry` | The link entry with source, target, text, line number |
+| `entry` | `LinkEntry` | The link entry with source, target, text, location, syntax, and Relation origin |
 | `state` | `string` | `"Valid"` if the target exists in the index, `"Broken"` if not |
 
 ### LinkEntry Fields
@@ -223,9 +244,10 @@ When `--depth` is 1 (the default), the output is a `LinksOutput` wrapper around 
 |-------|------|-------------|
 | `source` | `string` | Source file path (relative to project root) |
 | `target` | `string` | Target file path (resolved relative to project root) |
-| `text` | `string` | Display text of the markdown link |
-| `line_number` | `number` | Line number in the source file (1-based) |
+| `text` | `string` | Display text of the body link or frontmatter Relation |
+| `line_number` | `number` | Body links use a 1-based source line; frontmatter Relations use the `0` sentinel |
 | `is_wikilink` | `boolean` | `true` if the link uses `[[wikilink]]` syntax |
+| `field` | `string \| null` | Originating frontmatter field for a Relation; always serialized and `null` for body links |
 
 ### Depth 2-3: NeighborhoodResult (`--json --depth 2`)
 
@@ -290,8 +312,8 @@ When `--depth` is 2 or 3, the output is a `NeighborhoodResult` with a tree struc
 | `file` | `string` | The queried file path |
 | `outgoing` | `NeighborhoodNode[]` | Tree of outgoing (forward) links from this file |
 | `incoming` | `NeighborhoodNode[]` | Tree of incoming (backlinks) to this file |
-| `outgoing_count` | `number` | Total count of unique outgoing links across all depths |
-| `incoming_count` | `number` | Total count of unique incoming links across all depths |
+| `outgoing_count` | `number` | Total nodes in the outgoing tree across all depths |
+| `incoming_count` | `number` | Total nodes in the incoming tree across all depths |
 | `outgoing_depth_count` | `number` | Number of depth levels explored for outgoing links |
 | `incoming_depth_count` | `number` | Number of depth levels explored for incoming links |
 
@@ -306,14 +328,18 @@ When `--depth` is 2 or 3, the output is a `NeighborhoodResult` with a tree struc
 ## Notes
 
 - The `links` command opens the index in **read-only** mode. It never modifies the index.
-- Links are extracted from markdown files during ingestion. Run [`mdvdb ingest`](./ingest.md) to populate the link graph.
-- Both standard markdown links (`[text](target.md)`) and wikilinks (`[[target]]`) are detected.
-- Link targets are resolved relative to the source file's directory and normalized (e.g., `../sibling.md` resolves correctly).
+- Links are extracted from Markdown files during ingestion. Run [`mdvdb ingest`](./ingest.md) to populate the link graph.
+- Body Markdown links and wikilinks are detected, as are whole-value link-shaped strings and string-list elements in frontmatter. The latter carry their originating Relation `field`.
+- Body link targets are resolved relative to the source file's directory. Relation targets follow
+  the collection-root, overlay `target:`, and source-directory rules described in
+  [Relations](../concepts/relations.md).
 - The `.md` extension is automatically appended to link targets that don't have it.
 - Fragment identifiers (e.g., `#section`) are stripped from link targets -- links are resolved at the file level.
-- For depth 2-3, the BFS traversal avoids cycles by tracking visited files.
+- For depth 2-3, recursive traversal prevents cycles within each branch. The same file can still
+  appear in separate branches.
 - Use [`mdvdb backlinks`](./backlinks.md) for a simpler view of only the incoming links to a file.
-- The `outgoing_count` and `incoming_count` in `NeighborhoodResult` count **unique** files across all depth levels.
+- The `outgoing_count` and `incoming_count` in `NeighborhoodResult` count tree nodes, including a
+  repeated file when it appears in different branches.
 
 ## Related Commands
 

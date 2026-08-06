@@ -29,8 +29,8 @@ flowchart LR
     APPLY --> RESORT
     RESORT --> RESULT
 
-    style SEARCH fill:#e3f2fd
-    style RESULT fill:#c8e6c9
+    style SEARCH fill:#e3f2fd,color:#111827
+    style RESULT fill:#c8e6c9,color:#111827
 ```
 
 ## The Decay Formula
@@ -114,41 +114,47 @@ flowchart TD
     MATCH -->|yes| DECAY
     MATCH -->|no| NO_DECAY
 
-    style FILE fill:#e3f2fd
-    style DECAY fill:#fff9c4
-    style NO_DECAY fill:#c8e6c9
+    style FILE fill:#e3f2fd,color:#111827
+    style DECAY fill:#fff9c4,color:#111827
+    style NO_DECAY fill:#c8e6c9,color:#111827
 ```
 
 ### Examples
 
 **Exclude evergreen content from decay:**
 
-```bash
-# In .markdownvdb/.config
-MDVDB_SEARCH_DECAY=true
-MDVDB_SEARCH_DECAY_HALF_LIFE=90
-MDVDB_SEARCH_DECAY_EXCLUDE=docs/architecture,docs/reference,ADR
+```yaml
+# .markdownvdb/config.yaml
+search:
+  decay:
+    enabled: true
+    half_life: 90
+    exclude: [docs/architecture, docs/reference, ADR]
 ```
 
 Files under `docs/architecture/`, `docs/reference/`, and `ADR/` keep their full scores. All other files are subject to decay.
 
 **Apply decay only to specific directories:**
 
-```bash
-# In .markdownvdb/.config
-MDVDB_SEARCH_DECAY=true
-MDVDB_SEARCH_DECAY_HALF_LIFE=30
-MDVDB_SEARCH_DECAY_INCLUDE=notes/,journal/,sprints/
+```yaml
+# .markdownvdb/config.yaml
+search:
+  decay:
+    enabled: true
+    half_life: 30
+    include: [notes/, journal/, sprints/]
 ```
 
 Only files under `notes/`, `journal/`, and `sprints/` are subject to decay. All other files keep their full scores.
 
 **Combined include + exclude:**
 
-```bash
-MDVDB_SEARCH_DECAY=true
-MDVDB_SEARCH_DECAY_INCLUDE=notes/
-MDVDB_SEARCH_DECAY_EXCLUDE=notes/pinned
+```yaml
+search:
+  decay:
+    enabled: true
+    include: [notes/]
+    exclude: [notes/pinned]
 ```
 
 Files under `notes/` are subject to decay, EXCEPT those under `notes/pinned/` (which match the exclude prefix and are therefore exempted).
@@ -222,13 +228,18 @@ let query = SearchQuery::new("recent changes")
 
 ### Setting Values
 
-```bash
-# In .markdownvdb/.config or environment
-MDVDB_SEARCH_DECAY=true
-MDVDB_SEARCH_DECAY_HALF_LIFE=90
-MDVDB_SEARCH_DECAY_EXCLUDE=docs/reference,docs/architecture
-MDVDB_SEARCH_DECAY_INCLUDE=
+```yaml
+# .markdownvdb/config.yaml
+search:
+  decay:
+    enabled: true
+    half_life: 90
+    exclude: [docs/reference, docs/architecture]
+    include: []
 ```
+
+The `MDVDB_SEARCH_DECAY*` variables remain available as shell overrides for CI and one-off
+queries.
 
 No re-ingestion is required after changing decay settings -- they are applied at search time.
 

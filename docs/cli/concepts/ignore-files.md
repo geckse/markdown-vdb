@@ -22,12 +22,12 @@ flowchart TD
     ENV -->|matches| SKIP4["Skipped"]
     ENV -->|no match| INDEX["Indexed"]
 
-    style FILE fill:#e3f2fd
-    style INDEX fill:#c8e6c9
-    style SKIP1 fill:#ffcdd2
-    style SKIP2 fill:#ffcdd2
-    style SKIP3 fill:#ffcdd2
-    style SKIP4 fill:#ffcdd2
+    style FILE fill:#e3f2fd,color:#111827
+    style INDEX fill:#c8e6c9,color:#111827
+    style SKIP1 fill:#ffcdd2,color:#111827
+    style SKIP2 fill:#ffcdd2,color:#111827
+    style SKIP3 fill:#ffcdd2,color:#111827
+    style SKIP4 fill:#ffcdd2,color:#111827
 ```
 
 ### Layer 1: Built-in Directory Exclusions
@@ -110,15 +110,20 @@ CONTRIBUTING.md
 - **Exclude generated documentation** that duplicates source content
 - **Exclude meeting notes or personal notes** that you want in version control but not in the search index
 
-### Layer 4: `MDVDB_IGNORE_PATTERNS` (Environment Variable)
+### Layer 4: configured source patterns
 
-For programmatic or temporary exclusions, use the `MDVDB_IGNORE_PATTERNS` environment variable. This accepts a **comma-separated list** of patterns:
+Put persistent exclusions in `sources.ignore`:
+
+```yaml
+# .markdownvdb/config.yaml
+sources:
+  ignore: [drafts/, "*.wip.md", archive/]
+```
+
+For programmatic or temporary exclusions, use the comma-separated
+`MDVDB_IGNORE_PATTERNS` shell override:
 
 ```bash
-# In .markdownvdb/.config or environment
-MDVDB_IGNORE_PATTERNS=drafts/,*.wip.md,archive/
-
-# Or as a shell variable
 export MDVDB_IGNORE_PATTERNS="drafts/,*.wip.md,archive/"
 ```
 
@@ -131,11 +136,21 @@ When mdvdb discovers files, all ignore layers are evaluated. A file is excluded 
 1. **Built-in exclusions** -- checked first. If the file is under any of the 15 built-in directories, it is immediately excluded.
 2. **`.gitignore`** -- the `ignore` crate's walker applies `.gitignore` rules during directory traversal, so ignored files are never even visited.
 3. **`.mdvdbignore`** -- after the walker yields a file, `.mdvdbignore` patterns are checked.
-4. **`MDVDB_IGNORE_PATTERNS`** -- finally, the env var patterns are checked against the relative path.
+4. **Configured source patterns** -- `sources.ignore`, or its
+   `MDVDB_IGNORE_PATTERNS` shell override, is checked against the relative path.
 
 ## Source Directories
 
-By default, mdvdb scans the entire project root (`.`) for markdown files. You can restrict scanning to specific directories using `MDVDB_SOURCE_DIRS`:
+By default, mdvdb scans the entire project root (`.`) for Markdown files. Restrict persistent
+discovery paths in YAML:
+
+```yaml
+# .markdownvdb/config.yaml
+sources:
+  dirs: [docs, notes, wiki]
+```
+
+For a one-off command, use `MDVDB_SOURCE_DIRS`:
 
 ```bash
 # Only scan specific directories
@@ -166,7 +181,8 @@ Only files passing all checks trigger re-indexing.
 my-project/
   .gitignore           # Already ignores: node_modules/, *.tmp, .env
   .mdvdbignore         # Index-specific: drafts/, CHANGELOG.md
-  .markdownvdb/.config # MDVDB_IGNORE_PATTERNS=archive/
+  .markdownvdb/
+    config.yaml        # sources.ignore includes archive/
   docs/
     guide.md           # Indexed
     api.md             # Indexed

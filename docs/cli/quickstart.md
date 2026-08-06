@@ -1,348 +1,302 @@
 ---
 title: "Quick Start"
-description: "Go from zero to your first semantic search in 5 minutes"
+description: "Initialize a Markdown collection, index it, and query content and frontmatter"
 category: "guides"
 ---
 
 # Quick Start
 
-This guide takes you from zero to your first semantic search in under 5 minutes. By the end, you'll have indexed a set of Markdown files and run your first query.
+This guide creates a local mdvdb collection, configures an embedding provider, indexes Markdown,
+and exercises search, frontmatter queries, Relations, computed fields, Shards, and Topics.
 
-## Overview
+This documentation follows the current `main` branch. Some capabilities in the complete walkthrough
+may be newer than the latest tagged binary; see [Installation](./installation.md) to choose a tagged
+release or install current `main`.
 
-```mermaid
-flowchart LR
-    A["1. Install"] --> B["2. Initialize"]
-    B --> C["3. Configure Provider"]
-    C --> D["4. Ingest Files"]
-    D --> E["5. Search"]
-    E --> F["6. Explore"]
+## 1. Initialize a collection
 
-    style A fill:#e8f5e9
-    style B fill:#e3f2fd
-    style C fill:#fff3e0
-    style D fill:#fce4ec
-    style E fill:#f3e5f5
-    style F fill:#e0f7fa
-```
-
-## Prerequisites
-
-- **mdvdb** installed and available in your `PATH` ([Installation](./installation.md))
-- A directory containing `.md` files you want to search
-- An embedding provider: **OpenAI API key** or a running **Ollama** instance
-
-## Step 1: Initialize Your Project
-
-Navigate to a directory containing Markdown files and create a configuration:
+Install `mdvdb` first, then run `init` at the root of a folder containing Markdown files:
 
 ```bash
 cd my-notes
 mdvdb init
 ```
 
-Expected output:
+This creates `.markdownvdb/config.yaml`. The index, full-text segments, and disposable caches also
+live under `.markdownvdb/`; your Markdown files remain the source of truth.
 
+## 2. Configure an embedding provider
+
+The generated YAML defaults to OpenAI with automatic dimension detection:
+
+```yaml
+# .markdownvdb/config.yaml
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dimensions: auto
+  batch_size: 100
 ```
-Created .markdownvdb config file
+
+Keep credentials out of YAML. Set them in the shell or in `.markdownvdb/.env`:
+
+```dotenv
+# .markdownvdb/.env
+OPENAI_API_KEY=replace-with-your-key
 ```
 
-This creates a `.markdownvdb` directory with a default configuration. The directory is where mdvdb stores its index and settings.
-
-## Step 2: Configure an Embedding Provider
-
-mdvdb needs an embedding provider to convert your Markdown text into vectors for semantic search. Choose one of the following:
-
-### Option A: OpenAI (Default)
-
-Set your OpenAI API key as an environment variable:
+You can also pipe a value already held in your environment into mdvdb's secret writer:
 
 ```bash
-export OPENAI_API_KEY="sk-..."
+printf '%s' "$OPENAI_API_KEY" \
+  | mdvdb config secret set OPENAI_API_KEY --stdin
 ```
 
-Or add it to your `.markdownvdb/.config` file:
+For a local Ollama model instead:
 
 ```bash
-echo 'OPENAI_API_KEY=sk-...' >> .markdownvdb/.config
-```
-
-This uses the `text-embedding-3-small` model by default (1536 dimensions). No other configuration is needed.
-
-### Option B: Ollama (Local, Free)
-
-If you prefer to run embeddings locally with [Ollama](https://ollama.ai/), first make sure Ollama is running, then configure mdvdb:
-
-```bash
-# Pull an embedding model
 ollama pull nomic-embed-text
-
-# Configure mdvdb to use Ollama
-cat >> .markdownvdb/.config << 'EOF'
-MDVDB_EMBEDDING_PROVIDER=ollama
-MDVDB_EMBEDDING_MODEL=nomic-embed-text
-MDVDB_EMBEDDING_DIMENSIONS=768
-EOF
+mdvdb config set embedding.provider ollama
+mdvdb config set embedding.model nomic-embed-text
+mdvdb config set embedding.dimensions auto
 ```
 
-Ollama connects to `http://localhost:11434` by default. To use a different host, set `OLLAMA_HOST`:
+OpenAI, OpenRouter, Gemini, Azure OpenAI, AWS Bedrock, Hugging Face, Ollama, and custom
+OpenAI-compatible endpoints are supported. Model IDs are provider-native strings; they are not
+hard-coded allowlists.
+
+Probe the configured model and inspect the resolved settings:
 
 ```bash
-echo 'OLLAMA_HOST=http://my-server:11434' >> .markdownvdb/.config
-```
-
-### Verify Your Configuration
-
-Run the doctor command to check that everything is set up correctly:
-
-```bash
+mdvdb embedding probe
+mdvdb config
 mdvdb doctor
 ```
 
-Expected output:
+`dimensions: auto` uses a compatible existing index dimension when possible and otherwise probes
+the provider before creating or replacing the vector index.
 
-```
-Doctor Results
-  Config valid ........................... OK
-  Provider reachable .................... OK
-  Index present ......................... WARN  No index found (run mdvdb ingest)
-```
+## 3. Add frontmatter and links
 
-If the provider check fails, verify your API key or Ollama connection.
+Frontmatter behaves like typed columns over your Markdown files. For example:
 
-## Step 3: Ingest Your Files
+```markdown
+---
+title: Production deployment
+kind: guide
+status: published
+owner: platform
+updated: 2026-08-01
+---
 
-Index your Markdown files:
+# Production deployment
 
-```bash
-mdvdb ingest
-```
-
-You'll see a progress display as files are discovered, parsed, and embedded:
-
-```
-Ingesting...
-  Discovering files ..................... 42 files
-  Parsing & chunking ................... 128 chunks
-  Embedding ............................ 128/128
-  Saving index ......................... done
-  Clustering ........................... 5 clusters
-
-Ingestion complete
-  Files indexed     42
-  Chunks created    128
-  Files skipped     0
-  Duration          3.2s
+See [[runbooks/rollback]] before promoting a release.
 ```
 
-mdvdb splits each file by headings into chunks, generates embeddings for each chunk, and stores everything in a local index under `.markdownvdb/`.
+mdvdb infers field types, treats files as rows in folder collections, and extracts standard
+Markdown links and wiki links into its graph.
 
-### Preview Mode
+## 4. Preview and ingest
 
-If you want to see what ingestion would do without actually indexing anything:
+Preview an ingest without changing the index:
 
 ```bash
 mdvdb ingest --preview
 ```
 
-## Step 4: Search Your Files
-
-Run your first semantic search:
+Then build the index:
 
 ```bash
-mdvdb search "how to deploy"
+mdvdb ingest
 ```
 
-Example output:
+Ingestion discovers Markdown, parses frontmatter and links, chunks by heading, embeds changed
+content, updates BM25 search, and computes graph analysis. Later ingests skip unchanged content.
 
-```
-Search results for "how to deploy" (hybrid, 3 results)
+## 5. Search content and frontmatter
 
-  1. docs/deployment.md #2                          0.847  ████████░░
-     Deployment Guide > Production Setup
-     "To deploy the application, first build the Docker image..."
-
-  2. docs/ci-cd.md #1                               0.723  ███████░░░
-     CI/CD Pipeline > Deploy Stage
-     "The deploy stage pushes the built container to..."
-
-  3. docs/infrastructure.md #4                      0.691  ██████░░░░
-     Infrastructure > Docker Compose
-     "The production docker-compose.yml configures..."
-```
-
-Results show the file path, section heading, a snippet of the matching content, and a relevance score.
-
-### JSON Output
-
-For machine-readable output (useful in scripts or AI agent pipelines), add `--json`:
+Hybrid search combines semantic and lexical retrieval by default:
 
 ```bash
-mdvdb search "how to deploy" --json
+mdvdb search "how do we roll back production?"
 ```
 
-```json
-{
-  "results": [
-    {
-      "file_path": "docs/deployment.md",
-      "chunk_index": 2,
-      "heading": "Production Setup",
-      "score": 0.847,
-      "snippet": "To deploy the application, first build the Docker image..."
-    }
-  ],
-  "query": "how to deploy",
-  "total_results": 3,
-  "mode": "hybrid"
-}
-```
-
-### Search with Filters
-
-If your Markdown files use YAML frontmatter, you can filter results by metadata:
+Choose a mode, return JSON, or combine search with frontmatter filters:
 
 ```bash
-# Only search files with type: guide
-mdvdb search "deployment" --filter type=guide
+# Vector similarity only
+mdvdb search "release recovery" --semantic
 
-# Limit results and set minimum score
-mdvdb search "authentication" --limit 5 --min-score 0.5
+# BM25 only; an existing index can be queried without contacting the provider
+mdvdb search "ROLLBACK_FAILED" --lexical
+
+# Frontmatter predicates are ANDed
+mdvdb search "deployment" \
+  --filter kind=guide \
+  --filter status=published \
+  --json
 ```
 
-### Search Modes
-
-mdvdb supports multiple search modes:
+Use `collection` when you want deterministic table-like access rather than relevance ranking:
 
 ```bash
-# Hybrid (default) — combines semantic + lexical (BM25)
-mdvdb search "deploy docker"
-
-# Semantic only — pure vector similarity
-mdvdb search "deploy docker" --semantic
-
-# Lexical only — keyword matching (BM25)
-mdvdb search "deploy docker" --lexical
+mdvdb collection docs \
+  --recursive \
+  --filter status=published \
+  --sort updated \
+  --order desc \
+  --limit 20 \
+  --json
 ```
 
-See [Search Modes](./concepts/search-modes.md) for a detailed comparison.
+This is the SQL-like frontmatter model: Markdown files are rows, frontmatter keys are typed
+columns, `--filter` narrows rows, `--sort`/`--order` order them, and `--limit`/`--offset` paginate
+them. Search adds semantic and lexical ranking over the same records.
 
-## Step 5: Check Your Index
+## 6. Add Relations and computed fields
 
-View the current state of your index:
+A whole frontmatter value that points to another Markdown document acts as a Relation:
+
+```markdown
+---
+title: Invoice 2026-001
+status: sent
+client: clients/acme.md
+subtotal: 1200
+tax: 228
+---
+```
+
+Resolve the related document inline and inspect reverse references:
 
 ```bash
-mdvdb status
+mdvdb get invoices/2026-001.md --populate --json
+mdvdb search "outstanding invoice" --populate --json
 ```
 
+Schema overlays can declare relation targets and computed columns in
+`.markdownvdb.schema.yml`:
+
+```yaml
+scopes:
+  invoices:
+    fields:
+      client:
+        field_type: relation
+        target: clients
+      total:
+        field_type: formula
+        formula: subtotal + tax
+        result_type: number
 ```
-Index Status
-  Documents         42
-  Chunks            128
-  Vectors           128
-  Index size         2.4 MB
-  Last ingested     2 minutes ago
-  Schema fields     4 (type, tags, date, status)
-```
 
-## What's Next?
-
-Now that you have a working setup, explore these features:
-
-### Explore Your Data
+Validate a Formula, then ingest:
 
 ```bash
-# See the file tree with sync status
-mdvdb tree
-
-# View document clusters
-mdvdb clusters
-
-# Check metadata schema inferred from frontmatter
-mdvdb schema
-
-# Get details about a specific file
-mdvdb get docs/deployment.md
+mdvdb modules validate formula \
+  --formula 'subtotal + tax' \
+  --result-type number
+mdvdb ingest
 ```
 
-### Navigate the Link Graph
+Successful Formula, Lookup, and Rollup values are atomically materialized into Markdown
+frontmatter. That makes computed values available to later filters, sorting, export, search, and
+other computed fields while Markdown remains the value authority.
 
-If your Markdown files link to each other, mdvdb builds a link graph automatically:
+Useful discovery commands are:
 
 ```bash
-# See outgoing links from a file
-mdvdb links docs/deployment.md
-
-# See which files link to a file
-mdvdb backlinks docs/deployment.md
-
-# Find orphan files (no incoming or outgoing links)
-mdvdb orphans
+mdvdb schema --path invoices
+mdvdb modules list
+mdvdb modules status formula --path invoices
+mdvdb modules status lookup_rollup --path invoices
 ```
 
-### Watch for Changes
+See [Relations](./concepts/relations.md) and
+[Computed fields](./concepts/computed-fields.md) for the complete overlay contracts.
 
-Keep your index up to date automatically:
+## 7. Scope work with Shards and Topics
+
+A Shard gives a recursive folder scope a stable name while reusing the collection's index, file
+identities, links, and watcher:
 
 ```bash
-mdvdb watch
+mdvdb shards add research \
+  --name "Research" \
+  --path notes/research
+
+mdvdb search "evaluation methodology" --shard research
+mdvdb collection --shard research --recursive --json
+mdvdb graph --shard research --json
 ```
 
-This watches for file changes and re-indexes incrementally. Press `Ctrl+C` to stop.
-
-### Advanced Search
+Automatic Leiden communities are derived from the documents. Topics are user-defined, multi-label
+semantic groupings with optional descriptions, seeds, and thresholds:
 
 ```bash
-# Boost results that are linked to/from top matches
-mdvdb search "deploy" --boost-links
+mdvdb clusters --shard research add Methods \
+  --description "Research methods and evaluation design" \
+  --seeds methodology,experiment,evaluation
 
-# Include graph context (linked file chunks) in results
-mdvdb search "deploy" --expand 2
-
-# Apply time decay (favor recently modified files)
-mdvdb search "deploy" --decay
-
-# Restrict search to a specific directory
-mdvdb search "deploy" --path docs/
-
-# Reuse that folder scope by name (no second index is created)
-mdvdb shards add docs --name Docs --path docs
-mdvdb search "deploy" --shard docs
-
-# Inspect communities derived only from that Shard's indexed documents
-mdvdb clusters --shard docs
-mdvdb graph --shard docs
-
-# Add an independent Topic to the Shard, then ingest its centroid
-mdvdb clusters --shard docs add Deployment --seeds docker,kubernetes
+# Ingest computes the new Topic centroid and assignments
 mdvdb ingest
 
-# Keep Shard-wide cluster identities while viewing one descendant folder
-mdvdb graph --shard docs --path docs/api
+mdvdb clusters --shard research --custom
+mdvdb clusters --shard research unassigned
 ```
 
-## Quick Reference
+Shard Topics belong only to that Shard. Collection, parent-Shard, sibling-Shard, and child-Shard
+Topics do not inherit into one another.
+
+## Useful workflows
+
+```bash
+# Inspect collection size, sync state, and a reindex estimate
+mdvdb info
+
+# Keep the index current
+mdvdb watch
+
+# Favor recent agent memory while expanding linked context
+mdvdb search "what changed in authentication?" \
+  --decay \
+  --decay-half-life 30 \
+  --boost-links \
+  --expand 1 \
+  --json
+
+# Check graph health
+mdvdb links notes/authentication.md
+mdvdb backlinks notes/authentication.md
+mdvdb orphans
+mdvdb doctor
+```
+
+## Quick reference
 
 | Task | Command |
-|------|---------|
-| Initialize project | `mdvdb init` |
-| Index all files | `mdvdb ingest` |
-| Re-index everything | `mdvdb ingest --reindex` |
-| Semantic search | `mdvdb search "query"` |
-| Search with JSON output | `mdvdb search "query" --json` |
-| Create a reusable folder scope | `mdvdb shards add <id> --path <folder>` |
-| Search a named Shard | `mdvdb search "query" --shard <id>` |
-| Analyze a Shard's own clusters | `mdvdb clusters --shard <id>` |
-| Manage a Shard's own Topics | `mdvdb clusters --shard <id> add <name> [...]` |
-| Check index status | `mdvdb status` |
-| Run diagnostics | `mdvdb doctor` |
+|---|---|
+| Initialize project config | `mdvdb init` |
+| Inspect resolved config | `mdvdb config` |
+| Probe embedding dimensions | `mdvdb embedding probe` |
+| Preview ingestion | `mdvdb ingest --preview` |
+| Incrementally ingest | `mdvdb ingest` |
+| Force a new embedding generation | `mdvdb ingest --reindex` |
+| Search | `mdvdb search "query"` |
+| Query frontmatter rows | `mdvdb collection [PATH]` |
+| Inspect inferred schema | `mdvdb schema` |
+| Manage reusable folder scopes | `mdvdb shards ...` |
+| Inspect communities / Topics | `mdvdb clusters ...` |
 | Watch for changes | `mdvdb watch` |
-| View configuration | `mdvdb config` |
 
-## Further Reading
+## Further reading
 
-- [Configuration](./configuration.md) -- All environment variables and config file options
-- [Command Reference](./commands/index.md) -- Complete reference for every command
-- [Embedding Providers](./concepts/embedding-providers.md) -- Detailed provider setup (OpenAI, Ollama, Custom)
-- [Search Modes](./concepts/search-modes.md) -- Hybrid, semantic, lexical, and edge search
-- [JSON Output Reference](./json-output.md) -- JSON schemas for scripting and automation
+- [Configuration](./configuration.md) — YAML, secrets, providers, and precedence
+- [Command Reference](./commands/index.md) — command index
+- [Search Modes](./concepts/search-modes.md) — hybrid, semantic, lexical, and edge retrieval
+- [Time Decay](./concepts/time-decay.md) — recency weighting for memory and changing corpora
+- [Frontmatter as structured data](./concepts/frontmatter-data.md) — the SQL-like query model and its limits
+- [Use-case playbooks](./use-cases/llm-wiki.md) — start with an LLM wiki, AI memory, or knowledge operations
+- [Tesseract](./tesseract.md) — optional desktop editing, tables, graphs, and agent tooling
+- [Provider transport guide](https://github.com/geckse/markdown-vdb/blob/main/docs/embedding-providers.md) — provider-specific authentication and codecs

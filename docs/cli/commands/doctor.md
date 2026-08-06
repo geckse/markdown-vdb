@@ -1,12 +1,14 @@
 ---
 title: "mdvdb doctor"
-description: "Run diagnostic checks on configuration, embedding provider connectivity, and index health"
+description: "Diagnose configuration, provider connectivity, index health, relations, and Shards"
 category: "commands"
 ---
 
 # mdvdb doctor
 
-Run diagnostic checks on the project configuration and index. Validates configuration loading, checks for user-level and project-level config files, verifies API key availability, tests embedding provider connectivity, inspects index integrity, and confirms source directories are accessible.
+Run a read-only health check for the current project. `doctor` reports configuration discovery,
+embedding connectivity, index integrity, source discovery, frontmatter Relations, and Shard/Topic
+configuration in one result.
 
 ## Usage
 
@@ -16,94 +18,74 @@ mdvdb doctor [OPTIONS]
 
 ## Options
 
-This command has no command-specific options. Only [global options](#global-options) apply.
+This command has no command-specific options. It accepts the [global options](./index.md#global-options),
+including `--root`, `--json`, `--verbose`, and `--no-color`.
 
-## Global Options
+## Diagnostic checks
 
-These options apply to all commands. See [Commands Index](./index.md) for details.
+A successful diagnostic run returns nine checks in this order:
 
-| Flag | Short | Description |
-|------|-------|-------------|
-| `--verbose` | `-v` | Increase log verbosity (-v info, -vv debug, -vvv trace) |
-| `--root` | | Project root directory (defaults to current directory) |
-| `--no-color` | | Disable colored output |
-| `--json` | | Output results as JSON |
-
-## Diagnostic Checks
-
-The doctor command runs 7 diagnostic checks in sequence:
-
-| # | Check | What It Validates |
+| # | Check | What it validates |
 |---|-------|-------------------|
-| 1 | **Config loaded** | Configuration was loaded successfully. Displays the active provider, model, and dimensions. Always passes if the command can start. |
-| 2 | **User config** | Checks whether a user-level config file exists at `~/.mdvdb/config` (or the `MDVDB_CONFIG_HOME` location). **Pass** if the file exists, **Warn** if not found or home directory cannot be resolved. |
-| 3 | **Project config** | Checks whether the `.markdownvdb/` directory exists in the project root. **Pass** if found, **Fail** if missing. |
-| 4 | **API key** | Checks whether the required API key is available for the configured provider. For OpenAI: checks `OPENAI_API_KEY`. For Ollama/Custom: always passes. **Fail** if OpenAI is configured but the key is missing. |
-| 5 | **Provider reachable** | Sends a test embedding request to the configured provider with a 5-second timeout. **Pass** with response time in milliseconds. **Fail** on error or timeout. |
-| 6 | **Index** | Inspects the index for document, chunk, and vector counts. **Pass** if counts are consistent (vectors match chunks). **Warn** if the index is empty or counts are mismatched. |
-| 7 | **Source directories** | Discovers markdown files in the configured source directories. **Pass** with directory list and file count. **Fail** if discovery encounters an error. |
+| 1 | **Config loaded** | Shows the resolved embedding provider, model, and dimensions. The command has already loaded configuration when this check is emitted. |
+| 2 | **User config** | Looks for `~/.mdvdb/config.yaml`, or `config.yaml` below `MDVDB_CONFIG_HOME`. A missing user config is a warning because it is optional. |
+| 3 | **Project config** | Checks that the project has a `.markdownvdb/` directory. |
+| 4 | **API key** | Explicitly validates `OPENAI_API_KEY` for the OpenAI provider. Mock needs no key; other providers are reported as configured and are actually exercised by the connectivity check. |
+| 5 | **Provider reachable** | Sends one test embedding request with a five-second timeout. Authentication, endpoint, model, and network failures surface here. |
+| 6 | **Index** | Reports documents, chunks, edge vectors, and vectors. A healthy index has `vectors = chunks + edges`. An empty or mismatched index warns. |
+| 7 | **Source directories** | Discovers Markdown in the configured source directories and reports the file count. |
+| 8 | **Relations** | Warns about dangling frontmatter Relation targets, schema target folders with no indexed files, and unquoted `[[wikilink]]` values that YAML parsed as nested lists. |
+| 9 | **Shards** | Validates Shard definitions, target folders, and local Topic definitions. Missing or malformed configuration warns. |
 
-### Check Statuses
+Each check is `Pass`, `Warn`, or `Fail`. Warnings describe repairable or optional conditions; failures
+normally prevent an operation such as source discovery or provider access from working.
 
-Each check reports one of three statuses:
+## Human-readable output
 
-| Status | Icon | Meaning |
-|--------|------|---------|
-| **Pass** | `✓` (green) | Check passed successfully |
-| **Warn** | `!` (yellow) | Non-critical issue detected -- may need attention |
-| **Fail** | `✗` (red) | Critical issue -- must be fixed for normal operation |
-
-## Human-Readable Output
-
-```
+```text
   ● mdvdb doctor
 
-  ✓ Config loaded              OpenAI / text-embedding-3-small / 1536
-  ✓ User config                /home/user/.mdvdb/config
-  ✓ Project config             .markdownvdb/
-  ✓ API key                    OPENAI_API_KEY is set
-  ✓ Provider reachable         OK (243ms)
-  ✓ Index                      57 docs, 342 chunks, 342 vectors
-  ✓ Source directories         ./ (57 .md files)
+  ✓ Config loaded             OpenAI / text-embedding-3-small / 1536
+  ✓ User config               /home/user/.mdvdb/config.yaml
+  ✓ Project config            .markdownvdb/
+  ✓ API key                   OPENAI_API_KEY is set
+  ✓ Provider reachable        OK (243ms)
+  ✓ Index                     57 docs, 342 chunks, 360 vectors (342 chunk + 18 edge)
+  ✓ Source directories        ./ (57 .md files)
+  ✓ Relations                 18 relation link(s), all targets resolve
+  ✓ Shards                    3 Shard(s) configured, all folders exist
 
-  7/7 checks passed
+  9/9 checks passed
 ```
 
-### Example with Issues
+Warnings are included in the denominator but not the passed count:
 
-```
-  ● mdvdb doctor
-
-  ✓ Config loaded              OpenAI / text-embedding-3-small / 1536
-  ! User config                /home/user/.mdvdb/config (not found)
-  ✗ Project config             .markdownvdb not found
-  ✗ API key                    OPENAI_API_KEY not set
-  ✗ Provider reachable         401 Unauthorized
-  ! Index                      empty — run `mdvdb ingest` to index your markdown files
-  ✓ Source directories         ./ (12 .md files)
-
-  2/7 checks passed
+```text
+  ! Index                     empty — run `mdvdb ingest` to index your markdown files
+  ! Relations                 2 dangling relation(s): projects/a.md#owner → people/missing.md, +1 more
+  ! Shards                    2 Shard(s) configured; 1 missing folder(s): archive (archive)
 ```
 
 ## Examples
 
 ```bash
-# Run all diagnostic checks
+# Run all checks in the current project
 mdvdb doctor
 
-# Run diagnostics with JSON output
+# Return the structured result
 mdvdb doctor --json
 
-# Run diagnostics for a specific project
+# Diagnose another project
 mdvdb doctor --root /path/to/project
 
-# Run diagnostics with verbose logging
+# Include diagnostic logging
 mdvdb doctor -v
 ```
 
-## JSON Output
+## JSON output
 
-### DoctorResult (`--json`)
+`--json` serializes a `DoctorResult`. The `checks` array uses the same order and detail strings as
+the human-readable result.
 
 ```json
 {
@@ -116,7 +98,7 @@ mdvdb doctor -v
     {
       "name": "User config",
       "status": "Pass",
-      "detail": "/home/user/.mdvdb/config"
+      "detail": "/home/user/.mdvdb/config.yaml"
     },
     {
       "name": "Project config",
@@ -136,79 +118,67 @@ mdvdb doctor -v
     {
       "name": "Index",
       "status": "Pass",
-      "detail": "57 docs, 342 chunks, 342 vectors"
+      "detail": "57 docs, 342 chunks, 360 vectors (342 chunk + 18 edge)"
     },
     {
       "name": "Source directories",
       "status": "Pass",
       "detail": "./ (57 .md files)"
+    },
+    {
+      "name": "Relations",
+      "status": "Pass",
+      "detail": "18 relation link(s), all targets resolve"
+    },
+    {
+      "name": "Shards",
+      "status": "Pass",
+      "detail": "3 Shard(s) configured, all folders exist"
     }
   ],
-  "passed": 7,
-  "total": 7
+  "passed": 9,
+  "total": 9
 }
 ```
 
-### DoctorResult Fields
-
 | Field | Type | Description |
 |-------|------|-------------|
-| `checks` | `DoctorCheck[]` | Array of individual diagnostic check results |
-| `passed` | `number` | Number of checks that passed |
-| `total` | `number` | Total number of checks run |
-
-### DoctorCheck Fields
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | `string` | Human-readable name of the check |
-| `status` | `string` | Check result: `"Pass"`, `"Fail"`, or `"Warn"` |
-| `detail` | `string` | Detail message describing the result |
-
-### CheckStatus Values
-
-| Value | Meaning |
-|-------|---------|
-| `"Pass"` | Check passed successfully |
-| `"Fail"` | Critical failure -- must be addressed |
-| `"Warn"` | Non-critical warning -- may need attention |
+| `checks` | `DoctorCheck[]` | Ordered diagnostic results. |
+| `passed` | `number` | Number of checks with status `Pass`. |
+| `total` | `number` | Number of checks returned. |
+| `checks[].name` | `string` | Human-readable check name. |
+| `checks[].status` | `"Pass" \| "Fail" \| "Warn"` | Check status. |
+| `checks[].detail` | `string` | Context or repair information. |
 
 ## Troubleshooting
 
-### Common Failures and Fixes
-
-| Check | Failure | Fix |
-|-------|---------|-----|
-| **Project config** | `.markdownvdb not found` | Run [`mdvdb init`](./init.md) to create the project config |
-| **API key** | `OPENAI_API_KEY not set` | Set `OPENAI_API_KEY` in your shell, `.markdownvdb/.config`, `.env`, or `~/.mdvdb/config`. See [Configuration](../configuration.md). |
-| **Provider reachable** | `timeout (5s)` | Check your network connection. For Ollama, verify it is running (`ollama serve`). For OpenAI, check firewall/proxy settings. |
-| **Provider reachable** | `401 Unauthorized` | Your API key is invalid or expired. Regenerate it from the provider's dashboard. |
-| **Index** | `empty` | Run [`mdvdb ingest`](./ingest.md) to index your markdown files. |
-| **Index** | `mismatch` | Vector and chunk counts don't match. Run `mdvdb ingest --reindex` to rebuild the index. |
-| **Source directories** | Error message | Verify that `MDVDB_SOURCE_DIRS` paths exist and are readable. |
-
-### Warnings vs Failures
-
-- **Warnings** (`!`) are informational. The system can still function. For example, a missing user config (`~/.mdvdb/config`) simply means no user-level defaults are applied.
-- **Failures** (`✗`) indicate issues that will prevent normal operation. For example, a missing API key for OpenAI means embedding calls will fail during ingestion.
+| Check | Symptom | What to do |
+|-------|---------|------------|
+| **Project config** | `.markdownvdb not found` | Run [`mdvdb init`](./init.md). |
+| **API key** | `OPENAI_API_KEY not set` | Configure the credential via the shell, `.markdownvdb/.env`, or `mdvdb config secret set OPENAI_API_KEY --stdin`. |
+| **Provider reachable** | Timeout or authentication/model error | Check the endpoint, model, credentials, and network. For Ollama, verify the service is running. |
+| **Index** | Empty | Run [`mdvdb ingest`](./ingest.md). |
+| **Index** | Vector mismatch | Rebuild with `mdvdb ingest --reindex`. The expected count is chunks plus edge vectors, not chunks alone. |
+| **Source directories** | Discovery failure | Check configured paths and read permissions. |
+| **Relations** | Dangling target | Correct the link target or add/index the target file. Quote wikilink values in YAML, for example `owner: "[[people/ada]]"`. |
+| **Relations** | Schema target matches no file | Correct the Relation field's `target` folder or index that folder. |
+| **Shards** | Missing folder or malformed Topic | Correct the Shard path or its local Topic definition, then rerun `doctor`. |
 
 ## Notes
 
-- The doctor command opens the index in **read-only** mode. It never modifies the index.
-- The provider connectivity check sends a single test embedding request with a **5-second timeout**. This makes a real API call and may count against API usage quotas.
-- All 7 checks are always run, even if earlier checks fail. This gives you the full picture in a single run.
+- The index is opened read-only; `doctor` does not rebuild or mutate it.
+- The provider check makes one real embedding request and may consume a small amount of provider quota.
+- The OpenAI credential has a dedicated preflight check. For other providers, rely on the provider
+  connectivity result for credential validation.
 
-## Related Commands
+## Related documentation
 
-- [`mdvdb init`](./init.md) -- Create a configuration file if project config is missing
-- [`mdvdb config`](./config.md) -- View the fully resolved configuration values
-- [`mdvdb status`](./status.md) -- View index document and vector counts
-- [`mdvdb ingest`](./ingest.md) -- Index files to populate an empty index
-
-## See Also
-
-- [Configuration](../configuration.md) -- Config resolution order and all environment variables
-- [Embedding Providers](../concepts/embedding-providers.md) -- Provider setup and troubleshooting
-- [Index Storage](../concepts/index-storage.md) -- Index file format and `.markdownvdb/` directory
-- [Quick Start](../quickstart.md) -- Getting started guide including the doctor step
-- [JSON Output Reference](../json-output.md) -- Complete JSON schema reference
+- [`mdvdb status`](./status.md) — index counts and embedding compatibility
+- [`mdvdb config`](./config.md) — resolved configuration
+- [`mdvdb links`](./links.md) — body links and frontmatter Relations
+- [`mdvdb shards`](./shards.md) — named collection scopes
+- [Configuration](../configuration.md) — files, environment variables, and secrets
+- [Embedding providers](../concepts/embedding-providers.md) — provider-specific setup
+- [Relations](../concepts/relations.md) — typed frontmatter links and population
+- [Shards and Topics](../concepts/shards-and-topics.md) — scoped knowledge organization
+- [JSON output](../json-output.md) — machine-readable command conventions

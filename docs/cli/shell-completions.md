@@ -1,22 +1,19 @@
 ---
 title: "Shell Completions"
-description: "Setup instructions for tab completions in bash, zsh, fish, and PowerShell"
+description: "Generate mdvdb completions for Bash, Zsh, Fish, and PowerShell"
 category: "guides"
 ---
 
 # Shell Completions
 
-mdvdb includes a built-in shell completions generator that provides tab completion for all commands, subcommands, and flags. Completions are available for **bash**, **zsh**, **fish**, and **PowerShell**.
+mdvdb generates version-matched completion scripts for Bash, Zsh, Fish, and PowerShell. The
+generator is the hidden `completions` utility, so it does not appear in `mdvdb --help`.
 
-## Generating Completions
-
-The `completions` command is a hidden utility command (it does not appear in `mdvdb --help`). To generate completions, run:
+## Generate a script
 
 ```bash
-mdvdb completions <shell>
+mdvdb completions <SHELL>
 ```
-
-Where `<shell>` is one of:
 
 | Shell | Value |
 |-------|-------|
@@ -25,213 +22,119 @@ Where `<shell>` is one of:
 | Fish | `fish` |
 | PowerShell | `power-shell` |
 
-The command writes the completion script to stdout, so you can redirect it to a file or pipe it to your shell's eval.
+The script is written to stdout. Generate it with the same mdvdb binary users will run, and
+regenerate it after an upgrade.
+
+## Current command coverage
+
+Generated scripts expose all 21 visible top-level commands from the current CLI:
+
+| Workflow | Commands |
+|----------|----------|
+| Retrieval and indexing | `search`, `ingest`, `status`, `info`, `collection`, `watch` |
+| Metadata and analysis | `schema`, `clusters`, `tree`, `get`, `modules` |
+| Setup | `shards`, `init`, `config`, `embedding`, `doctor` |
+| Graph | `links`, `backlinks`, `orphans`, `edges`, `graph` |
+
+Beyond top-level names, coverage is shell-specific. Current scripts include a curated selection of
+embedding actions, cluster Topic actions, Shard management actions, module actions, collection
+query flags, and Shard selectors; PowerShell currently focuses on top-level commands.
+`mdvdb <COMMAND> --help` remains authoritative for every option.
 
 ## Bash
 
-### Install Completions
-
-Generate the completion script and save it to your bash completions directory:
-
-```bash
-# System-wide (requires root)
-mdvdb completions bash > /etc/bash_completion.d/mdvdb
-
-# User-level (recommended)
-mkdir -p ~/.local/share/bash-completion/completions
-mdvdb completions bash > ~/.local/share/bash-completion/completions/mdvdb
-```
-
-### Load Immediately (Current Session)
-
-To use completions in the current session without restarting your shell:
+Load completions for the current session:
 
 ```bash
 source <(mdvdb completions bash)
 ```
 
-Or add this line to your `~/.bashrc` to load completions on every new session:
+Install for the current user:
 
 ```bash
-# Add to ~/.bashrc
-eval "$(mdvdb completions bash)"
+mkdir -p ~/.local/share/bash-completion/completions
+mdvdb completions bash > ~/.local/share/bash-completion/completions/mdvdb
 ```
 
-### What You Get
-
-After installation, pressing `Tab` will complete:
-
-- Subcommands: `mdvdb se<Tab>` completes to `mdvdb search`
-- Global flags: `mdvdb --<Tab>` shows `--help`, `--version`, `--verbose`, `--root`, `--json`, `--no-color`
-- Command-specific flags: `mdvdb search --<Tab>` shows `--limit`, `--filter`, `--mode`, `--path`, etc.
-- Shard actions and selectors: `mdvdb shards <Tab>` shows the management actions, and scoped
-  commands complete `--shard`.
-- File paths: `mdvdb get <Tab>` completes file paths
-- Shell types: `mdvdb completions <Tab>` shows `bash`, `zsh`, `fish`, `power-shell`
-- Init flags: `mdvdb init --<Tab>` shows `--global`, `--help`
+Open a new shell after installation. The `bash-completion` package must be installed and loaded.
 
 ## Zsh
 
-### Install Completions
-
-Generate the completion script and save it to a directory in your `$fpath`:
+Create a completion directory and generate `_mdvdb`:
 
 ```bash
-# Create completions directory if it doesn't exist
 mkdir -p ~/.zsh/completions
-
-# Generate the completion script
 mdvdb completions zsh > ~/.zsh/completions/_mdvdb
 ```
 
-Make sure `~/.zsh/completions` is in your `fpath`. Add this to your `~/.zshrc` **before** `compinit` is called:
+Add the directory to `fpath` before `compinit` in `~/.zshrc`:
 
 ```zsh
-# Add to ~/.zshrc (before compinit)
 fpath=(~/.zsh/completions $fpath)
-autoload -Uz compinit && compinit
+autoload -Uz compinit
+compinit
 ```
 
-If you use Oh My Zsh, you can place the file in `~/.oh-my-zsh/completions/`:
-
-```bash
-mkdir -p ~/.oh-my-zsh/completions
-mdvdb completions zsh > ~/.oh-my-zsh/completions/_mdvdb
-```
-
-### Rebuild Completion Cache
-
-After installing, rebuild the zsh completion cache:
-
-```bash
-rm -f ~/.zcompdump && compinit
-```
-
-Or simply open a new terminal session.
-
-### What You Get
-
-Zsh completions include descriptions for each subcommand and flag:
-
-```
-$ mdvdb <Tab>
-search    -- Semantic search across indexed markdown files
-ingest    -- Ingest markdown files into the index
-status    -- Show index status and configuration
-schema    -- Show inferred metadata schema
-clusters  -- Show document clusters
-tree      -- Show file tree with sync status indicators
-...
-```
-
-Command-specific flags are also completed with descriptions. For example, `mdvdb search --<Tab>` shows all search-specific flags with their descriptions.
+Then open a new shell. If an older definition remains cached, remove `~/.zcompdump` once and run
+`compinit` again.
 
 ## Fish
 
-### Install Completions
+Install for the current user:
 
-Generate the completion script and save it to fish's completions directory:
-
-```bash
-# User-level (recommended)
+```fish
+mkdir -p ~/.config/fish/completions
 mdvdb completions fish > ~/.config/fish/completions/mdvdb.fish
-
-# System-wide (requires root)
-mdvdb completions fish > /usr/share/fish/vendor_completions.d/mdvdb.fish
 ```
 
-Fish automatically loads completions from these directories -- no additional configuration is needed.
-
-### Load Immediately (Current Session)
-
-To use completions in the current session:
+Fish loads files from that directory automatically. For the current session only:
 
 ```fish
 mdvdb completions fish | source
 ```
 
-### What You Get
-
-Fish completions provide rich descriptions for all subcommands and flags:
-
-- Subcommands with descriptions: `mdvdb <Tab>` shows all commands with tooltips
-- Global flags: `--verbose`, `--root`, `--json`, `--no-color` available on every subcommand
-- Search flags: `--limit`, `--filter`, `--mode`, `--semantic`, `--lexical`, `--path`, `--decay`, `--boost-links`, `--hops`, `--expand`, and more
-- Shard actions plus `--shard` on search, tree, info, schema, collection, clusters, graph, and
-  module commands. Graph completion permits a descendant `--path` together with `--shard`.
-- Init flags: `--global`
-- Completions shell types: `bash`, `zsh`, `fish`, `power-shell`
-
 ## PowerShell
 
-### Install Completions
-
-Add the completion script to your PowerShell profile:
+Load completions for the current session:
 
 ```powershell
-# Generate and append to your PowerShell profile
-mdvdb completions power-shell >> $PROFILE
+mdvdb completions power-shell | Out-String | Invoke-Expression
 ```
 
-If your profile file doesn't exist yet, create it first:
+For persistent use, generate a separate script and dot-source it from `$PROFILE`:
 
 ```powershell
-# Create profile if needed
-if (!(Test-Path -Path $PROFILE)) {
-    New-Item -ItemType File -Path $PROFILE -Force
-}
-
-# Append completions
-mdvdb completions power-shell >> $PROFILE
+$profileDir = Split-Path $PROFILE
+New-Item -ItemType Directory -Force $profileDir | Out-Null
+$completionPath = Join-Path $profileDir "mdvdb-completions.ps1"
+mdvdb completions power-shell | Set-Content $completionPath
+Add-Content $PROFILE ". `"$completionPath`""
 ```
 
-### Load Immediately (Current Session)
+Regenerate `mdvdb-completions.ps1` after upgrading instead of appending duplicate completer blocks
+to the profile.
 
-To use completions in the current session without restarting PowerShell:
+## Verify
 
-```powershell
-mdvdb completions power-shell | Invoke-Expression
+After loading the script, type `mdvdb ` and request completion. The list should include newer
+surfaces such as:
+
+```text
+embedding  info  shards  collection  modules  graph
 ```
 
-### What You Get
-
-PowerShell completions use `Register-ArgumentCompleter` to provide tab completion for all subcommands with tooltips. Pressing `Tab` or `Ctrl+Space` shows available subcommands with their descriptions.
-
-## Verifying Completions
-
-After installing completions for your shell, verify they work:
-
-1. Open a new terminal session (or source the completions in your current session)
-2. Type `mdvdb ` and press `Tab`
-3. You should see a list of available subcommands
-
-If completions don't appear:
-
-- **Bash**: Ensure `bash-completion` is installed (`apt install bash-completion` or `brew install bash-completion@2`)
-- **Zsh**: Ensure `compinit` is called in your `.zshrc` and the `_mdvdb` file is in `$fpath`
-- **Fish**: Ensure the file is in `~/.config/fish/completions/` with a `.fish` extension
-- **PowerShell**: Ensure your `$PROFILE` script is not blocked by execution policy (`Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`)
-
-## Updating Completions
-
-When you update mdvdb to a new version, regenerate the completions to pick up any new commands or flags:
+You can also inspect the generated script directly:
 
 ```bash
-# Bash
-mdvdb completions bash > ~/.local/share/bash-completion/completions/mdvdb
-
-# Zsh
-mdvdb completions zsh > ~/.zsh/completions/_mdvdb && rm -f ~/.zcompdump
-
-# Fish
-mdvdb completions fish > ~/.config/fish/completions/mdvdb.fish
-
-# PowerShell (replace the block in your $PROFILE)
+mdvdb completions zsh | less
 ```
 
-## Related
+If completion does not appear, first confirm the generated output is non-empty, then check the
+shell-specific loader (`bash-completion`, Zsh `compinit`, Fish's completion directory, or the
+PowerShell profile execution policy).
 
-- [Installation](./installation.md) -- Install mdvdb on your system
-- [Quick Start](./quickstart.md) -- Get started with mdvdb in 5 minutes
-- [Command Reference](./commands/index.md) -- Browse all available commands
-- [Configuration](./configuration.md) -- Configure mdvdb behavior and environment variables
+## Related pages
+
+- [Command Reference](./commands/index.md) -- All commands and options
+- [Installation](./installation.md) -- Install or update mdvdb
+- [Configuration](./configuration.md) -- Project, user, and shell configuration

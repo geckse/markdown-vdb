@@ -6,21 +6,30 @@ category: "concepts"
 
 # Link Graph
 
-mdvdb automatically extracts links from your markdown files, builds a directed link graph, and uses it to enhance search results. The link graph powers backlink discovery, orphan detection, multi-hop search boosting, graph context expansion, and semantic edge embeddings.
+mdvdb builds one directed graph from body links and whole-value frontmatter Relations. The graph
+powers backlink discovery, orphan detection, multi-hop search boosting, graph context expansion,
+and visualization. Body links can additionally produce semantic edge embeddings from their
+surrounding paragraph context.
 
 ## Overview
 
-When files are ingested, mdvdb parses every Markdown link (`[text](target.md)`) and wikilink (`[[target]]`) to build a graph of relationships between documents. This graph is stored in the index and used during search to boost related documents and expand results with contextual information from linked files.
+During ingestion, mdvdb parses Markdown links and wikilinks from the body, plus link-shaped strings
+and string-list elements from top-level frontmatter. Frontmatter entries remain attributable to
+their originating field, so consumers can distinguish an authored body link from a Relation such as
+`client: clients/acme.md`.
 
 ```mermaid
 flowchart TD
-    INGEST["Ingest Markdown Files"] --> PARSE["Parse Links<br/>(pulldown-cmark)"]
-    PARSE --> RESOLVE["Resolve Targets<br/>(relative paths, .md extension)"]
-    RESOLVE --> DEDUP["Deduplicate &<br/>Remove Self-Links"]
+    INGEST["Ingest Markdown Files"] --> BODY["Parse Body Links<br/>(pulldown-cmark)"]
+    INGEST --> FM["Extract Whole-Value<br/>Frontmatter Relations"]
+    BODY --> RESOLVE["Resolve Body Targets<br/>(relative paths, .md extension)"]
+    FM --> RELRESOLVE["Resolve Relation Targets<br/>(root, field-target, source rules)"]
+    RESOLVE --> DEDUP["Deduplicate by target + field<br/>& Remove Self-Links"]
+    RELRESOLVE --> DEDUP
     DEDUP --> GRAPH["Build Forward<br/>Link Graph"]
     GRAPH --> BACK["Compute Backlinks<br/>(inverted index)"]
-    GRAPH --> EDGES["Build Semantic Edges<br/>(paragraph context)"]
-    EDGES --> EMBED_E["Embed Edge Contexts<br/>(OpenAI/Ollama)"]
+    BODY --> EDGES["Build Semantic Edges<br/>(paragraph context)"]
+    EDGES --> EMBED_E["Embed Edge Contexts<br/>(configured provider)"]
     EMBED_E --> CLUSTER_E["Cluster Edges<br/>(K-means)"]
 
     GRAPH --> STORE["Store in Index"]
@@ -28,24 +37,31 @@ flowchart TD
     EMBED_E --> STORE
     CLUSTER_E --> STORE
 
-    style INGEST fill:#e3f2fd
-    style STORE fill:#c8e6c9
+    style INGEST fill:#e3f2fd,color:#111827
+    style STORE fill:#c8e6c9,color:#111827
 ```
 
 ## Link Extraction
 
-During ingestion, mdvdb uses `pulldown-cmark` to identify all links in each markdown file. Both standard Markdown links and wikilinks are supported:
+Body links are parsed with `pulldown-cmark`. Top-level frontmatter strings and string-list elements
+are also considered when the entire value is link-shaped:
 
-| Syntax | Example | Type |
-|--------|---------|------|
-| Standard link | `[user guide](./guide.md)` | Markdown |
-| Link with fragment | `[setup](guide.md#installation)` | Markdown (fragment stripped) |
-| Wikilink | `[[guide]]` | Wikilink |
-| Relative path | `[API](../api/reference.md)` | Markdown |
+| Location | Syntax | Example |
+|----------|--------|---------|
+| Body | Standard Markdown | `[user guide](./guide.md)` |
+| Body | Link with fragment | `[setup](guide.md#installation)` |
+| Body | Wikilink | `[[guide]]` |
+| Frontmatter | Bare Markdown path | `client: clients/acme.md` |
+| Frontmatter | Quoted wikilink | `client: "[[clients/acme]]"` |
+| Frontmatter | Markdown link | `client: "[Acme](clients/acme.md)"` |
+
+Frontmatter values with explicit non-Markdown extensions are physical files, not Relations.
+Fields declared as `field_type: file` and computed Formula/Lookup/Rollup outputs are also excluded
+from the graph. See [Relations](./relations.md) for value classification and target-folder rules.
 
 ### Link Resolution
 
-Raw link targets are resolved relative to the source file's directory:
+Body link targets are resolved relative to the source file's directory:
 
 1. **Strip fragments** -- `guide.md#installation` becomes `guide.md`.
 2. **Normalize separators** -- backslashes are converted to forward slashes.
@@ -54,18 +70,32 @@ Raw link targets are resolved relative to the source file's directory:
 
 For example, a link `[ref](../api/auth)` in `docs/guides/setup.md` resolves to `docs/api/auth.md`.
 
+A frontmatter Relation containing `/` tries a collection-root-relative path first and then a
+source-directory-relative fallback. A simple name uses its overlay-declared `target:` folder when
+present, otherwise the source directory. Extensionless Relation targets receive the Markdown
+extension during resolution.
+
 ### Deduplication
 
-Within a single file, duplicate links to the same target are deduplicated -- only the first occurrence is kept. Self-links (a file linking to itself) are excluded entirely.
+Deduplication uses `(target, field)`:
+
+- repeated body links to one target keep the first body occurrence;
+- repeated values in the same Relation field keep the first occurrence;
+- a body link and a Relation to the same target coexist; and
+- two different Relation fields pointing to the same target coexist.
+
+Empty targets and self-links are excluded on both paths.
 
 ## The Link Graph
 
 The link graph is a directed graph where:
 
 - **Nodes** are markdown files (identified by relative path).
-- **Edges** are links from one file to another.
+- **Edges** are body links or frontmatter Relations from one file to another.
 
-The graph is stored as a **forward adjacency map**: for each source file, a list of `LinkEntry` records containing the target path, link text, line number, and whether it was a wikilink.
+The graph is stored as a **forward adjacency map**. Each `LinkEntry` records the source, target,
+display text, wikilink flag, and an always-serialized `field`. Body links use `field: null` and a
+1-based `line_number`; frontmatter Relations use their field name and the `line_number: 0` sentinel.
 
 ### Sample Link Graph
 
@@ -80,13 +110,13 @@ graph LR
     CONFIG -->|"environment vars"| INSTALL
     USERS -->|"see also"| API
 
-    style README fill:#e3f2fd
-    style QUICK fill:#e3f2fd
-    style API fill:#fff9c4
-    style AUTH fill:#fff9c4
-    style USERS fill:#fff9c4
-    style CONFIG fill:#c8e6c9
-    style INSTALL fill:#c8e6c9
+    style README fill:#e3f2fd,color:#111827
+    style QUICK fill:#e3f2fd,color:#111827
+    style API fill:#fff9c4,color:#111827
+    style AUTH fill:#fff9c4,color:#111827
+    style USERS fill:#fff9c4,color:#111827
+    style CONFIG fill:#c8e6c9,color:#111827
+    style INSTALL fill:#c8e6c9,color:#111827
 ```
 
 In this example:
@@ -97,7 +127,9 @@ In this example:
 
 ## Backlinks
 
-Backlinks are the inverse of the forward link graph. If file A links to file B, then B has a backlink from A. mdvdb computes backlinks automatically by inverting the forward adjacency map.
+Backlinks are the inverse of the forward graph. If file A has either a body link or a frontmatter
+Relation to file B, then B has a backlink from A. mdvdb computes backlinks by inverting the forward
+adjacency map without discarding the Relation `field`.
 
 ### How Backlinks Work
 
@@ -131,7 +163,9 @@ Each outgoing link is classified as **Valid** (target exists in the index) or **
 
 ## Orphan Detection
 
-An orphan file has **no outgoing links and no incoming links** -- it is completely disconnected from the rest of the knowledge base. Orphans may indicate forgotten or uncategorized content.
+An orphan file has **no outgoing entries and no incoming entries** across both body links and
+frontmatter Relations. A stored outgoing entry counts even when its target is currently broken;
+orphans are nodes with no graph entries at all.
 
 ```bash
 # List all orphan files
@@ -166,8 +200,8 @@ flowchart TD
     DEPTH -->|no| BFS
     DEPTH -->|yes| DONE["Return Neighbor Map<br/>(path -> hop distance)"]
 
-    style SEED fill:#e3f2fd
-    style DONE fill:#c8e6c9
+    style SEED fill:#e3f2fd,color:#111827
+    style DONE fill:#c8e6c9,color:#111827
 ```
 
 ### Depth Clamping
@@ -225,15 +259,15 @@ Graph context expansion fetches chunks from **linked files** and includes them a
 
 ### Expansion Depth and Limit
 
-- **Depth** (`--expand-graph <N>`) -- how many hops to follow from top results. Range: 0-3. Default: 0 (disabled).
+- **Depth** (`--expand <N>`) -- how many hops to follow from top results. Range: 0-3. Default: 0 (disabled).
 - **Limit** (`MDVDB_SEARCH_EXPAND_LIMIT`) -- maximum number of expanded context items. Range: 1-10. Default: 3.
 
 ```bash
 # Expand graph context by 1 hop
-mdvdb search --expand-graph 1 "authentication"
+mdvdb search --expand 1 "authentication"
 
 # Combine with link boosting
-mdvdb search --boost-links --expand-graph 2 "authentication"
+mdvdb search --boost-links --expand 2 "authentication"
 ```
 
 ### JSON Output with Graph Context
@@ -262,14 +296,17 @@ mdvdb search --boost-links --expand-graph 2 "authentication"
 
 ## Semantic Edge Embeddings
 
-Beyond the link structure, mdvdb creates **semantic edge embeddings** that capture the context and meaning of each link. These enable edge-based search and semantic edge boosting.
+For body links, mdvdb can create **semantic edge embeddings** that capture the surrounding
+paragraph's meaning. These enable edge search and semantic edge boosting. Frontmatter Relations
+participate in graph traversal, backlinks, orphan detection, and visualization, but do not have a
+body paragraph to embed and therefore do not produce semantic edges.
 
 ### How Edge Embeddings Work
 
-1. **Extract context** -- for each link, the surrounding paragraph text in the source file is extracted.
+1. **Extract context** -- for each body link, the surrounding paragraph text in the source file is extracted.
 2. **Build edge ID** -- a unique identifier in the format `edge:source.md->target.md@42` (line number disambiguates multiple links between the same files).
 3. **Embed context** -- the paragraph context is sent to the embedding provider, producing a vector that represents the _relationship_ between the source and target.
-4. **Store in HNSW** -- edge embeddings are stored in a separate HNSW index for edge-based search.
+4. **Store in HNSW** -- edge embeddings are stored alongside chunk vectors with `edge:`-prefixed IDs.
 5. **Compute strength** -- cosine similarity between the edge embedding and the target document's embedding gives an edge "strength" score.
 
 ### Edge Clustering
@@ -290,65 +327,77 @@ mdvdb search --edge-search "API authentication"
 mdvdb edges docs/auth.md
 ```
 
-## Neighborhood Exploration
+## Neighborhood Exploration and Visualization
 
-The `mdvdb graph` command provides a tree-structured view of a file's link neighborhood, exploring both outgoing and incoming connections recursively.
-
-### How Neighborhood Exploration Works
-
-Unlike BFS (which produces a flat map), neighborhood exploration builds a **tree structure** with per-branch cycle detection. A file can appear in multiple branches but not twice on the same branch path.
+Use `mdvdb links <file> --depth <N>` for a tree-structured neighborhood rooted at one file. It
+follows outgoing connections and backlinks, clamps depth to 1-3, and prevents cycles per branch:
 
 ```bash
-# Explore 1-hop neighborhood (default)
-mdvdb graph docs/auth.md
+# Direct incoming and outgoing entries with LinkEntry metadata
+mdvdb links docs/auth.md
 
-# Explore 2-hop neighborhood
-mdvdb graph --depth 2 docs/auth.md
-
-# JSON output
-mdvdb graph --depth 2 docs/auth.md --json
+# Two-hop neighborhood tree
+mdvdb links docs/auth.md --depth 2 --json
 ```
 
-Depth is clamped to **1-3**. The result includes:
+Use `mdvdb graph` for visualization-ready graph data rather than a rooted neighborhood. It takes no
+file argument and has no `--depth` option. Document-level output contains body-link and Relation
+edges; chunk-level output contains cross-file similarity edges.
 
-- **Outgoing tree** -- forward links from the file, recursively.
-- **Incoming tree** -- backlinks to the file, recursively.
-- **Counts** -- total unique files and depth levels explored in each direction.
+```bash
+# Whole-collection document graph
+mdvdb graph --json
+
+# Folder projection or independent Shard analysis
+mdvdb graph --path docs/api --json
+mdvdb graph --shard research --json --compact
+
+# Chunk-similarity graph
+mdvdb graph --level chunk --json
+```
+
+`--compact` emits the versioned app wire format and requires `--json`. See
+[`mdvdb graph`](../commands/graph.md) for the full node, edge, Shard-analysis, and compact contracts.
 
 ## Configuration
 
 ### Link Boosting
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_SEARCH_BOOST_LINKS` | `false` | Enable link-graph boosting for search results. When enabled, documents linked to top results receive a score boost. |
-| `MDVDB_SEARCH_BOOST_HOPS` | `1` | Maximum BFS hop depth for link boosting. Range: 1-3. Higher values discover more distant relationships but may introduce noise. |
+| YAML key | Default | Shell override | Description |
+|----------|---------|----------------|-------------|
+| `search.boost_links` | `false` | `MDVDB_SEARCH_BOOST_LINKS` | Boost result files connected to the leading matches. |
+| `search.boost_hops` | `1` | `MDVDB_SEARCH_BOOST_HOPS` | Maximum BFS depth for boosting, from 1 to 3. |
 
 ### Graph Expansion
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_SEARCH_EXPAND_GRAPH` | `0` | Graph context expansion depth. `0` disables expansion. Range: 0-3. When > 0, chunks from linked files are included as supplementary context. |
-| `MDVDB_SEARCH_EXPAND_LIMIT` | `3` | Maximum number of graph context items to return. Range: 1-10. |
+| YAML key | Default | Shell override | Description |
+|----------|---------|----------------|-------------|
+| `search.expand_graph` | `0` | `MDVDB_SEARCH_EXPAND_GRAPH` | Context-expansion depth from 0 to 3; `0` disables expansion. The CLI override is `--expand`. |
+| `search.expand_limit` | `3` | `MDVDB_SEARCH_EXPAND_LIMIT` | Maximum graph-context items, from 1 to 10. |
 
 ### Edge Embeddings
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MDVDB_EDGE_EMBEDDINGS` | `true` | Compute semantic edge embeddings during ingestion. When enabled, each link's surrounding paragraph context is embedded and stored in a separate HNSW index. |
-| `MDVDB_EDGE_BOOST_WEIGHT` | `0.15` | Weight applied to semantic edge similarity when boosting link neighbors. Range: 0.0-1.0. Higher values give more influence to edge semantics during link boosting. |
-| `MDVDB_EDGE_CLUSTER_REBALANCE` | `50` | Number of new edges before triggering edge cluster rebalancing. |
+| YAML key | Default | Shell override | Description |
+|----------|---------|----------------|-------------|
+| `index.edge_embeddings` | `true` | `MDVDB_EDGE_EMBEDDINGS` | Embed body-link paragraph contexts during ingestion. |
+| `index.edge_boost_weight` | `0.15` | `MDVDB_EDGE_BOOST_WEIGHT` | Semantic-edge contribution to link boosting, from 0.0 to 1.0. |
+| `index.edge_cluster_rebalance` | `50` | `MDVDB_EDGE_CLUSTER_REBALANCE` | New-edge threshold for rebalancing edge clusters; must be greater than zero. |
 
 ### Setting Values
 
-```bash
-# In .markdownvdb/.config or environment
-MDVDB_SEARCH_BOOST_LINKS=true
-MDVDB_SEARCH_BOOST_HOPS=2
-MDVDB_SEARCH_EXPAND_GRAPH=1
-MDVDB_EDGE_EMBEDDINGS=true
-MDVDB_EDGE_BOOST_WEIGHT=0.15
+```yaml
+# .markdownvdb/config.yaml
+search:
+  boost_links: true
+  boost_hops: 2
+  expand_graph: 1
+index:
+  edge_embeddings: true
+  edge_boost_weight: 0.15
 ```
+
+The YAML keys are canonical. The corresponding `MDVDB_*` variables are shell overrides; ordinary
+settings loaded only from a dotenv file do not override YAML.
 
 ## CLI Commands
 
@@ -357,10 +406,10 @@ MDVDB_EDGE_BOOST_WEIGHT=0.15
 | `mdvdb links <file>` | Show outgoing and incoming links for a file |
 | `mdvdb backlinks <file>` | Show files that link to a given file |
 | `mdvdb orphans` | List files with no links (disconnected from graph) |
-| `mdvdb edges <file>` | Show semantic edges for a file |
-| `mdvdb graph <file>` | Explore link neighborhood as a tree |
+| `mdvdb edges [file]` | Show all semantic edges or filter by source/target file |
+| `mdvdb graph [--level document\|chunk] [--path PATH] [--shard ID] [--compact --json]` | Return visualization-ready graph data |
 | `mdvdb search --boost-links` | Enable link boosting for a search |
-| `mdvdb search --expand-graph <N>` | Include graph context in search results |
+| `mdvdb search --expand <N>` | Include graph context in search results |
 | `mdvdb search --edge-search` | Search by semantic edge embeddings |
 
 ## See Also
