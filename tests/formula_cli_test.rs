@@ -290,7 +290,13 @@ fn ingest_materializes_formula_results_and_queries_use_source_frontmatter() {
 }
 
 #[test]
-fn formula_definition_never_overwrites_or_claims_an_existing_ordinary_key() {
+fn formula_definition_adopts_an_existing_ordinary_key() {
+    // Adopt-by-declaration: the overlay is the user's own statement that
+    // `collision` is computed for this scope, so a pre-existing same-named
+    // value (a stale materialization after an index rebuild, or a manual
+    // value the user has since declared computed) is overwritten and owned.
+    // This is what lets a rebuilt index self-heal instead of refusing
+    // writebacks forever.
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     write_config(root);
@@ -321,33 +327,36 @@ Body
     let diagnostics = first["module_reports"][0]["diagnostics"]
         .as_array()
         .unwrap();
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic["field"] == "collision" && diagnostic["code"] == "writeback_failed"
-    }));
-    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
-
-    let first_document = document(root, "invoices/a.md");
-    assert_decimal(&first_document["frontmatter"]["collision"], "999");
-    assert!(first_document["computed_fields"].get("collision").is_none());
-    assert_eq!(
-        first_document["computed_field_errors"]["collision"]["code"],
-        "writeback_failed"
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic["field"] == "collision"),
+        "adoption must not report a writeback failure: {diagnostics:?}"
+    );
+    let rewritten = fs::read_to_string(&path).unwrap();
+    assert!(
+        rewritten.contains("collision: 10"),
+        "the declared formula value must replace the stale key, got:\n{rewritten}"
     );
     assert!(
-        first_document["computed_field_errors"]["collision"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("does not own")
+        rewritten.contains("price: 1") && rewritten.ends_with("Body\n"),
+        "unrelated YAML and the body must be preserved"
     );
 
+    let first_document = document(root, "invoices/a.md");
+    assert_decimal(&first_document["frontmatter"]["collision"], "10");
+    assert_decimal(&first_document["computed_fields"]["collision"], "10");
+    assert!(first_document["computed_field_errors"]
+        .get("collision")
+        .is_none());
+
+    // Converged state: another ingest must not rewrite the file again.
+    let after_first = fs::read(&path).unwrap();
     let _second = ingest(root);
-    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+    assert_eq!(fs::read(&path).unwrap(), after_first);
     let reopened = document(root, "invoices/a.md");
-    assert_decimal(&reopened["frontmatter"]["collision"], "999");
-    assert_eq!(
-        reopened["computed_field_errors"]["collision"]["code"],
-        "writeback_failed"
-    );
+    assert_decimal(&reopened["frontmatter"]["collision"], "10");
+    assert_decimal(&reopened["computed_fields"]["collision"], "10");
 }
 
 #[test]
@@ -568,4 +577,74 @@ fn modules_cli_lists_validates_runs_and_reports_cached_status() {
     assert_decimal(&a["computed_fields"]["doubled"], "4.6");
     assert_eq!(a["computed_field_errors"], serde_json::json!({}));
     assert_ne!(fs::read(&a_path).unwrap(), a_before);
+}
+
+#[test]
+fn rollup_self_heals_stale_materialized_values_after_index_rebuild() {
+    // The exact trap from the checked-in test vault: markdown files carry
+    // previously materialized rollup values, but the index (and with it all
+    // ownership provenance) is brand new. Adopt-by-declaration must correct
+    // the stale values on the first run and keep propagating afterwards.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    write_config(root);
+    fs::write(
+        root.join(".markdownvdb.schema.yml"),
+        r#"scopes:
+  invoices:
+    fields:
+      client:
+        field_type: relation
+        target: clients
+  clients:
+    fields:
+      invoice_total:
+        field_type: rollup
+        relation_direction: incoming
+        relation_scope: invoices
+        relation_field: client
+        target_field: amount
+        formula: values.reduce((sum, value) => sum + value, 0)
+        result_type: number
+"#,
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("clients")).unwrap();
+    fs::create_dir_all(root.join("invoices")).unwrap();
+    // Stale materialization baked into the file: true total is 8800 + 1500.
+    fs::write(
+        root.join("clients/acme.md"),
+        "---\ntitle: Acme\ninvoice_total: 6300\n---\nAcme body\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("invoices/one.md"),
+        "---\nclient: \"[[clients/acme]]\"\namount: 8800\n---\nInvoice one\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("invoices/two.md"),
+        "---\nclient: \"[[clients/acme]]\"\namount: 1500\n---\nInvoice two\n",
+    )
+    .unwrap();
+
+    ingest(root);
+    let healed = document(root, "clients/acme.md");
+    assert_eq!(
+        healed["frontmatter"]["invoice_total"], 10300,
+        "a fresh index must adopt and correct the stale materialized value"
+    );
+    assert!(healed["computed_field_errors"]
+        .get("invoice_total")
+        .is_none());
+
+    // Ownership is recorded, so a later source edit propagates normally.
+    fs::write(
+        root.join("invoices/one.md"),
+        "---\nclient: \"[[clients/acme]]\"\namount: 6800\n---\nInvoice one\n",
+    )
+    .unwrap();
+    ingest(root);
+    let updated = document(root, "clients/acme.md");
+    assert_eq!(updated["frontmatter"]["invoice_total"], 8300);
 }

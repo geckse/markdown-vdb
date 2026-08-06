@@ -5,7 +5,7 @@ status: active
 contact: jane.doe@acme.example
 domain: acme.example
 invoice_count: 2
-invoice_total: 6300
+invoice_total: 10300
 ---
 
 # Acme Corp

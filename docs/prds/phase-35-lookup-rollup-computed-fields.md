@@ -228,6 +228,24 @@ outputs are excluded from relation extraction, link graph edges, backlinks, and 
 Exclusion uses both the live overlay and persisted per-document ownership so removing or breaking a
 definition cannot briefly turn a stale computed value into a user-authored foreign key.
 
+### Amendment (2026-08): adopt-by-declaration for computed sets
+
+Ownership proof lives only in the index, and the index is disposable by design (unreadable or
+incompatible archives are deleted and rebuilt). The original fail-closed rule — refusing a
+computed `set` to an existing frontmatter key without materialized proof — therefore left every
+previously materialized field permanently stuck after any index rebuild: the stale value kept
+being served while every recompute was refused with `writeback_failed`. Fresh clones of a vault
+whose files carry materialized values (e.g. the checked-in test vault) hit this immediately.
+
+Computed `set` keys are by construction limited to fields the current overlay declares computed
+for the owning path's scope. The overlay is the user's own declaration that the field is computed,
+so an existing same-named value is either a stale materialization whose provenance was lost or a
+manual value the user has since declared computed — in both cases the computed value now wins:
+the write proceeds and records fresh ownership (adopt-by-declaration). Writes into a frontmatter
+block that does not parse as a YAML mapping are still refused (never adopt through ambiguity), a
+`set` equal to the existing value still converges without a write or an ownership claim, and
+`unset` authority is unchanged — only values proven to be owned are ever removed.
+
 ## Execution hooks and consistency
 
 The `lookup_rollup` module is built in and always on. It participates in:

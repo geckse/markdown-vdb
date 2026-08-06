@@ -1979,29 +1979,36 @@ fn apply_frontmatter_patch_inner(
             )));
         }
 
-        let unauthorized_sets: Vec<_> = set
-            .iter()
-            .filter(|(field, value)| {
+        let ambiguous_sets: Vec<_> = set
+            .keys()
+            .filter(|field| {
                 if owned_unset.contains(*field) {
                     return false;
                 }
                 match (&existing_bounds, &existing_values) {
                     (None, _) => false,
-                    (Some(_), Some(existing)) => existing
-                        .get(*field)
-                        .is_some_and(|existing| existing != *value),
-                    // No exact semantic snapshot means there is no proof that
-                    // a same-named key is absent or module-authored.
+                    // Adopt-by-declaration: computed sets only ever target
+                    // fields the current overlay declares computed for this
+                    // path, so an existing same-named value is either a stale
+                    // materialization whose index provenance was lost (the
+                    // index is disposable; rebuilds must self-heal) or a key
+                    // the user has since declared computed. Either way the
+                    // computed value wins and the write records fresh
+                    // ownership. Unset authority stays strict above.
+                    (Some(_), Some(_)) => false,
+                    // A malformed frontmatter block is ambiguous. Never adopt
+                    // through ambiguity: there is no proof a same-named key is
+                    // absent, module-authored, or safely rewritable.
                     (Some(_), None) => true,
                 }
             })
-            .map(|(field, _)| field.clone())
+            .cloned()
             .collect();
-        if !unauthorized_sets.is_empty() {
+        if !ambiguous_sets.is_empty() {
             return Err(Error::Config(format!(
-                "refusing computed write to `{}`: module does not own existing frontmatter key(s) {}",
+                "refusing computed write to `{}`: frontmatter is malformed, cannot verify ownership of key(s) {}",
                 relative_path.display(),
-                unauthorized_sets.join(", ")
+                ambiguous_sets.join(", ")
             )));
         }
     }
@@ -2477,7 +2484,12 @@ mod tests {
     }
 
     #[test]
-    fn module_set_cannot_overwrite_or_claim_an_existing_ordinary_key() {
+    fn module_set_adopts_an_existing_ordinary_key_with_a_different_value() {
+        // Adopt-by-declaration: computed sets only target overlay-declared
+        // fields, so an existing same-named value (stale materialization
+        // after an index rebuild, or a key the user has since declared
+        // computed) is overwritten and ownership is recorded — a rebuilt
+        // index must self-heal instead of serving stale values forever.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("record.md");
         let original = "---\ntitle: Safe\nordinary: user-authored\n---\nBody\n";
@@ -2495,7 +2507,7 @@ mod tests {
             },
         )]);
 
-        let result = apply_frontmatter_patch_with_intent(
+        let adopted = apply_frontmatter_patch_with_intent(
             dir.path(),
             Path::new("record.md"),
             &compute_content_hash(original),
@@ -2503,9 +2515,60 @@ mod tests {
             &BTreeSet::new(),
             &BTreeSet::new(),
             &fields,
+        )
+        .unwrap();
+
+        assert!(adopted.changed);
+        assert!(
+            adopted.materialized_fields.contains("ordinary"),
+            "adoption must record fresh ownership"
+        );
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            rewritten.contains("ordinary: \"computed\""),
+            "got:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("title: Safe") && rewritten.ends_with("Body\n"),
+            "unrelated YAML and the body must be preserved"
+        );
+    }
+
+    #[test]
+    fn module_set_never_adopts_through_malformed_frontmatter() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("record.md");
+        // A frontmatter block that is not a YAML mapping: ambiguous, so there
+        // is no proof a same-named key is absent or safely rewritable.
+        let original = "---\n- just\n- a\n- list\n---\nBody\n";
+        write(&path, original);
+        let fields = HashMap::from([(
+            "computed".to_string(),
+            ComputedFieldEntry {
+                module: "lookup_rollup".to_string(),
+                definition_fingerprint: "definition".to_string(),
+                input_fingerprint: Some("inputs".to_string()),
+                dependency_snapshot: ComputedDependencySnapshot::default(),
+                value_json: Some("2".to_string()),
+                materialized_value_json: None,
+                diagnostic: None,
+            },
+        )]);
+
+        let result = apply_frontmatter_patch_with_intent(
+            dir.path(),
+            Path::new("record.md"),
+            &compute_content_hash(original),
+            &BTreeMap::from([("computed".to_string(), serde_json::json!(2))]),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &fields,
         );
 
-        assert!(matches!(result, Err(Error::Config(message)) if message.contains("does not own")));
+        assert!(
+            matches!(result, Err(Error::Config(message)) if message.contains("malformed")),
+            "ambiguous frontmatter must fail closed"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
         assert!(!computed_intent_path(dir.path()).exists());
     }
