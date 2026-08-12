@@ -14,6 +14,7 @@ category: "guides"
 |------|-------------|
 | [Installation](./installation.md) | Install mdvdb via cargo, GitHub releases, or from source |
 | [Quick Start](./quickstart.md) | Go from zero to your first search in 5 minutes |
+| [Agent Skills](./agent-skills.md) | Use 15 mdvdb workflows with Claude Code, Codex, Gemini CLI, Cursor, or GitHub Copilot |
 | [Configuration](./configuration.md) | Environment variables, config files, and resolution order |
 | [Tesseract desktop companion](./tesseract.md) | Visual editing, tables, graphs, Shards, Topics, and agent tooling |
 | [Shell Completions](./shell-completions.md) | Set up tab completions for bash, zsh, fish, and PowerShell |
