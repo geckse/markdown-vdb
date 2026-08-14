@@ -1626,6 +1626,7 @@ dependencies = [
  "tracing-subscriber",
  "unsafe-libyaml",
  "usearch",
+ "windows-sys 0.60.2",
  "yaml-edit",
  "zstd",
 ]

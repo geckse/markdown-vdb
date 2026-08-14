@@ -17,7 +17,9 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: macos-latest
-          - os: windows-latest
+          # Pin VS 2022: native dependencies and the release builder use the
+          # same stable MSVC generation instead of floating to VS 2026.
+          - os: windows-2022
             no_simsimd: true
             # Define MAP_FAILED — usearch C++ header uses it but doesn't guard for MSVC
             # (mirrors the x86_64-pc-windows-msvc entry in release-cli.yml)

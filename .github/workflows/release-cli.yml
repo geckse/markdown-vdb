@@ -16,7 +16,13 @@ on:
         options:
           - mac
           - linux
+          - win
           - all
+      sign_windows:
+        description: Sign a manual Windows smoke build with Azure Artifact Signing
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -32,7 +38,9 @@ jobs:
           '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"}]}' ||
           github.event_name == 'workflow_dispatch' && inputs.platform == 'linux' &&
           '{"include":[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04","cxx":"g++-12"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm","no_simsimd":true}]}' ||
-          '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"},{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04","cxx":"g++-12"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm","no_simsimd":true},{"target":"x86_64-pc-windows-msvc","os":"windows-latest","no_simsimd":true,"extra_cxxflags":"/DMAP_FAILED=((void*)-1)"}]}'
+          github.event_name == 'workflow_dispatch' && inputs.platform == 'win' &&
+          '{"include":[{"target":"x86_64-pc-windows-msvc","os":"windows-2022","no_simsimd":true,"extra_cxxflags":"/DMAP_FAILED=((void*)-1)"}]}' ||
+          '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"},{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04","cxx":"g++-12"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm","no_simsimd":true},{"target":"x86_64-pc-windows-msvc","os":"windows-2022","no_simsimd":true,"extra_cxxflags":"/DMAP_FAILED=((void*)-1)"}]}'
         ) }}
 
     runs-on: ${{ matrix.os }}
@@ -113,6 +121,81 @@ jobs:
           trap 'rm -rf "$smoke_root"' EXIT
           "$binary" --root "$smoke_root" --json init
           test -f "$smoke_root/.markdownvdb/config.yaml"
+
+      - name: Verify Windows CLI compatibility
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binary = "target/${{ matrix.target }}/release/mdvdb.exe"
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "Missing Windows release binary: $binary"
+          }
+
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { throw 'mdvdb --version failed' }
+          $help = & $binary --help | Out-String
+          if ($LASTEXITCODE -ne 0 -or $help -notmatch 'Markdown Vector Database') {
+            throw 'mdvdb --help did not contain the expected product description'
+          }
+
+          $smokeRoot = Join-Path $env:RUNNER_TEMP "mdvdb-windows-smoke-${{ github.run_id }}"
+          New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
+          & $binary --root $smokeRoot --json init
+          if ($LASTEXITCODE -ne 0) { throw 'mdvdb init failed' }
+          $config = Join-Path $smokeRoot '.markdownvdb/config.yaml'
+          if (-not (Test-Path -LiteralPath $config -PathType Leaf)) {
+            throw "mdvdb init did not create $config"
+          }
+
+      - name: Sign Windows CLI with Azure Artifact Signing
+        if: >-
+          runner.os == 'Windows' &&
+          (github.event_name == 'push' || inputs.sign_windows)
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files: ${{ github.workspace }}\target\${{ matrix.target }}\release\mdvdb.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          exclude-environment-credential: false
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify Windows CLI signature
+        if: >-
+          runner.os == 'Windows' &&
+          (github.event_name == 'push' || inputs.sign_windows)
+        shell: pwsh
+        env:
+          WINDOWS_PUBLISHER_NAME: ${{ vars.WINDOWS_PUBLISHER_NAME }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:WINDOWS_PUBLISHER_NAME) {
+            throw 'WINDOWS_PUBLISHER_NAME repository variable is required for signed builds.'
+          }
+          $binary = "target/${{ matrix.target }}/release/mdvdb.exe"
+          $signature = Get-AuthenticodeSignature -FilePath $binary
+          if ($signature.Status -ne 'Valid') {
+            throw "Invalid Authenticode signature: $($signature.StatusMessage)"
+          }
+          $expectedCommonName = "CN=$env:WINDOWS_PUBLISHER_NAME"
+          if ($signature.SignerCertificate.Subject -notmatch [regex]::Escape($expectedCommonName)) {
+            throw "Expected signer $expectedCommonName; got $($signature.SignerCertificate.Subject)."
+          }
 
       # The certificate and Apple credentials are exposed only to macOS jobs.
       - name: Import Developer ID Application certificate

@@ -27,7 +27,9 @@ fn cli_release_smoke_builds_do_not_publish() {
 fn macos_cli_is_verified_before_it_is_packaged() {
     let workflow = repository_file(".github/workflows/release-cli.yml");
     let signing = workflow.find("- name: Sign and verify macOS CLI").unwrap();
-    let notarization = workflow.find("- name: Notarize and assess macOS CLI").unwrap();
+    let notarization = workflow
+        .find("- name: Notarize and assess macOS CLI")
+        .unwrap();
     let packaging = workflow.find("- name: Package (Unix)").unwrap();
 
     assert!(signing < notarization);
@@ -49,6 +51,30 @@ fn linux_cli_has_dedicated_native_compatibility_smokes() {
     assert!(workflow.contains("readelf --version-info"));
     assert!(workflow.contains("dpkg --compare-versions"));
     assert!(workflow.contains(".markdownvdb/config.yaml"));
+}
+
+#[test]
+fn windows_cli_is_tested_signed_and_verified_before_packaging() {
+    let workflow = repository_file(".github/workflows/release-cli.yml");
+    let compatibility = workflow
+        .find("- name: Verify Windows CLI compatibility")
+        .unwrap();
+    let signing = workflow
+        .find("- name: Sign Windows CLI with Azure Artifact Signing")
+        .unwrap();
+    let verification = workflow
+        .find("- name: Verify Windows CLI signature")
+        .unwrap();
+    let packaging = workflow.find("- name: Package (Windows)").unwrap();
+
+    assert!(workflow.contains("- win"));
+    assert!(workflow.contains(r#""os":"windows-2022""#));
+    assert!(workflow.contains("azure/artifact-signing-action@v2"));
+    assert!(workflow.contains("AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME"));
+    assert!(workflow.contains("Get-AuthenticodeSignature"));
+    assert!(compatibility < signing);
+    assert!(signing < verification);
+    assert!(verification < packaging);
 }
 
 #[test]
@@ -80,18 +106,12 @@ fn notarization_script_completes_the_accepted_flow() {
     let command_directory = temporary_directory.path().join("bin");
     fs::create_dir(&command_directory).unwrap();
 
-    write_executable(
-        command_directory.join("xcrun"),
-        "#!/bin/sh\nexit 0\n",
-    );
+    write_executable(command_directory.join("xcrun"), "#!/bin/sh\nexit 0\n");
     write_executable(
         command_directory.join("plutil"),
         "#!/bin/sh\nif [ \"$2\" = id ]; then echo submission-id; else echo Accepted; fi\n",
     );
-    write_executable(
-        command_directory.join("codesign"),
-        "#!/bin/sh\nexit 0\n",
-    );
+    write_executable(command_directory.join("codesign"), "#!/bin/sh\nexit 0\n");
     let archive = temporary_directory.path().join("submission.zip");
     let binary = temporary_directory.path().join("mdvdb");
     fs::write(&archive, b"archive").unwrap();
@@ -102,7 +122,10 @@ fn notarization_script_completes_the_accepted_flow() {
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/notarize-cli-macos.sh"))
         .arg(&archive)
         .arg(&binary)
-        .env("PATH", format!("{}:{inherited_path}", command_directory.display()))
+        .env(
+            "PATH",
+            format!("{}:{inherited_path}", command_directory.display()),
+        )
         .env("PLUTIL_BIN", command_directory.join("plutil"))
         .env("APPLE_ID", "developer@example.com")
         .env("APPLE_APP_SPECIFIC_PASSWORD", "test-password")

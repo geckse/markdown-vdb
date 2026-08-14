@@ -57,6 +57,9 @@ zstd = "0.13"
 semver = "1"
 # clap_complete = "4" # TODO: re-enable when available offline
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [features]
 default = ["simd"]
 simd = ["usearch/simsimd"]

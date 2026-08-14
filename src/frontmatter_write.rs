@@ -83,6 +83,30 @@ struct ComputedFileIdentity {
     inode: u64,
 }
 
+#[cfg(windows)]
+fn windows_file_identity(file: &std::fs::File) -> Result<ComputedFileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
+    };
+
+    // The volume serial number + file index is Windows' equivalent of a
+    // Unix device + inode pair. Reading it from the already-open temporary
+    // file lets recovery prove that the exact planned file reached the source
+    // name, rather than trusting equal bytes written by another process.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let result = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+    if result == 0 {
+        return Err(Error::Io(std::io::Error::last_os_error()));
+    }
+
+    Ok(ComputedFileIdentity {
+        device: u64::from(info.dwVolumeSerialNumber),
+        inode: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ComputedWriteIntentLog {
     version: u32,
@@ -774,7 +798,12 @@ pub(crate) fn recover_computed_intents(project_root: &Path, index: &Index) -> Re
         #[cfg(unix)]
         let parsed = read_secure_markdown(&secure_root, relative_path)
             .map(|(file, identity)| (file, Some(identity)));
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let parsed = parse_markdown_file(project_root, relative_path).and_then(|file| {
+            let source = std::fs::File::open(project_root.join(relative_path))?;
+            Ok((file, Some(windows_file_identity(&source)?)))
+        });
+        #[cfg(not(any(unix, windows)))]
         let parsed = parse_markdown_file(project_root, relative_path).map(|file| (file, None));
         let (file, current_identity) = match parsed {
             Ok(parsed) => parsed,
@@ -2097,6 +2126,8 @@ fn apply_frontmatter_patch_inner(
         temporary.flush()?;
         temporary.as_file().sync_all()?;
     }
+    #[cfg(windows)]
+    let temporary_identity = windows_file_identity(temporary.as_file())?;
 
     // Rendering and syncing the temporary file can take long enough for an
     // editor save to land after the first CAS check.  Re-read immediately
@@ -2127,9 +2158,9 @@ fn apply_frontmatter_patch_inner(
             relative_path,
             expected_content_hash,
             &rendered_hash,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Some(temporary_identity.clone()),
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             None,
             fields,
         )?;
@@ -2181,6 +2212,15 @@ fn apply_frontmatter_patch_inner(
         temporary
             .persist(&full_path)
             .map_err(|error| Error::Io(error.error))?;
+        #[cfg(windows)]
+        {
+            let persisted = std::fs::File::open(&full_path)?;
+            if windows_file_identity(&persisted)? != temporary_identity {
+                return Err(Error::SourceChanged {
+                    path: relative_path.to_path_buf(),
+                });
+            }
+        }
     }
 
     // The intent remains durable until the matching index generation commits,
