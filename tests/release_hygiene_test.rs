@@ -38,6 +38,19 @@ fn macos_cli_is_verified_before_it_is_packaged() {
 }
 
 #[test]
+fn linux_cli_has_dedicated_native_compatibility_smokes() {
+    let workflow = repository_file(".github/workflows/release-cli.yml");
+
+    assert!(workflow.contains("- linux"));
+    assert!(workflow.contains("ubuntu-22.04-arm"));
+    assert!(!workflow.contains("Install cross (Linux ARM64)"));
+    assert!(workflow.contains("- name: Verify Linux CLI compatibility"));
+    assert!(workflow.contains("readelf --version-info"));
+    assert!(workflow.contains("dpkg --compare-versions"));
+    assert!(workflow.contains(".markdownvdb/config.yaml"));
+}
+
+#[test]
 fn notarization_is_observable_and_bounded() {
     let script = repository_file("scripts/notarize-cli-macos.sh");
 

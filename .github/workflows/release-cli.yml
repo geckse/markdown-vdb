@@ -4,8 +4,8 @@ on:
   push:
     tags:
       - 'v*'
-  # Manual runs are non-publishing smoke builds. They default to the two macOS
-  # architectures so signing and notarization can be verified before tagging.
+  # Manual runs are non-publishing smoke builds. A single platform family can
+  # be verified before tagging without spending time on unrelated targets.
   workflow_dispatch:
     inputs:
       platform:
@@ -15,6 +15,7 @@ on:
         type: choice
         options:
           - mac
+          - linux
           - all
 
 permissions:
@@ -29,7 +30,9 @@ jobs:
         ${{ fromJSON(
           github.event_name == 'workflow_dispatch' && inputs.platform == 'mac' &&
           '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"}]}' ||
-          '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"},{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-latest","use_cross":true,"no_simsimd":true},{"target":"x86_64-pc-windows-msvc","os":"windows-latest","no_simsimd":true,"extra_cxxflags":"/DMAP_FAILED=((void*)-1)"}]}'
+          github.event_name == 'workflow_dispatch' && inputs.platform == 'linux' &&
+          '{"include":[{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm","no_simsimd":true}]}' ||
+          '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"},{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-22.04-arm","no_simsimd":true},{"target":"x86_64-pc-windows-msvc","os":"windows-latest","no_simsimd":true,"extra_cxxflags":"/DMAP_FAILED=((void*)-1)"}]}'
         ) }}
 
     runs-on: ${{ matrix.os }}
@@ -61,24 +64,51 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Install cross (Linux ARM64)
-        if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       - name: Build release binary
         run: |
-          BUILD_CMD="cargo"
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            BUILD_CMD="cross"
-          fi
           if [ "${{ matrix.no_simsimd }}" = "true" ]; then
-            $BUILD_CMD build --locked --release --target ${{ matrix.target }} --no-default-features
+            cargo build --locked --release --target ${{ matrix.target }} --no-default-features
           else
-            $BUILD_CMD build --locked --release --target ${{ matrix.target }}
+            cargo build --locked --release --target ${{ matrix.target }}
           fi
         shell: bash
         env:
           CXXFLAGS: ${{ matrix.extra_cxxflags }}
+
+      - name: Verify Linux CLI compatibility
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/mdvdb"
+          test -x "$binary"
+
+          file "$binary"
+          file "$binary" | grep -F 'ELF 64-bit'
+          "$binary" --version
+          "$binary" --help | grep -F 'Markdown Vector Database'
+
+          dependencies="$(ldd "$binary")"
+          printf '%s\n' "$dependencies"
+          if grep -F 'not found' <<<"$dependencies"; then
+            echo 'Linux release binary has unresolved shared-library dependencies.' >&2
+            exit 1
+          fi
+
+          max_glibc="$(
+            readelf --version-info "$binary" |
+              grep -o 'GLIBC_[0-9.]*' |
+              sort -Vu |
+              tail -1
+          )"
+          test -n "$max_glibc"
+          echo "Maximum required glibc symbol: $max_glibc"
+          dpkg --compare-versions "${max_glibc#GLIBC_}" le '2.35'
+
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          "$binary" --root "$smoke_root" --json init
+          test -f "$smoke_root/.markdownvdb/config.yaml"
 
       # The certificate and Apple credentials are exposed only to macOS jobs.
       - name: Import Developer ID Application certificate
