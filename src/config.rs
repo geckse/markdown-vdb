@@ -1675,15 +1675,36 @@ fn write_yaml_bytes_unlocked(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     temp.as_file()
         .sync_all()
         .map_err(|e| Error::Config(format!("failed to fsync YAML config: {e}")))?;
-    temp.persist(path).map_err(|e| {
-        Error::Config(format!(
-            "failed to replace YAML config '{}': {}",
-            path.display(),
-            e.error
-        ))
-    })?;
+    // Windows can transiently deny replacement while another process that is
+    // starting up still has the destination open. The advisory config lock
+    // serializes writers, but it cannot control those short-lived readers.
+    // Retain the temporary file and retry the same atomic replacement, just
+    // as index persistence does for Windows mmap sharing violations.
+    const REPLACE_BACKOFF_MS: [u64; 5] = [50, 100, 200, 400, 800];
+    for (attempt, backoff_ms) in REPLACE_BACKOFF_MS.iter().enumerate() {
+        match temp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) if attempt + 1 < REPLACE_BACKOFF_MS.len() => {
+                tracing::warn!(
+                    path = %path.display(),
+                    attempt = attempt + 1,
+                    error = %error.error,
+                    "YAML config replacement failed, retrying"
+                );
+                temp = error.file;
+                std::thread::sleep(std::time::Duration::from_millis(*backoff_ms));
+            }
+            Err(error) => {
+                return Err(Error::Config(format!(
+                    "failed to replace YAML config '{}': {}",
+                    path.display(),
+                    error.error
+                )));
+            }
+        }
+    }
 
-    Ok(())
+    unreachable!("YAML config replacement retry loop always returns")
 }
 
 fn read_yaml_value_unlocked(path: &Path) -> Result<serde_yaml::Value, Error> {
