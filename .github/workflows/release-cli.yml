@@ -4,31 +4,33 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual runs are non-publishing smoke builds. They default to the two macOS
+  # architectures so signing and notarization can be verified before tagging.
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform set to build without publishing
+        required: true
+        default: mac
+        type: choice
+        options:
+          - mac
+          - all
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
+    timeout-minutes: 120
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            use_cross: true
-            no_simsimd: true
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            no_simsimd: true
-            # Define MAP_FAILED — usearch C++ header uses it but doesn't guard for MSVC
-            extra_cxxflags: "/DMAP_FAILED=((void*)-1)"
+      matrix: >-
+        ${{ fromJSON(
+          github.event_name == 'workflow_dispatch' && inputs.platform == 'mac' &&
+          '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"}]}' ||
+          '{"include":[{"target":"aarch64-apple-darwin","os":"macos-latest"},{"target":"x86_64-apple-darwin","os":"macos-latest"},{"target":"x86_64-unknown-linux-gnu","os":"ubuntu-latest"},{"target":"aarch64-unknown-linux-gnu","os":"ubuntu-latest","use_cross":true,"no_simsimd":true},{"target":"x86_64-pc-windows-msvc","os":"windows-latest","no_simsimd":true,"extra_cxxflags":"/DMAP_FAILED=((void*)-1)"}]}'
+        ) }}
 
     runs-on: ${{ matrix.os }}
 
@@ -36,10 +38,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify release tag matches Cargo version
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)"
+          test -n "$cargo_version"
+          if [[ "$tag_version" != "$cargo_version" ]]; then
+            echo "Tag v${tag_version} does not match Cargo.toml version ${cargo_version}." >&2
+            exit 1
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
 
       - name: Install cross (Linux ARM64)
         if: matrix.use_cross
@@ -52,44 +72,165 @@ jobs:
             BUILD_CMD="cross"
           fi
           if [ "${{ matrix.no_simsimd }}" = "true" ]; then
-            $BUILD_CMD build --release --target ${{ matrix.target }} --no-default-features
+            $BUILD_CMD build --locked --release --target ${{ matrix.target }} --no-default-features
           else
-            $BUILD_CMD build --release --target ${{ matrix.target }}
+            $BUILD_CMD build --locked --release --target ${{ matrix.target }}
           fi
         shell: bash
         env:
           CXXFLAGS: ${{ matrix.extra_cxxflags }}
+
+      # The certificate and Apple credentials are exposed only to macOS jobs.
+      - name: Import Developer ID Application certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/mdvdb-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+
+          printf '%s' "$CSC_LINK" | openssl base64 -d -A -out "$certificate_path"
+          test -s "$certificate_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 7200 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$CSC_KEY_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          signing_identity="Developer ID Application: Industrial Code & Magic GmbH (${APPLE_TEAM_ID})"
+          identities="$(security find-identity -v -p codesigning "$keychain_path")"
+          printf '%s\n' "$identities"
+          grep -F "$signing_identity" <<<"$identities"
+
+          echo "MACOS_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "MACOS_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+
+      - name: Sign and verify macOS CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/mdvdb"
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --identifier dev.mdvdb.cli \
+            --keychain "$MACOS_KEYCHAIN_PATH" \
+            --sign "$MACOS_SIGNING_IDENTITY" \
+            "$binary"
+
+          signature="$(codesign -dv --verbose=4 "$binary" 2>&1)"
+          grep -F 'Identifier=dev.mdvdb.cli' <<<"$signature"
+          grep -F 'Authority=Developer ID Application: Industrial Code & Magic GmbH' <<<"$signature"
+          grep -F "TeamIdentifier=${APPLE_TEAM_ID}" <<<"$signature"
+          grep -F 'runtime' <<<"$signature"
+          codesign --verify --strict --verbose=4 "$binary"
+
+      - name: Notarize and assess macOS CLI
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARIZATION_TIMEOUT_MINUTES: '90'
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/mdvdb"
+          submission_zip="$RUNNER_TEMP/mdvdb-${{ matrix.target }}-notarization.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$binary" "$submission_zip"
+          scripts/notarize-cli-macos.sh "$submission_zip" "$binary"
 
       # Raw binary names (mdvdb-<target> / mdvdb-<target>.exe) are a CONTRACT with
       # the desktop app's in-app installer: app/src/main/cli-install.ts getAssetName().
       # Do NOT rename them without updating the app.
       - name: Package (Unix)
         if: runner.os != 'Windows'
+        shell: bash
         run: |
-          VERSION=${GITHUB_REF#refs/tags/}
-          ARCHIVE=mdvdb-${VERSION}-${{ matrix.target }}.tar.gz
-          tar -czf "$ARCHIVE" -C target/${{ matrix.target }}/release mdvdb
-          RAW_BINARY=mdvdb-${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/mdvdb "$RAW_BINARY"
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-          echo "RAW_BINARY=$RAW_BINARY" >> "$GITHUB_ENV"
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="smoke-$GITHUB_RUN_NUMBER"
+          fi
+          archive="mdvdb-${version}-${{ matrix.target }}.tar.gz"
+          raw_binary="mdvdb-${{ matrix.target }}"
+          tar -czf "$archive" -C target/${{ matrix.target }}/release mdvdb
+          cp target/${{ matrix.target }}/release/mdvdb "$raw_binary"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+          echo "RAW_BINARY=$raw_binary" >> "$GITHUB_ENV"
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
-        run: |
-          $VERSION = "$env:GITHUB_REF" -replace 'refs/tags/', ''
-          $ARCHIVE = "mdvdb-${VERSION}-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/mdvdb.exe" -DestinationPath $ARCHIVE
-          $RAW_BINARY = "mdvdb-${{ matrix.target }}.exe"
-          Copy-Item "target/${{ matrix.target }}/release/mdvdb.exe" $RAW_BINARY
-          echo "ARCHIVE=$ARCHIVE" >> $env:GITHUB_ENV
-          echo "RAW_BINARY=$RAW_BINARY" >> $env:GITHUB_ENV
         shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { "smoke-$env:GITHUB_RUN_NUMBER" }
+          $archive = "mdvdb-$version-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/mdvdb.exe" -DestinationPath $archive
+          $rawBinary = "mdvdb-${{ matrix.target }}.exe"
+          Copy-Item "target/${{ matrix.target }}/release/mdvdb.exe" $rawBinary
+          echo "ARCHIVE=$archive" >> $env:GITHUB_ENV
+          echo "RAW_BINARY=$rawBinary" >> $env:GITHUB_ENV
 
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+      - name: Upload verified build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          generate_release_notes: true
-          files: |
+          name: cli-${{ matrix.target }}
+          path: |
             ${{ env.ARCHIVE }}
             ${{ env.RAW_BINARY }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Delete temporary signing keychain
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/mdvdb-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/developer-id-application.p12"
+
+  # A tag release is created only after every target built successfully. It is
+  # left as a draft for an explicit final review instead of exposing partial assets.
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: mdvdb ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-assets/*
