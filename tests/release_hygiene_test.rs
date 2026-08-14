@@ -47,7 +47,8 @@ fn notarization_is_observable_and_bounded() {
     assert!(script.contains("notarytool info"));
     assert!(script.contains("Apple notarization submitted:"));
     assert!(script.contains("NOTARIZATION_TIMEOUT_MINUTES"));
-    assert!(script.contains("spctl --assess --type execute"));
+    assert!(script.contains("codesign --verify --strict --verbose=4 --check-notarization"));
+    assert!(!script.contains("spctl --assess"));
 }
 
 #[test]
@@ -77,11 +78,6 @@ fn notarization_script_completes_the_accepted_flow() {
         command_directory.join("codesign"),
         "#!/bin/sh\nexit 0\n",
     );
-    write_executable(
-        command_directory.join("spctl"),
-        "#!/bin/sh\necho 'accepted source=Notarized Developer ID'\n",
-    );
-
     let archive = temporary_directory.path().join("submission.zip");
     let binary = temporary_directory.path().join("mdvdb");
     fs::write(&archive, b"archive").unwrap();
@@ -109,7 +105,7 @@ fn notarization_script_completes_the_accepted_flow() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Apple notarization submitted: submission-id"));
-    assert!(stdout.contains("Apple notarization accepted and Gatekeeper approved"));
+    assert!(stdout.contains("Apple notarization accepted and ticket verified"));
 }
 
 #[cfg(unix)]

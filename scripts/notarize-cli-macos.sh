@@ -111,23 +111,24 @@ if [[ "$accepted" != true ]]; then
   exit 1
 fi
 
-codesign --verify --strict --verbose=4 "$signed_binary"
-
-# A bare Mach-O executable has no container to staple. Gatekeeper retrieves the
-# notarization ticket online, so retry briefly while Apple's result propagates.
-assessment=
+# A bare Mach-O executable has no container to staple and is not an app bundle
+# that spctl can assess. codesign's online check verifies the notarization ticket
+# for the executable itself; retry briefly while Apple's result propagates.
+verification=
 for attempt in 1 2 3 4 5 6; do
-  if assessment=$(spctl --assess --type execute --verbose=4 "$signed_binary" 2>&1); then
-    printf '%s\n' "$assessment"
-    echo "Apple notarization accepted and Gatekeeper approved: $submission_id"
+  if verification=$(
+    codesign --verify --strict --verbose=4 --check-notarization "$signed_binary" 2>&1
+  ); then
+    printf '%s\n' "$verification"
+    echo "Apple notarization accepted and ticket verified: $submission_id"
     exit 0
   fi
   if ((attempt < 6)); then
-    echo "Gatekeeper has not observed ticket $submission_id yet; retrying ($attempt/6)."
+    echo "codesign has not observed ticket $submission_id yet; retrying ($attempt/6)."
     sleep 10
   fi
 done
 
-printf '%s\n' "$assessment" >&2
-echo "Gatekeeper rejected the notarized CLI for submission $submission_id." >&2
+printf '%s\n' "$verification" >&2
+echo "codesign could not verify notarization ticket $submission_id." >&2
 exit 1
