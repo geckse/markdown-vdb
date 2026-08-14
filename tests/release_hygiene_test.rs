@@ -79,7 +79,7 @@ fn windows_cli_is_tested_signed_and_verified_before_packaging() {
 
 #[test]
 fn notarization_is_observable_and_bounded() {
-    let script = repository_file("scripts/notarize-cli-macos.sh");
+    let script = repository_file("scripts/notarize-cli-macos.sh").replace("\r\n", "\n");
 
     assert!(script.starts_with("#!/usr/bin/env bash\nset -euo pipefail"));
     assert!(script.contains("notarytool submit"));
