@@ -43,6 +43,7 @@ fn linux_cli_has_dedicated_native_compatibility_smokes() {
 
     assert!(workflow.contains("- linux"));
     assert!(workflow.contains("ubuntu-22.04-arm"));
+    assert!(workflow.contains(r#""cxx":"g++-12""#));
     assert!(!workflow.contains("Install cross (Linux ARM64)"));
     assert!(workflow.contains("- name: Verify Linux CLI compatibility"));
     assert!(workflow.contains("readelf --version-info"));
